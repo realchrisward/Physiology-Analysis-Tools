@@ -40,6 +40,8 @@ def beatcaller(
     min_RR = 100,
     ecg_invert = False,
     ecg_filter = True,
+    ecg_filt_order = 2,
+    ecg_filt_cutoff = 5,
     abs_thresh = None,
     perc_thresh = None,
     
@@ -70,10 +72,10 @@ def beatcaller(
     
     if ecg_filter:
         voltage = basic_filter(
-            2,
+            ecg_filt_order,
             voltage,
             fs = sampling_frequency,
-            cutoff = 0.1,
+            cutoff = ecg_filt_cutoff,
             output='sos'
         )
         
@@ -86,6 +88,8 @@ def beatcaller(
         threshold = pandas.Series(voltage).quantile(perc_thresh/100)
     if abs_thresh:
         threshold = abs_thresh
+        
+    print(f'beat detection threshold: {threshold}')
         
     # Identify peaks in the ECG signal; adjust parameters as necessary for your data
     peaks,_ = scipy.signal.find_peaks(

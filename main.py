@@ -449,11 +449,13 @@ class MainWindow(QtWidgets.QMainWindow):
         
         print(f'searching for beats in {self.voltage_column} by self.time_column')
         pklgzip_config = {
-            'min_RR' : 100,
+            'min_RR' : 60,
             'ecg_invert' : False,
             'ecg_filter' : True,
+            'ecg_filt_order' : 2,
+            'ecg_filt_cutoff' : 5,
             'abs_thresh' : None,
-            'perc_thresh' : 90,
+            'perc_thresh' : 97,
             
         }
         
