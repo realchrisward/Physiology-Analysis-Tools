@@ -29,7 +29,7 @@ def basic_filter(
         btype='highpass',
         output='sos'    
     )
-    filtered_data = scipy.signal.sosfilt(sos,signal)
+    filtered_data = scipy.signal.sosfiltfilt(sos,signal)
     
     return filtered_data
     
