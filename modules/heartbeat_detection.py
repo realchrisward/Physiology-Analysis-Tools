@@ -16,14 +16,16 @@ import numpy
 # %% define functions
 
 def basic_filter(
+    order,
     signal,
-    fs,
-    cutoff,
-    output   
+    fs = 1000,
+    cutoff = 5,
+    output = 'sos'  
 ):
     sos = scipy.signal.butter(
-        1,
+        order,
         cutoff,
+        fs=fs,
         btype='highpass',
         output='sos'    
     )
@@ -68,6 +70,7 @@ def beatcaller(
     
     if ecg_filter:
         voltage = basic_filter(
+            2,
             voltage,
             fs = sampling_frequency,
             cutoff = 0.1,
@@ -100,11 +103,14 @@ def beatcaller(
     # Calculate heart rate from rr intervals
     heart_rates = [60/ri for ri in rr_intervals]
     
+    ones = [1 for ri in rr_intervals]
+    
     # Prepare dataframe to return
     beat_df = pandas.DataFrame({
         'ts': timestamps_peaks[:-1], # Exclude the last timestamp
         'RR': rr_intervals,
-        'HR': heart_rates
+        'HR': heart_rates,
+        'beats' : ones
         })
    
     return beat_df 
