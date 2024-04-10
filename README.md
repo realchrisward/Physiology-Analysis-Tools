@@ -32,6 +32,8 @@ https://github.com/realchrisward/Physiology-Analysis-Tools/
     Physiology Analysis Tools
     Copyright (C) 2023  
     Christopher Scott Ward.
+    with contributions from the IMPC Cardiovascular and Metabolism 
+    Working Group.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
