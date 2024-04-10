@@ -1,6 +1,9 @@
 # Physiology-Analysis-Tools
 Tools for analysis and visualization of physiological signals (ECG, EEG, EMG, BP, Plethysmography, Pneumotachography, Video, ...)
 
+This software was driven by efforts of the Cardiovascular and Metabolism Working Group of the International Mouse Phenotyping Consortium. 
+It is intended to be a Free and Open Source Software Solution to aid in the analysis of physiological signals.
+
 # What is it?
 Physiology-Analysis-Tools is a toolkit for analysis and visualization of physiological signals which may have been acquired by a variety of vendors/equipment. 
  * The signals that are intended to be processed include:
