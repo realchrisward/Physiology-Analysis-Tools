@@ -329,7 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.data = None
         for i in extract_tools:
-            if not self.data:
+            if self.data is None:
                 try:
                     self.data = i['module'].SASSI_extract(
                         self.current_filepath
