@@ -320,7 +320,7 @@ def merge_signal_data_pieces(df_list):
                 - df_list[0]["ts"][1]
             )
         else:
-            ts_minus = 0
+            ts_minus = df_list[piece_number]["ts"].min()
             ts_add = 0
         df_list[piece_number].loc[:, "ts"] = (
             df_list[piece_number]["ts"] + ts_add - ts_minus
