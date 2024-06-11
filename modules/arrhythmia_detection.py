@@ -18,8 +18,8 @@ import numpy
 class Settings():
     def __init__(self):
         self.bradycardia_absolute_hr = 300
-        self.tachycardia_absolute_hr = 750
-        self.skipped_beat_multiple_rr = 2
+        self.tachycardia_absolute_hr = 850 # need different thresholds for anesth vs awake
+        self.skipped_beat_multiple_rr = 1.5
 
 
         
@@ -29,8 +29,8 @@ def call_bradycardia_absolute(df,rr_column_name,threshold):
 def call_tachycardia_absolute(df,rr_column_name,threshold):
     return df[rr_column_name] <= threshold
     
-def call_skipped_beat_multiple(df,rr_column_name,threshold):
-    df[rr_column_name].diff()/df[rr_column_name] >= threshold
+def call_skipped_beat_multiple(df,rr_column_name,ts_column_name,threshold): #!!! this needs tuning
+    return df[ts_column_name].diff()/df[rr_column_name] >= threshold
 
     
 def call_arrhythmias(df,settings):
@@ -43,7 +43,7 @@ def call_arrhythmias(df,settings):
         df, 'RR', 60/settings.tachycardia_absolute_hr    
     )
     df['skipped_beat'] = call_skipped_beat_multiple(
-        df, 'RR', settings.skipped_beat_multiple_rr    
+        df, 'RR','ts', settings.skipped_beat_multiple_rr    
     )
     df['any_arrhythmia'] = df.any(axis=1,bool_only=True)
     

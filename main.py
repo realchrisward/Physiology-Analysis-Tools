@@ -448,7 +448,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         print(f'searching for beats in {self.voltage_column} by self.time_column')
-        pklgzip_config = {
+        anesth_config = {
             'min_RR' : 60,
             'ecg_invert' : False,
             'ecg_filter' : True,
@@ -458,12 +458,26 @@ class MainWindow(QtWidgets.QMainWindow):
             'perc_thresh' : 97,
             
         }
+        ecgenie_config = {
+            'min_RR' : 60,
+            'ecg_invert' : False,
+            'ecg_filter' : True,
+            'ecg_abs_value' : True,
+            'ecg_filt_order' : 2,
+            'ecg_filt_cutoff' : 5,
+            'abs_thresh' : None,
+            'perc_thresh' : 97,
+        }
+        if self.current_filepath[-6:] == 'adicht':
+            config_to_use = anesth_config
+        elif self.current_filepath[-3:] == 'txt':
+            config_to_use = ecgenie_config
         
         self.beat_df = heartbeat_detection.beatcaller(
             self.data,
             time_column = self.comboBox_time_column.currentText(),
             voltage_column = self.listWidget_Signals.currentItem().text(),
-            **pklgzip_config
+            **config_to_use
             )
         
         
