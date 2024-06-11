@@ -39,6 +39,7 @@ def beatcaller(
     time_column = 'time',
     min_RR = 100,
     ecg_invert = False,
+    ecg_abs_value = False,
     ecg_filter = True,
     ecg_filt_order = 2,
     ecg_filt_cutoff = 5,
@@ -67,6 +68,9 @@ def beatcaller(
     if ecg_invert:
         voltage = voltage * -1
     
+    
+    if ecg_abs_value:
+        voltage = numpy.abs(voltage)
     
     sampling_frequency = 1/(time[1]-time[0])
     
