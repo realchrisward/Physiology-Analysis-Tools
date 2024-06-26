@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -110,6 +110,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_prev_window.clicked.connect(
             self.action_prev_window
         )
+        self.pushButton_generate_report.clicked.connect(
+            self.action_generate_report
+        )
+        self.pushButton_set_output_dir.clicked.connect(
+            self.action_set_output_dir    
+        )
+        
+        
         self.comboBox_time_column.currentTextChanged.connect(
             self.action_get_start_and_end_time
         )
@@ -522,6 +530,36 @@ class MainWindow(QtWidgets.QMainWindow):
             symbol_brush = (255,0,0),
             symbol_size = 12
             )
+        
+        
+        
+    def action_set_output_dir(self):
+        print('setting output dir')
+        self.output_dir = QFileDialog.getExistingDirectory(
+            caption='select path to save reports'
+        )
+        self.label_output_dir.setText(self.output_dir)
+        
+        
+    
+    def action_generate_report(self):
+        print('generate_report')
+        output_path = os.path.join(
+            self.output_dir,
+            os.path.splitext(
+                os.path.basename(self.current_filepath)
+            )[0] + '.xlsx'
+        )
+        print(output_path)
+        writer=pandas.ExcelWriter(
+            output_path,
+            engine='xlsxwriter'
+        )
+        self.beat_df.to_excel(writer, 'beats', index=False)
+        self.arrhythmia_df.to_excel(writer, 'arrhyth', index=False)
+        writer.close()
+        print('finished')
+        
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
