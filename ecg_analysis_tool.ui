@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>882</width>
-    <height>713</height>
+    <width>901</width>
+    <height>772</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -225,7 +225,7 @@
      <string>auto Y-axis</string>
     </property>
    </widget>
-   <widget class="QPushButton" name="pushButton_5">
+   <widget class="QPushButton" name="pushButton_generate_report">
     <property name="geometry">
      <rect>
       <x>760</x>
@@ -665,14 +665,40 @@
      <double>2.000000000000000</double>
     </property>
    </widget>
+   <widget class="QPushButton" name="pushButton_set_output_dir">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>690</y>
+      <width>111</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>set_output_dir</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_output_dir">
+    <property name="geometry">
+     <rect>
+      <x>160</x>
+      <y>690</y>
+      <width>711</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Output directory</string>
+    </property>
+   </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>882</width>
-     <height>21</height>
+     <width>901</width>
+     <height>26</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">

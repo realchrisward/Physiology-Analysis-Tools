@@ -165,5 +165,6 @@ wcwidth==0.2.6
 webencodings==0.5.1
 whatthepatch==1.0.5
 wrapt==1.15.0
+XlsxWriter==3.2.0
 yapf==0.40.1
 zipp==3.16.2
