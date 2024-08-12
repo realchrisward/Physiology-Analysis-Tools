@@ -251,7 +251,7 @@
      <string>&gt;&gt;&gt;</string>
     </property>
    </widget>
-   <widget class="QPushButton" name="pushButton_Prev_Arrythmia">
+   <widget class="QPushButton" name="pushButton_Prev_Arrhythmia">
     <property name="geometry">
      <rect>
       <x>390</x>
@@ -264,7 +264,7 @@
      <string>&lt;&lt;&lt;</string>
     </property>
    </widget>
-   <widget class="QPushButton" name="pushButton_First_Arrythmia">
+   <widget class="QPushButton" name="pushButton_First_Arrhythmia">
     <property name="geometry">
      <rect>
       <x>340</x>
