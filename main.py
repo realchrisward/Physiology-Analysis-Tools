@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.4"
+__version__ = "0.0.6"
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -83,6 +83,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line = None
         self.beat_markers = None
         self.arrhythmia_markers = None
+        self.current_arrhythmia = None
+        self.current_arrhythmia_index = 0
+        self.quality_score_markers = None
         self.bad_data_markers = None
         self.plotted = {}
         self.known_time_columns = ['ts','time']
@@ -114,6 +117,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_end_of_file.clicked.connect(
             self.action_end_of_file    
         )
+        self.pushButton_Next_Arrhythmia.clicked.connect(
+            self.action_next_arrhythmia
+        )
+        self.pushButton_Prev_Arrhythmia.clicked.connect(
+            self.action_prev_arrhythmia
+        )
+        self.pushButton_First_Arrhythmia.clicked.connect(
+            self.action_first_arrhythmia
+        )
+        self.pushButton_Last_Arrhythmia.clicked.connect(
+            self.action_last_arrhythmia    
+        )
         self.pushButton_next_window.clicked.connect(
             self.action_next_window    
         )
@@ -126,19 +141,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_set_output_dir.clicked.connect(
             self.action_set_output_dir    
         )
-        
-        
-        self.comboBox_time_column.currentTextChanged.connect(
-            self.action_get_start_and_end_time
-        )
-        self.checkBox_auto_y.stateChanged.connect(self.update_graph)
-        self.checkBox_plot_filtered.stateChanged.connect(self.update_graph)
         self.pushButton_zoom_in.clicked.connect(
             self.action_zoom_in
         )
         self.pushButton_zoom_out.clicked.connect(
             self.action_zoom_out
         )
+        
+        self.comboBox_time_column.currentTextChanged.connect(
+            self.action_get_start_and_end_time
+        )
+        self.checkBox_auto_y.stateChanged.connect(self.update_graph)
+        self.checkBox_plot_filtered.stateChanged.connect(self.update_graph)
+        
+
         self.doubleSpinBox_filt_freq.valueChanged.connect(self.action_update_filtered_signals)
         self.doubleSpinBox_filt_order.valueChanged.connect(self.action_update_filtered_signals)
         
@@ -155,6 +171,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.doubleSpinBox_x_window.setValue(15)
         pass
     
+    
+    
     def add_graph(self):
         self.graph = pyqtgraph.PlotWidget()
         self.legend = self.graph.addLegend()
@@ -168,6 +186,23 @@ class MainWindow(QtWidgets.QMainWindow):
         # !!! todo - limit of x (time) to 999999999 maximum
         self.graph.setBackground('w')
         
+        
+        
+    def reset_plot(self):
+        if self.line is not None:
+            print('a line already exists')
+            self.graph.removeItem(self.line)
+        self.line = None
+        
+        if self.beat_markers is not None:
+            print('beat_markers already exist')
+            self.graph.removeItem(self.beat_markers)
+        self.beat_markers = None
+        
+        if self.arrhythmia_markers is not None:
+            print('arrhythmia_markers already exist')
+            self.graph.removeItem(self.arrhythmia_markers)
+        self.arrhythmia_markers = None
         
     
         
@@ -193,6 +228,8 @@ class MainWindow(QtWidgets.QMainWindow):
             signal_column = self.listWidget_Signals.currentItem().text()
         )
         print(f'line is now: {self.line}')
+
+
 
     def add_plot(
         self,
@@ -524,6 +561,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.arrhythmia_markers)
         self.arrhythmia_markers = None
         
+        if self.current_arrhythmia is not None:
+            print('arrhythmia_markers already exist')
+            self.graph.removeItem(self.current_arrhythmia)
+        self.current_arrhythmia = None
+        
         
         self.arrhythmia_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
@@ -531,17 +573,109 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         print(self.arrhythmia_df)
         
+        self.arrhythmia_only_df = self.arrhythmia_df[
+            self.arrhythmia_df.any_arrhythmia
+            ].reset_index()
+        
         self.arrhythmia_markers = self.add_plot(
             source = self.arrhythmia_df,
             filt_source = self.arrhythmia_df,
             time_column = 'ts',
-            signal_column = 'arrhyth',
+            signal_column = 'any_arrhythmia',
             filt_column = 'any_arrhythmia',
             symbol = 't1',
             symbol_pen = (0,0,0),
             symbol_brush = (255,0,0),
             symbol_size = 12
+        )
+        
+        self.current_arrhythmia_index = 0
+        
+        print(self.arrhythmia_only_df)
+        
+        if self.arrhythmia_only_df.shape[0] != 0:
+            
+            self.current_arrhythmia = self.graph.plot(
+                x=[self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']],
+                y=[1],
+                name='current arrhythmia',
+                symbol='star',
+                symbolBrush=(0,0,0),
+                symbolPen=(0,0,0),
+                symbolSize=14
             )
+            
+            # self.current_arrhythmia = self.add_plot(
+            #     source = self.arrhythmia_only_df.iloc[self.current_arrhythmia_index],
+            #     filt_source = self.arrhythmia_only_df.iloc[self.current_arrhythmia_index],
+            #     time_column = 'ts',
+            #     signal_column = 'any_arrhythmia',
+            #     filt_column = 'any_arrhythmia',
+            #     symbol = 'star',
+            #     symbol_pen = (0,0,0),
+            #     symbol_brush = (0,0,0),
+            #     symbol_size = 14
+            # )
+            
+            
+    def action_next_arrhythmia(self):
+        self.current_arrhythmia_index = min(
+            self.current_arrhythmia_index + 1,
+            self.arrhythmia_only_df.shape[0] - 1
+        )
+        
+        self.action_update_current_arrhythmia()
+        
+    
+    
+    def action_prev_arrhythmia(self):
+        self.current_arrhythmia_index = max(
+            self.current_arrhythmia_index - 1,
+            0
+        )
+        
+        self.action_update_current_arrhythmia()
+        
+        
+        
+    def action_first_arrhythmia(self):
+        self.current_arrhythmia_index = 0
+        
+        self.action_update_current_arrhythmia()
+        
+        
+        
+    def action_last_arrhythmia(self):
+        self.current_arrhythmia_index = self.arrhythmia_only_df.shape[0] - 1
+        
+        self.action_update_current_arrhythmia()
+    
+    
+    
+    def action_update_current_arrhythmia(self):
+        # update timestamp of marker
+        if self.current_arrhythmia is not None:
+            print('arrhythmia_markers already exist')
+            self.graph.removeItem(self.current_arrhythmia)
+        self.current_arrhythmia = None
+        
+        self.current_arrhythmia = self.graph.plot(
+            x=[self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']],
+            y=[1],
+            name='current arrhythmia',
+            symbol='star',
+            symbolBrush=(0,0,0),
+            symbolPen=(0,0,0),
+            symbolSize=14
+        )
+        
+        # update timestamp range of graph
+        self.doubleSpinBox_x_min.setValue(
+            self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']  
+            - self.doubleSpinBox_x_window.value() / 3
+        )
+        
+        self.update_graph()
         
         
         
