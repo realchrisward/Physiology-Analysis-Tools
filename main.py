@@ -89,7 +89,17 @@ class MainWindow(QtWidgets.QMainWindow):
         
 
     def attach_buttons(self):
+        # menu items
+        self.actionOpen_Files.triggered.connect(self.action_Add_Files)
+        self.actionExit.triggered.connect(QtWidgets.QApplication.instance().quit)
+        self.actionBeat_Detection.triggered.connect(self.action_BeatDetection)
+        self.actionArrhythmia_Analysis.triggered.connect(self.action_Arrhythmia_Analysis)
+        self.actionQuality_Scoring.triggered.connect(self.action_Quality_Scoring)
+        
+        
+        # gui buttons
         self.pushButton_Add_Files.clicked.connect(self.action_Add_Files)
+        self.pushButton_Clear_Files.clicked.connect(self.action_Clear_Files)
         self.listWidget_Files.clicked.connect(self.action_update_selected_file)
         self.listWidget_Signals.clicked.connect(self.add_signal)
         self.pushButton_BeatDetection.clicked.connect(
@@ -311,16 +321,14 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
     def action_Add_Files(self):
-        self.filepath_dict = {
-            os.path.basename(p):p for p in 
-            QFileDialog.getOpenFileNames(
-                self,
-                "Select ECG signal files"
-                )[0]
-            }
-            
+        for p in QFileDialog.getOpenFileNames(
+            self,
+            "Select ECG signal files"
+        )[0]:
+            self.filepath_dict[os.path.basename(p)] = p
         
         print(self.filepath_dict)
+        self.listWidget_Files.clear()
         self.listWidget_Files.addItems(self.filepath_dict)
         
         
@@ -505,6 +513,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # print(self.beat_df)
         
         # !!! need to add integration for center/filetype configs
+        
+    def action_Quality_Scoring(self):
+        print('quality scoring not yet implemented')
+    
     def action_Arrhythmia_Analysis(self):
         print(f'arrhyth if {self.arrhythmia_markers}')
         if self.arrhythmia_markers is not None:

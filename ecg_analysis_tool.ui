@@ -698,7 +698,7 @@
      <x>0</x>
      <y>0</y>
      <width>901</width>
-     <height>26</height>
+     <height>22</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
@@ -715,7 +715,7 @@
     </property>
     <addaction name="actionBeat_Detection"/>
     <addaction name="actionQuality_Scoring"/>
-    <addaction name="actionArhythmia_Analysis"/>
+    <addaction name="actionArrhythmia_Analysis"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
     <property name="title">
@@ -748,9 +748,9 @@
     <string>Quality Scoring</string>
    </property>
   </action>
-  <action name="actionArhythmia_Analysis">
+  <action name="actionArrhythmia_Analysis">
    <property name="text">
-    <string>Arhythmia Analysis</string>
+    <string>Arrhythmia Analysis</string>
    </property>
   </action>
   <action name="actionSettings">
