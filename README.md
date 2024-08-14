@@ -7,7 +7,7 @@ It is intended to be a Free and Open Source Software Solution to aid in the anal
 # What is it?
 Physiology-Analysis-Tools is a toolkit for analysis and visualization of physiological signals which may have been acquired by a variety of vendors/equipment. 
  * The signals that are intended to be processed include:
- - [ ] ECG
+ - [x] ECG
  - [ ] EEG
  - [ ] EMG
  - [ ] Blood Pressure
@@ -16,18 +16,30 @@ Physiology-Analysis-Tools is a toolkit for analysis and visualization of physiol
  - [ ] Pneumotachography
  - [ ] Video
  * The outcome measures that are intended to be identified include:
- - [ ] Heart Rate
+ - [x] Heart Rate
  - [ ] ECG waveform components (PQRST)
- - [ ] Arrhythmia
+ - [x] Arrhythmia
  - [ ] Systolic, Diastolic, and Mean Blood Pressure
  - [ ] Breathing Rate
  - [ ] Activity
 
 # Where to get it?
-https://github.com/realchrisward/Physiology-Analysis-Tools/
+  * Install it with pip!
+    * https://pypi.org/project/physiology-analysis-tools/
+    * <code>pip install physiology_analysis_tools</code>
+
+  * Install it from source code
+    * https://github.com/realchrisward/Physiology-Analysis-Tools/
+
 
 # How to use it?
-...the project is still under development, section to be updated...
+1. download and install <code>pip install physiology_analysis_tools</code>
+1. launch the program <code>python -m physiology_analysis_tools.main</code>
+1. import your signal files (e.g. ECG traces)
+1. detect basic features (e.g. heartbeats from ECG traces)
+1. detect advanced features (e.g. arrhythmias)
+1. export your data report
+1. repeat!
 
 # Licensing
 'Physiology-Analysis-Tools' is currently developed under a 'GPLv3 or later' license, and may be made available under alternative licences upon request and suitable agreement (inquiries for alternative licensing may be directed to christopher.ward@bcm.edu). Compiled and Packaged versions may be made available under different licenses that will be defined at the time of release. 
