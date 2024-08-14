@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "physiology_analysis_tools"
+dynamic = [
+  "version",
+]
+dependencies = [
+  "adi-reader",
+  "numpy",
+  "pandas",
+  "PyQt6",
+  "pyqt6-plugins",
+  "PyQt6-Qt6",
+  "PyQt6-sip",
+  "pyqt6-tools",
+  "pyqtgraph",
+  "PyQtWebEngine",
+  "qt6-applications",
+  "qt6-tools",
+  "scipy",
+  "XlsxWriter"
+]
+
+requires-python = ">= 3.8"
+maintainers = [
+  {name = "Chris Ward", email = "ward.chris.s@gmail.com"}
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["ecg","arrhythmia"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python"
+]
+
+
+[project.urls]
+Repository = "https://github.com/realchrisward/Physiology-Analysis-Tools"
+
+[tool.hatch.version]
+path = "src/physiology_analysis_tools/main.py"
