@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.8"
+__version__ = "0.0.9"
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -94,10 +94,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ), self
         )
         self.label_Title_and_Version.setText(f'ECG Analysis - {__version__}')
-        self.attach_buttons()
-        
-        self.reset_gui()
-        self.add_graph()
         self.plotted_counter = 0
         self.time_column = None
         self.voltage_column = None
@@ -110,6 +106,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_markers = None
         self.plotted = {}
         self.known_time_columns = ['ts','time']
+        self.attach_buttons()
+        
+        self.reset_gui()
+        self.add_graph()
         
 
     def attach_buttons(self):
@@ -196,6 +196,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.doubleSpinBox_x_min.setValue(0)
         self.doubleSpinBox_x_window.setValue(15)
+        
+        self.reset_plot()
         pass
     
     
@@ -231,6 +233,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.arrhythmia_markers)
         self.arrhythmia_markers = None
         
+        if self.current_arrhythmia is not None:
+            print('current arrhythmia_marker already exists')
+            self.graph.removeItem(self.current_arrhythmia)
+        self.current_arrhythmia = None
+        
     
         
     def add_signal(self):
@@ -240,6 +247,8 @@ class MainWindow(QtWidgets.QMainWindow):
             print('a line already exists')
             self.graph.removeItem(self.line)
         self.line = None
+        
+        self.reset_plot()
         
         pen = pyqtgraph.mkPen(
             "Blue",
@@ -420,6 +429,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.data is not None:
             print('data opened')
             self.action_update_available_signals()
+            
+        self.reset_plot()
+        
+        
         
     def action_update_filtered_signals(self):
 
@@ -514,6 +527,19 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.update_graph()
+        
+        
+    # def action_Reset_Beats(self):
+    #     if self.beat_markers is not None:
+    #         print('beat_markers already exist')
+    #         self.graph.removeItem(self.beat_markers)
+    #     self.beat_markers = None
+    #     if self.arrhythmia_markers is not None:
+    #         print('arrhythmia_markers already exist')
+    #         self.graph.removeItem(self.arrhythmia_markers)
+    #     self.arrhythmia_markers = None
+        
+        
         
     def action_BeatDetection(self):
         # self.voltage_column = self.listWidget_Signals.currentItem().text()
