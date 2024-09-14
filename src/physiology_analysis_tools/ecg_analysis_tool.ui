@@ -186,19 +186,6 @@
      <string>Arrhythmia Analysis</string>
     </property>
    </widget>
-   <widget class="QPushButton" name="pushButton_Quality_Scoring">
-    <property name="geometry">
-     <rect>
-      <x>170</x>
-      <y>490</y>
-      <width>121</width>
-      <height>23</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Quality Scoring</string>
-    </property>
-   </widget>
    <widget class="QPushButton" name="pushButton_Edit_Settings">
     <property name="geometry">
      <rect>
@@ -539,22 +526,12 @@
      <string>-</string>
     </property>
    </widget>
-   <widget class="QListWidget" name="listWidget_Signals_2">
+   <widget class="QListWidget" name="listWidget_assign_arrhyth">
     <property name="geometry">
      <rect>
       <x>610</x>
       <y>420</y>
-      <width>111</width>
-      <height>81</height>
-     </rect>
-    </property>
-   </widget>
-   <widget class="QListWidget" name="listWidget_Signals_3">
-    <property name="geometry">
-     <rect>
-      <x>730</x>
-      <y>420</y>
-      <width>141</width>
+      <width>261</width>
       <height>81</height>
      </rect>
     </property>
@@ -572,38 +549,25 @@
      <string>Arrhyth Category</string>
     </property>
    </widget>
-   <widget class="QLabel" name="label_12">
-    <property name="geometry">
-     <rect>
-      <x>730</x>
-      <y>400</y>
-      <width>111</width>
-      <height>16</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Arrhyth List</string>
-    </property>
-   </widget>
    <widget class="QPushButton" name="pushButton_assign_category">
     <property name="geometry">
      <rect>
-      <x>730</x>
+      <x>820</x>
       <y>510</y>
-      <width>141</width>
+      <width>51</width>
       <height>23</height>
      </rect>
     </property>
     <property name="text">
-     <string>Assign Arrhyth Categ</string>
+     <string>Assign</string>
     </property>
    </widget>
-   <widget class="QComboBox" name="comboBox_time_column_2">
+   <widget class="QComboBox" name="comboBox_arrhyth_assign">
     <property name="geometry">
      <rect>
       <x>610</x>
       <y>510</y>
-      <width>111</width>
+      <width>201</width>
       <height>22</height>
      </rect>
     </property>
