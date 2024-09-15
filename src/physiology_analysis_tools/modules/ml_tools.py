@@ -52,7 +52,7 @@ def beatepocher(df,
             e.g To skew the window to 2/3rds before the R peak, submit pre = 2, post =1
 
     Returns:
-    - List of Numpy arrays, containing voltages over course of each window around a heartbeat.
+    - Dictionary of Numpy arrays, containing voltages over course of each window around a heartbeat. Labelled with index where beat was detected
     """
     pre_window = window/2
     post_window = window/2
@@ -65,7 +65,7 @@ def beatepocher(df,
             pre_window = pre/(pre+post) * window
             post_window = post/(pre+post) * window
 
-    epochs_list = []
+    epochs_dict = {}
 
     for index in beat_index:
 
@@ -81,9 +81,9 @@ def beatepocher(df,
 
         beat_epoch = data_epoch[voltage_column].to_numpy()
 
-        epochs_list.append(beat_epoch)
+        epochs_dict[index] = beat_epoch
 
-    return epochs_list
+    return epochs_dict
 
 def detrend_normalise(signal):
     """
