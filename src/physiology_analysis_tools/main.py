@@ -95,9 +95,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_Title_and_Version.setText(f'ECG Analysis - {__version__}')
         self.plotted_counter = 0
-        self.beat_df = None
-        self.output_dir = None
-        # self.beat_df = None # !!! get rid of beat_df...just use beat_df?
         self.time_column = None
         self.voltage_column = None
         self.line = None
@@ -623,14 +620,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_arrhythmia = None
         
         
-        self.beat_df = arrhythmia_detection.call_arrhythmias(
+        self.arrhythmia_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
             arrhythmia_detection.Settings()
         )
-        print(self.beat_df)
+        print(self.arrhythmia_df)
         
-        self.arrhythmia_only_df = self.beat_df[
-            self.beat_df.any_arrhythmia
+        self.arrhythmia_only_df = self.arrhythmia_df[
+            self.arrhythmia_df.any_arrhythmia
             ].reset_index()
         
         self.arrhythmia_markers = self.add_plot(
@@ -681,9 +678,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_update_current_arrhythmia()
         
     def action_confirm_arrhythmia(self):
-        self.beat_df.loc[
+        self.arrhythmia_df.loc[
             (
-                self.beat_df['ts'] 
+                self.arrhythmia_df['ts'] 
                 == self.arrhythmia_only_df.iloc[
                     self.current_arrhythmia_index
                     ]['ts']
@@ -701,9 +698,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_next_arrhythmia()
         
     def action_reject_arrhythmia(self):
-        self.beat_df.loc[
+        self.arrhythmia_df.loc[
             (
-                self.beat_df['ts'] 
+                self.arrhythmia_df['ts'] 
                 == self.arrhythmia_only_df.iloc[
                     self.current_arrhythmia_index
                     ]['ts']
@@ -773,14 +770,6 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def action_generate_report(self):
         print('generate_report')
-        if self.beat_df is None:
-            print('no beat info - did you perform beat and arrhtyhmia detection')
-            return
-        
-        if self.output_dir is None:
-            print('no output dir set')
-            return
-        
         output_path = os.path.join(
             self.output_dir,
             os.path.splitext(
@@ -793,7 +782,7 @@ class MainWindow(QtWidgets.QMainWindow):
             engine='xlsxwriter'
         )
         self.beat_df.to_excel(writer, 'beats', index=False)
-        # self.beat_df.to_excel(writer, 'arrhyth')
+        self.arrhythmia_df.to_excel(writer, 'arrhyth')
         writer.close()
         print('finished')
         
