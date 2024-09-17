@@ -67,8 +67,6 @@ def gather_data(
     graph_width
     
 ):
-    print(f'time col: {time_column}, signal_col: {signal_column}')
-    print(source[signal_column])
     if filt_column:
         source = source[source[filt_column]]
     data_filter = (source[time_column]>=x_min) & \
@@ -98,25 +96,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_Title_and_Version.setText(f'ECG Analysis - {__version__}')
         self.plotted_counter = 0
         self.beat_df = None
-        self.bad_beat_only_df = None
-        self.arrhythmia_only_df = None
         self.output_dir = None
-        
+        # self.beat_df = None # !!! get rid of beat_df...just use beat_df?
         self.time_column = None
         self.voltage_column = None
         self.line = None
         self.beat_markers = None
-        self.bad_start = None
-        self.bad_stop = None
-        self.bad_data_list = []
         self.arrhythmia_markers = None
         self.current_arrhythmia = None
         self.current_arrhythmia_index = 0
-        self.current_beat = None
-        self.current_beat_index = 0
         self.quality_score_markers = None
         self.bad_data_markers = None
-        self.bad_data_mode = False
         self.plotted = {}
         self.known_time_columns = ['ts','time']
         self.attach_buttons()
@@ -144,12 +134,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.pushButton_Arrhythmia_Analysis.clicked.connect(
             self.action_Arrhythmia_Analysis    
-        )
-        self.pushButton_Bad_Data.clicked.connect(
-            self.action_bad_data
-        )
-        self.pushButton_assign_category.clicked.connect(
-            self.assign_arrhyth_category
         )
         self.pushButton_start_of_file.clicked.connect(
             self.action_start_of_file    
@@ -205,8 +189,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.doubleSpinBox_filt_order.valueChanged.connect(self.action_update_filtered_signals)
         
     
-        self.comboBox_arrhyth_assign.addItems(arrhythmia_detection.annot_arrhythmia_categories)
-
     
     def reset_gui(self):
         self.filepath_dict = {}
@@ -235,15 +217,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         # !!! todo - limit of x (time) to 999999999 maximum
         self.graph.setBackground('w')
-
-        # add signal for mouse clicks
-        self.view_box = self.graph.plotItem.vb
-        self.graph.scene().sigMouseClicked.connect(self.action_graph_clicked)
         
         
         
     def reset_plot(self):
-        print('resetting plot')
         if self.line is not None:
             print('a line already exists')
             self.graph.removeItem(self.line)
@@ -263,166 +240,9 @@ class MainWindow(QtWidgets.QMainWindow):
             print('current arrhythmia_marker already exists')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
-
-        if self.current_beat is not None:
-            print('current beat_marker already exists')
-            self.graph.removeItem(self.current_beat)
-        self.current_beat = None
-
-        if self.bad_data_markers is not None:
-            print('bad_data_markers already exist')
-            self.graph.removeItem(self.bad_data_markers)
-        self.bad_data_markers = None
-
-        #self.update_graph()
-
         
-    def assign_arrhyth_category(self):
-        self.beat_df.at[self.current_beat_index,self.comboBox_arrhyth_assign.currentText()] = 2
-        self.beat_df.at[self.current_beat_index,'any_arrhythmia'] = True
-
-        print(self.beat_df)
-
-        self.arrhythmia_only_df = self.beat_df[
-            self.beat_df.any_arrhythmia
-        ].reset_index()
-        
-        if self.arrhythmia_markers is not None:
-            print('arrhythmia_markers already exist')
-            self.graph.removeItem(self.arrhythmia_markers)
-        self.arrhythmia_markers = None
-
-        self.arrhythmia_markers = self.add_plot(
-            source = self.arrhythmia_only_df,
-            filt_source = self.arrhythmia_only_df,
-            time_column = 'ts',
-            signal_column = 'annot_any_arrhythmia',
-            symbol = 't1',
-            symbol_pen = (0,0,0),
-            symbol_brush = (255,0,0),
-            symbol_size = 12
-        )
-        
-        self.current_arrhythmia_index = self.arrhythmia_only_df[
-                self.arrhythmia_only_df['ts']==self.beat_df.iloc[self.current_beat_index]['ts']
-            ].index[0]
-        
-        # self.action_update_current_arrhythmia()
-
-        self.update_graph()
-
     
-    def action_graph_clicked(self,mouseClickEvent):
-        self.clicked_coordinates = self.view_box.mapSceneToView(mouseClickEvent.scenePos())
-        print(f'clicked plot @ x:{self.clicked_coordinates.x()}, y:{self.clicked_coordinates.y()}')
-
-        if not self.bad_data_mode and self.beat_df is not None:
-            if self.clicked_coordinates.x()<self.beat_df.iloc[0]['ts']: return
-            # get index of selected beat
-            self.current_beat_index = self.beat_df[self.beat_df['ts']>=self.clicked_coordinates.x()].index[0]
-            # print(self.beat_df[self.beat_df['ts']>=self.clicked_coordinates.x()]['ts'])
-            # print(self.current_beat_index)
-            # print(self.beat_df.iloc[self.current_beat_index])
-            # update image
-            self.action_update_current_beat()
-        else:
-            # clear old bad data plot
-            if self.bad_data_markers is not None:
-                print('bad_data_markers already exist')
-                self.graph.removeItem(self.bad_data_markers)
-            self.bad_data_markers = None
-
-            if not self.bad_start:
-                self.bad_start = self.clicked_coordinates.x()
-            else:
-                self.bad_stop = self.clicked_coordinates.x()
-                self.pushButton_Bad_Data.setStyleSheet('background-color: None')
-                self.bad_data_mode = False
-                self.bad_data_list.append([self.bad_start,self.bad_stop])
-                # print(self.bad_data_list)
-                self.action_update_bad_data_marks()
-
-
-    
-    def action_update_bad_data_marks(self):
-        if self.beat_df is not None: # !!! need to also run if data marks placed before bead_df made
-            # print(self.beat_df)
-            self.beat_df.loc[:,'bad_data'] = False
-            # print(self.beat_df)
-            for block in self.bad_data_list:
-                self.beat_df.loc[(self.beat_df['ts']>=block[0])&(self.beat_df['ts']<=block[1]),'bad_data'] = True
-            self.bad_beat_only_df = self.beat_df[self.beat_df['bad_data']==True]
-            # print(self.beat_df)
-            # print(self.bad_beat_only_df)
-
-            self.bad_data_markers = self.add_plot(
-                source = self.bad_beat_only_df,
-                filt_source = self.bad_beat_only_df,
-                time_column = 'ts',
-                signal_column = 'bad_data',
-                symbol = 'x',
-                symbol_pen = (200,100,0),
-                symbol_brush = (200,100,0),
-                symbol_size=14
-            )
-
-
-
-    def action_bad_data(self):
-        self.bad_start = None
-        self.bad_stop = None
-        self.bad_data_mode = True
-        self.pushButton_Bad_Data.setStyleSheet('background-color: orange')
-
-
-    def action_update_current_beat(self):
-        # update timestamp of marker
-        if self.current_beat is not None:
-            print('beat_markers already exist')
-            self.graph.removeItem(self.current_beat)
-        self.current_beat = None
-        if self.current_arrhythmia is not None:
-            print('arrythmia markers already exist')
-            self.graph.removeItem(self.current_arrhythmia)
-        self.current_arrhythmia = None
-
-        if self.beat_df.iloc[self.current_beat_index]['annot_any_arrhythmia'] > 0:
-            self.current_arrhythmia_index = self.arrhythmia_only_df[
-                self.arrhythmia_only_df['ts']==self.beat_df.iloc[self.current_beat_index]['ts']
-            ].index[0]
-            self.current_arrhythmia = self.graph.plot(
-                x=[self.beat_df.iloc[self.current_beat_index]['ts']],
-                y=[1.2],
-                name='current arrhythmia',
-                symbol='star',
-                symbolBrush=(0,0,0),
-                symbolPen=(0,0,0),
-                symbolSize=14
-            )
-
-        else:
-
-            self.current_beat = self.graph.plot(
-                x=[self.beat_df.iloc[self.current_beat_index]['ts']],
-                y=[1.2],
-                name='current beat',
-                symbol='star',
-                symbolBrush=(0,0,0),
-                symbolPen=(0,0,0),
-                symbolSize=14
-            )
         
-        # # update timestamp range of graph
-        # self.doubleSpinBox_x_min.setValue(
-            # self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']  
-            # - self.doubleSpinBox_x_window.value() / 3
-        # )
-        
-        self.categorize_beat_arrhythmias()
-
-        self.update_graph()
-
-
     def add_signal(self):
         # remove prior signal if present
         print(f'line if {self.line}')
@@ -558,18 +378,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.doubleSpinBox_x_min.value(),
             self.doubleSpinBox_x_min.value()+self.doubleSpinBox_x_window.value(),padding=0
             )
-        
-    
-    def categorize_beat_arrhythmias(self):
-        category_list = [
-            i for i in arrhythmia_detection.annot_arrhythmia_categories
-            if self.beat_df.iloc[self.current_beat_index][i] > 0
-        ]
-        self.listWidget_assign_arrhyth.clear()
-        self.listWidget_assign_arrhyth.addItems(category_list)
-
-
-
     
     
     def action_zoom_in(self):
@@ -626,13 +434,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_update_available_signals()
             
         self.reset_plot()
-
-        # reset dataframes and containers to defaults as well
-        # !!! might be better to make this a method and reuse for init
-        self.beat_df = None
-        self.bad_beat_only_df = None
-        self.arrhythmia_only_df = None
-        self.bad_data_list = []
         
         
         
@@ -786,8 +587,7 @@ class MainWindow(QtWidgets.QMainWindow):
             time_column = self.comboBox_time_column.currentText(),
             voltage_column = self.listWidget_Signals.currentItem().text(),
             **config_to_use
-        ).reset_index(drop=True)
-        
+            )
         
         
         
@@ -801,9 +601,6 @@ class MainWindow(QtWidgets.QMainWindow):
             symbol_brush = (0,255,0),
             symbol_size = 8
             )
-        
-        if self.bad_data_list !=[]:
-            self.action_update_bad_data_marks()
         
         
         # print(self.beat_df)
@@ -828,8 +625,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.beat_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
-            arrhythmia_detection.Settings(),
-            arrhythmia_detection.arrhythmia_categories
+            arrhythmia_detection.Settings()
         )
         print(self.beat_df)
         
@@ -856,7 +652,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             self.current_arrhythmia = self.graph.plot(
                 x=[self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']],
-                y=[1.2],
+                y=[1],
                 name='current arrhythmia',
                 symbol='star',
                 symbolBrush=(0,0,0),
@@ -941,18 +737,14 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def action_update_current_arrhythmia(self):
         # update timestamp of marker
-        if self.current_beat is not None:
-            print('beat_markers already exist')
-            self.graph.removeItem(self.current_beat)
-        self.current_beat = None
         if self.current_arrhythmia is not None:
-            print('arrythmia markers already exist')
+            print('arrhythmia_markers already exist')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
         
         self.current_arrhythmia = self.graph.plot(
             x=[self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']],
-            y=[1.2],
+            y=[1],
             name='current arrhythmia',
             symbol='star',
             symbolBrush=(0,0,0),
@@ -966,12 +758,6 @@ class MainWindow(QtWidgets.QMainWindow):
             - self.doubleSpinBox_x_window.value() / 3
         )
         
-        self.current_beat_index = self.beat_df[
-                self.beat_df['ts']==self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]['ts']
-            ].index[0]
-        
-        self.categorize_beat_arrhythmias()
-
         self.update_graph()
         
         
@@ -1001,16 +787,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 os.path.basename(self.current_filepath)
             )[0] + '.xlsx'
         )
-
-        bad_data_df = pandas.DataFrame(self.bad_data_list,columns=['start','stop'])
-
         print(output_path)
         writer=pandas.ExcelWriter(
             output_path,
             engine='xlsxwriter'
         )
         self.beat_df.to_excel(writer, 'beats', index=False)
-        bad_data_df.to_excel(writer, 'bad_data_marks', index=False)
+        # self.beat_df.to_excel(writer, 'arrhyth')
         writer.close()
         print('finished')
         
