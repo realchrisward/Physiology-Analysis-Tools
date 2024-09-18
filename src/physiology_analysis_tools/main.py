@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.9"
+__version__ = "0.0.10"
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -16,12 +16,17 @@ from PyQt6.QtCore import Qt
 #     from PyQt5.QtCore import Qt
 import sys
 import os
+import importlib
 # include regular and relative import - 
 # !!! temporary solution - needed for pip distribution
 try:
-    from modules import heartbeat_detection, arrhythmia_detection
+    heartbeat_detection = importlib.import_module('modules.heartbeat_detection','modules')
+    arrhythmia_detection = importlib.import_module('modules.arrhythmia_detection','modules')
 except:
-    from .modules import heartbeat_detection, arrhythmia_detection
+    print('use of relative import')
+    heartbeat_detection = importlib.import_module('modules.heartbeat_detection','.modules')
+    arrhythmia_detection = importlib.import_module('modules.arrhythmia_detection','.modules')
+
 
 import traceback
 from pyqtgraph import PlotWidget, plot
@@ -67,8 +72,8 @@ def gather_data(
     graph_width
     
 ):
-    print(f'time col: {time_column}, signal_col: {signal_column}')
-    print(source[signal_column])
+    # print(f'time col: {time_column}, signal_col: {signal_column}')
+    # print(source[signal_column])
     if filt_column:
         source = source[source[filt_column]]
     data_filter = (source[time_column]>=x_min) & \
@@ -101,6 +106,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_beat_only_df = None
         self.arrhythmia_only_df = None
         self.output_dir = None
+
+        self.DEVMODE = True
         
         self.time_column = None
         self.voltage_column = None
@@ -245,50 +252,49 @@ class MainWindow(QtWidgets.QMainWindow):
     def reset_plot(self):
         print('resetting plot')
         if self.line is not None:
-            print('a line already exists')
+            # print('a line already exists')
             self.graph.removeItem(self.line)
         self.line = None
         
         if self.beat_markers is not None:
-            print('beat_markers already exist')
+            # print('beat_markers already exist')
             self.graph.removeItem(self.beat_markers)
         self.beat_markers = None
         
         if self.arrhythmia_markers is not None:
-            print('arrhythmia_markers already exist')
+            # print('arrhythmia_markers already exist')
             self.graph.removeItem(self.arrhythmia_markers)
         self.arrhythmia_markers = None
         
         if self.current_arrhythmia is not None:
-            print('current arrhythmia_marker already exists')
+            # print('current arrhythmia_marker already exists')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
 
         if self.current_beat is not None:
-            print('current beat_marker already exists')
+            # print('current beat_marker already exists')
             self.graph.removeItem(self.current_beat)
         self.current_beat = None
 
         if self.bad_data_markers is not None:
-            print('bad_data_markers already exist')
+            # print('bad_data_markers already exist')
             self.graph.removeItem(self.bad_data_markers)
         self.bad_data_markers = None
 
-        #self.update_graph()
 
         
     def assign_arrhyth_category(self):
         self.beat_df.at[self.current_beat_index,self.comboBox_arrhyth_assign.currentText()] = 2
         self.beat_df.at[self.current_beat_index,'any_arrhythmia'] = True
 
-        print(self.beat_df)
+        # print(self.beat_df)
 
         self.arrhythmia_only_df = self.beat_df[
             self.beat_df.any_arrhythmia
         ].reset_index()
         
         if self.arrhythmia_markers is not None:
-            print('arrhythmia_markers already exist')
+            # print('arrhythmia_markers already exist')
             self.graph.removeItem(self.arrhythmia_markers)
         self.arrhythmia_markers = None
 
@@ -307,14 +313,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.arrhythmia_only_df['ts']==self.beat_df.iloc[self.current_beat_index]['ts']
             ].index[0]
         
-        # self.action_update_current_arrhythmia()
-
+        
         self.update_graph()
 
     
     def action_graph_clicked(self,mouseClickEvent):
         self.clicked_coordinates = self.view_box.mapSceneToView(mouseClickEvent.scenePos())
-        print(f'clicked plot @ x:{self.clicked_coordinates.x()}, y:{self.clicked_coordinates.y()}')
+        # print(f'clicked plot @ x:{self.clicked_coordinates.x()}, y:{self.clicked_coordinates.y()}')
 
         if not self.bad_data_mode and self.beat_df is not None:
             if self.clicked_coordinates.x()<self.beat_df.iloc[0]['ts']: return
@@ -328,7 +333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             # clear old bad data plot
             if self.bad_data_markers is not None:
-                print('bad_data_markers already exist')
+                # print('bad_data_markers already exist')
                 self.graph.removeItem(self.bad_data_markers)
             self.bad_data_markers = None
 
@@ -378,11 +383,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def action_update_current_beat(self):
         # update timestamp of marker
         if self.current_beat is not None:
-            print('beat_markers already exist')
+            # print('beat_markers already exist')
             self.graph.removeItem(self.current_beat)
         self.current_beat = None
         if self.current_arrhythmia is not None:
-            print('arrythmia markers already exist')
+            # print('arrythmia markers already exist')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
 
@@ -425,9 +430,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def add_signal(self):
         # remove prior signal if present
-        print(f'line if {self.line}')
+        # print(f'line if {self.line}')
         if self.line is not None:
-            print('a line already exists')
+            # print('a line already exists')
             self.graph.removeItem(self.line)
         self.line = None
         
@@ -446,7 +451,7 @@ class MainWindow(QtWidgets.QMainWindow):
             time_column = self.comboBox_time_column.currentText(),
             signal_column = self.listWidget_Signals.currentItem().text()
         )
-        print(f'line is now: {self.line}')
+        # print(f'line is now: {self.line}')
 
 
 
@@ -595,7 +600,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )[0]:
             self.filepath_dict[os.path.basename(p)] = p
         
-        print(self.filepath_dict)
+        # print(self.filepath_dict)
         self.listWidget_Files.clear()
         self.listWidget_Files.addItems(self.filepath_dict)
         
@@ -604,7 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_filepath = self.filepath_dict[
             self.listWidget_Files.currentItem().text()
         ]
-        print(f'now working on file: {self.current_filepath}')
+        # print(f'now working on file: {self.current_filepath}')
         
         extract_tools = [
             i for i in extractors.values() 
@@ -622,7 +627,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     print('unable to open - trying another extractor')
             
         if self.data is not None:
-            print('data opened')
+            # print('data opened')
             self.action_update_available_signals()
             
         self.reset_plot()
@@ -675,22 +680,23 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         if any([c in self.known_time_columns for c in self.data.columns]) and self.comboBox_time_column.currentText() not in self.known_time_columns:    
-            print('time column available')
+            # print('time column available')
             for c in self.data.columns:
                 if c in self.known_time_columns:
-                    print(f'time set as {c}')
+                    # print(f'time set as {c}')
                     self.comboBox_time_column.setCurrentText(c)
                     break
         elif self.comboBox_time_column.currentText() in self.known_time_columns:
-            print('time column found')
+            # print('time column found')
+            pass
         else:
-            print('unknown time column')
+            # print('unknown time column')
             return
         self.action_get_start_and_end_time()
         
         
     def action_get_start_and_end_time(self):
-        print(f' time: {self.comboBox_time_column.currentText()}')
+        # print(f' time: {self.comboBox_time_column.currentText()}')
         self.end_of_file = max(
             self.data[self.comboBox_time_column.currentText()]
         )
@@ -744,12 +750,17 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
     def action_BeatDetection(self):
+        if self.DEVMODE:
+            try:
+                importlib.reload(heartbeat_detection)
+            except:
+                importlib.reload(heartbeat_detection)
         # self.voltage_column = self.listWidget_Signals.currentItem().text()
         
         # self.time_column = self.comboBox_time_column.currentText()
-        print(f'beat if {self.beat_markers}')
+        # print(f'beat if {self.beat_markers}')
         if self.beat_markers is not None:
-            print('beat_markers already exist')
+            # print('beat_markers already exist')
             self.graph.removeItem(self.beat_markers)
         self.beat_markers = None
         
@@ -781,6 +792,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.current_filepath[-3:] == 'txt':
             config_to_use = ecgenie_config
         
+
+
+
+
         self.beat_df = heartbeat_detection.beatcaller(
             self.data,
             time_column = self.comboBox_time_column.currentText(),
@@ -814,14 +829,20 @@ class MainWindow(QtWidgets.QMainWindow):
         print('quality scoring not yet implemented')
     
     def action_Arrhythmia_Analysis(self):
-        print(f'arrhyth if {self.arrhythmia_markers}')
+        if self.DEVMODE:
+            try:
+                importlib.reload(arrhythmia_detection)
+            except:
+                importlib.reload(arrhythmia_detection)
+
+        # print(f'arrhyth if {self.arrhythmia_markers}')
         if self.arrhythmia_markers is not None:
-            print('arrhythmia_markers already exist')
+            # print('arrhythmia_markers already exist')
             self.graph.removeItem(self.arrhythmia_markers)
         self.arrhythmia_markers = None
         
         if self.current_arrhythmia is not None:
-            print('arrhythmia_markers already exist')
+            # print('arrhythmia_markers already exist')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
         
@@ -831,7 +852,7 @@ class MainWindow(QtWidgets.QMainWindow):
             arrhythmia_detection.Settings(),
             arrhythmia_detection.arrhythmia_categories
         )
-        print(self.beat_df)
+        # print(self.beat_df)
         
         self.arrhythmia_only_df = self.beat_df[
             self.beat_df.any_arrhythmia
@@ -850,7 +871,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.current_arrhythmia_index = 0
         
-        print(self.arrhythmia_only_df)
+        # print(self.arrhythmia_only_df)
         
         if self.arrhythmia_only_df.shape[0] != 0:
             
@@ -942,11 +963,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def action_update_current_arrhythmia(self):
         # update timestamp of marker
         if self.current_beat is not None:
-            print('beat_markers already exist')
+            # print('beat_markers already exist')
             self.graph.removeItem(self.current_beat)
         self.current_beat = None
         if self.current_arrhythmia is not None:
-            print('arrythmia markers already exist')
+            # print('arrythmia markers already exist')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
         
@@ -977,7 +998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
     def action_set_output_dir(self):
-        print('setting output dir')
+        # print('setting output dir')
         self.output_dir = QFileDialog.getExistingDirectory(
             caption='select path to save reports'
         )
