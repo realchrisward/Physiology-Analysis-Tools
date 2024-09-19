@@ -1,5 +1,8 @@
 import numpy
 import scipy
+import pandas as pd
+import sklearn.decomposition 
+import sklearn.cluster
 
 def basic_filter(
     order,
@@ -38,7 +41,7 @@ def beatepocher(df,
                 window = 250,
                 **kwargs):
     """
-    Create a list numpy arrays, of the voltage over heartbeats detected in ECG. Takes ECG signal and the timestamps of the heartbeats as input.
+    Create a list numpy arrays, of the voltage over heartbeats detected in ECG, detrended and normalised. Takes ECG signal and the timestamps of the heartbeats as input.
 
     Parameters:
         df - dataframe - Dataframe of filtered data. Usually the return of basic_filter
@@ -81,7 +84,7 @@ def beatepocher(df,
 
         beat_epoch = data_epoch[voltage_column].to_numpy()
 
-        epochs_dict[index] = beat_epoch
+        epochs_dict[index] = detrend_normalise(beat_epoch)
 
     return epochs_dict
 
@@ -99,3 +102,19 @@ def detrend_normalise(signal):
     signal = scipy.signal.detrend(signal)
     dn_signal= signal / numpy.linalg.norm(signal, ord=2) 
     return dn_signal
+
+def beatclusterer(epochs_dict, eps = 0.5, min_samples = 20):
+    """
+    Cluster the beats based on shape in PCA space using DBSCAN (density based clustering)
+
+    Parameters:
+        epochs_dict - Dictionary of Numpy arrays, with kets as index where heartbeat is detected and values being numpy arr of voltages. Output of beatepocher 
+    """
+    df = pd.DataFrame.from_dict(epochs_dict, orient= 'index')
+    PCAobj = sklearn.decomposition.PCA(n_components=2)
+    fit = PCAobj.fit_transform(df)
+    fitDF= pd.DataFrame(data = fit, columns = ['PC1', 'PC2'])
+
+    cluster = sklearn.cluster.DBSCAN(eps = eps, min_samples = min_samples).fit(fitDF)
+    cluster_dict = dict(zip(epochs_dict.keys(), cluster.labels_))
+    return cluster_dict
