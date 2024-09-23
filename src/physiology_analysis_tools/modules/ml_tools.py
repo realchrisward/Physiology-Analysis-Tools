@@ -35,7 +35,7 @@ def basic_filter(
     return filtered_data
 
 
-def beatepocher(df,
+def beatepocher(filtered_data_frame,
                 beat_index,
                 voltage_column = 'ecg', 
                 window = 250,
@@ -44,7 +44,7 @@ def beatepocher(df,
     Create a list numpy arrays, of the voltage over heartbeats detected in ECG, detrended and normalised. Takes ECG signal and the timestamps of the heartbeats as input.
 
     Parameters:
-        df - dataframe - Dataframe of filtered data. Usually the return of basic_filter
+        df - dataframe - Dataframe of filtered data (Usually filtered using `basic_filter` function)
         beat_index - list of ints - List of the indices where the beat was detected. e.g. Index of the dataframe returned by heartbeat_detection.beat_caller
         voltage_column - str - Column name for the voltages in `df`
         window - int - Number of datapoints to include in the window
@@ -76,11 +76,11 @@ def beatepocher(df,
         end = index + round(post_window, 0)
 
 
-        if (start < min(df.index)) or (end > max(df.index)):
+        if (start < min(filtered_data_frame.index)) or (end > max(filtered_data_frame.index)):
             continue
 
 
-        data_epoch = df.loc[start:end]
+        data_epoch = filtered_data_frame.loc[start:end]
 
         beat_epoch = data_epoch[voltage_column].to_numpy()
 
@@ -103,7 +103,7 @@ def detrend_normalise(signal):
     dn_signal= signal / numpy.linalg.norm(signal, ord=2) 
     return dn_signal
 
-def beatclusterer(epochs_dict, eps = 0.5, min_samples = 20):
+def beat_clusterer(epochs_dict, eps = 0.5, min_samples = 20):
     """
     Cluster the beats based on shape in PCA space using DBSCAN (density based clustering)
 
@@ -118,3 +118,24 @@ def beatclusterer(epochs_dict, eps = 0.5, min_samples = 20):
     cluster = sklearn.cluster.DBSCAN(eps = eps, min_samples = min_samples).fit(fitDF)
     cluster_dict = dict(zip(epochs_dict.keys(), cluster.labels_))
     return cluster_dict
+
+
+def call_arrythmias_PCA(filtered_data_df,
+                        beats_df, voltage_column_name,settings):
+    beat_epochs_dict = beatepocher(filtered_data_df, beats_df.index, voltage_column= voltage_column_name,
+                              window=settings.window_size)
+    
+    cluster_dict = beat_clusterer(beat_epochs_dict, eps = settings.eps, min_samples=settings.min_samples)
+
+    cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrythmia"}).astype("bool")
+
+    beats_df = beats_df.join(cluster_df)
+
+    return beats_df
+
+
+class Settings():
+    def __init__(self):
+        self.window_size = 200
+        self.eps = 0.5
+        self.min_samples = 20
