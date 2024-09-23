@@ -120,14 +120,15 @@ def beat_clusterer(epochs_dict, eps = 0.5, min_samples = 20):
     return cluster_dict
 
 
-def call_arrythmias_PCA(filtered_data_df,
+def call_arrhythmias_PCA(filtered_data_df,
                         beats_df, voltage_column_name,settings):
     beat_epochs_dict = beatepocher(filtered_data_df, beats_df.index, voltage_column= voltage_column_name,
                               window=settings.window_size)
     
     cluster_dict = beat_clusterer(beat_epochs_dict, eps = settings.eps, min_samples=settings.min_samples)
 
-    cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrythmia"}).astype("bool")
+    cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
+    cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
 
     beats_df = beats_df.join(cluster_df)
 
