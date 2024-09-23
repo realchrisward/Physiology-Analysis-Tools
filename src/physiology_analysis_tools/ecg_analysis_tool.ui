@@ -31,9 +31,9 @@
     <property name="geometry">
      <rect>
       <x>10</x>
-      <y>521</y>
+      <y>580</y>
       <width>581</width>
-      <height>131</height>
+      <height>100</height>
      </rect>
     </property>
    </widget>
@@ -368,6 +368,29 @@
     </property>
     <property name="text">
      <string>Time</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="arr_label">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>520</y>
+      <width>151</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Arr Detection</string>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="comboBox_arr_method">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>540</y>
+      <width>151</width>
+      <height>22</height>
+     </rect>
     </property>
    </widget>
    <widget class="QDoubleSpinBox" name="doubleSpinBox_x_min">
