@@ -830,15 +830,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
         
-<<<<<<< HEAD
-        
-        self.beat_df = arrhythmia_detection.call_arrhythmias(
-            self.beat_df,
-            arrhythmia_detection.Settings(),
-            arrhythmia_detection.arrhythmia_categories
-        )
-        print(self.beat_df)
-=======
         if  self.comboBox_arr_method.currentText() == "Heuristics":
             
             self.arrhythmia_df = arrhythmia_detection.call_arrhythmias(
@@ -858,7 +849,7 @@ class MainWindow(QtWidgets.QMainWindow):
             print('No Valid detection Method Selected')
 
         print(self.arrhythmia_df)
->>>>>>> 1317741 (Updates to UI to allow for PCA calling)
+
         
         self.arrhythmia_only_df = self.beat_df[
             self.beat_df.any_arrhythmia
