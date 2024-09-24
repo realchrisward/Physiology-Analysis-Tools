@@ -130,13 +130,19 @@ def call_arrhythmias_PCA(filtered_data_df,
     cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
     cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
 
-    beats_df = beats_df.join(cluster_df)
+    # Clear previously assigned arrythmias. e.g if Heuristic model was used first
+
+    for col in beats_df.columns:
+        if col not in ["ts", "RR", "HR", "beats"]:
+            beats_df = beats_df.drop(columns = col)
+
+    beats_df = beats_df.join(cluster_df, how = "inner")
 
     return beats_df
 
 
 class Settings():
     def __init__(self):
-        self.window_size = 200
+        self.window_size = 100
         self.eps = 0.5
         self.min_samples = 20

@@ -832,14 +832,15 @@ class MainWindow(QtWidgets.QMainWindow):
         
         if  self.comboBox_arr_method.currentText() == "Heuristics":
             
-            self.arrhythmia_df = arrhythmia_detection.call_arrhythmias(
-            self.beat_df,
-            arrhythmia_detection.Settings()
+            self.beat_df = arrhythmia_detection.call_arrhythmias(
+                self.beat_df,
+                arrhythmia_detection.Settings(),
+                arrhythmia_detection.arrhythmia_categories
             )
 
         elif self.comboBox_arr_method.currentText() == "Unsupervised":
 
-            self.arrhythmia_df = ml_tools.call_arrhythmias_PCA(
+            self.beat_df = ml_tools.call_arrhythmias_PCA(
                 self.data,
                 self.beat_df, self.listWidget_Signals.currentItem().text(),
                 ml_tools.Settings()
@@ -848,7 +849,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             print('No Valid detection Method Selected')
 
-        print(self.arrhythmia_df)
+        print(self.beat_df)
 
         
         self.arrhythmia_only_df = self.beat_df[
