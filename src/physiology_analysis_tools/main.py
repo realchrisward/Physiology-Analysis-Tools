@@ -119,6 +119,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_mode = False
         self.plotted = {}
         self.known_time_columns = ['ts','time']
+
+        self.beat_settings = {
+            'min_RR' : 60,
+            'ecg_invert' : False,
+            'ecg_filter' : True,
+            'ecg_filt_order' : 2,
+            'ecg_filt_cutoff' : 5,
+            'abs_thresh' : None,
+            'perc_thresh' : 97
+        }
+
         self.arrhythmia_settings = arrhythmia_detection.Settings()
         self.attach_buttons()
         
@@ -758,39 +769,13 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         print(f'searching for beats in {self.voltage_column} by self.time_column')
-        anesth_config = {
-            'min_RR' : 60,
-            'ecg_invert' : False,
-            'ecg_filter' : True,
-            'ecg_filt_order' : 2,
-            'ecg_filt_cutoff' : 5,
-            'abs_thresh' : None,
-            'perc_thresh' : 97,
-            
-        }
-        ecgenie_config = {
-            'min_RR' : 60,
-            'ecg_invert' : False,
-            'ecg_filter' : True,
-            'ecg_abs_value' : True,
-            'ecg_filt_order' : 2,
-            'ecg_filt_cutoff' : 5,
-            'abs_thresh' : None,
-            'perc_thresh' : 97,
-        }
-        if self.current_filepath[-6:] == 'adicht':
-            config_to_use = anesth_config
-        elif self.current_filepath[-3:] == 'txt':
-            config_to_use = ecgenie_config
         
         self.beat_df = heartbeat_detection.beatcaller(
             self.data,
             time_column = self.comboBox_time_column.currentText(),
             voltage_column = self.listWidget_Signals.currentItem().text(),
-            **config_to_use
+            **self.beat_settings
         ).reset_index(drop=True)
-        
-        
         
         
         self.beat_markers = self.add_plot(
@@ -830,7 +815,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.beat_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
-            arrhythmia_detection.Settings(),
+            self.arrhythmia_settings,
             arrhythmia_detection.arrhythmia_categories
         )
         print(self.beat_df)
@@ -1025,52 +1010,111 @@ class SubWindow(QtWidgets.QDialog):
         super().__init__(parent)
         self.settingsOptions = {}
         self.parentFrame = parent
-
-        layout= QtWidgets.QVBoxLayout()
-        list_layout=QtWidgets.QFormLayout()
-        self.label= QtWidgets.QLabel("Settings")
-        list_layout.addWidget(self.label)
         self.setWindowTitle('ECG Analysis - Settings')
-        if parent is not None:
-            settings = parent.arrhythmia_settings
+        
+        outer_layout= QtWidgets.QVBoxLayout()
+        inner_layout = QtWidgets.QHBoxLayout()
 
-            options = {}
+        # Create layout for heartbeat detection
 
-            for k, v in settings.__dict__.items():
+        beat_layout = QtWidgets.QFormLayout()
+        beat_settings = parent.beat_settings
+        beat_options = {}
+
+        for k,v in beat_settings.items():
+            EntryWidget = FlexibleEntryWidget(value = v)
+            beat_options[k] = EntryWidget
+            beat_layout.addRow(k, EntryWidget.entry)
+
+        # Create layout for arrhythmia detection
+
+        arr_layout=QtWidgets.QFormLayout()
+        
+        arr_settings = parent.arrhythmia_settings
+
+        arr_options = {}
+
+        for k, v in arr_settings.__dict__.items():
             
-                spinBox = QtWidgets.QDoubleSpinBox()
+            spinBox = QtWidgets.QDoubleSpinBox()
 
-                options[k] = spinBox
+            arr_options[k] = spinBox
 
-                spinBox.setMinimum(0)
-                spinBox.setMaximum(10000)
-                spinBox.setValue(v)
-                list_layout.addRow(k, spinBox)
+            spinBox.setMinimum(0)
+            spinBox.setMaximum(10000)
+            spinBox.setValue(v)
+            arr_layout.addRow(k, spinBox)
 
+        self.beatSettingsOptions = beat_options
+        self.arrSettingsOptions = arr_options
 
-        self.settingsOptions = options
-
-        layout.addLayout(list_layout)
+        inner_layout.addLayout(beat_layout)
+        inner_layout.addLayout(arr_layout)
 
 
         self.button = QtWidgets.QPushButton('Update Settings')
         self.button.clicked.connect(self.updateSettings)
 
-        layout.addWidget(self.button) 
-        self.setLayout(layout)
+        outer_layout.addLayout(inner_layout)
+        outer_layout.addWidget(self.button) 
+        self.setLayout(outer_layout)
 
     def updateSettings(self):
-        print(self.parentFrame.arrhythmia_settings.__dict__)
+        
+        for k,v in self.beatSettingsOptions.items():
+            self.parentFrame.beat_settings[k] = v.getValues()
 
-        for k,v in self.settingsOptions.items():
+
+        for k,v in self.arrSettingsOptions.items():
             self.parentFrame.arrhythmia_settings.__dict__[k] = v.value()
 
-        print(self.parentFrame.arrhythmia_settings.__dict__)
 
+        print(self.parentFrame.beat_settings, self.parentFrame.arrhythmia_settings.__dict__ )
         self.close()
 
+class FlexibleEntryWidget():
+    """
+    Class to allow for a flexible 'data entry' widget that will adjust the type depending on the input data type
+    This allows for easier building of layouts where the form and format of the input is not known/will change
+    """
+    def __init__(self, value):
+        
+        
+        if value is None:
+            self.type = "NoneType"
+            self.entry = QtWidgets.QLineEdit()
 
+        elif value in (True, False):
+            self.type = "Boolean"
+            self.entry = QtWidgets.QCheckBox()
+            self.entry.setChecked(value)
+            
+        else:
+            self.type = "Numeric"
+            self.entry = QtWidgets.QDoubleSpinBox()
+            self.entry.setMinimum(0)
+            self.entry.setMaximum(1000)
+            self.entry.setValue(value)
 
+    def getValues(self):
+
+        if self.type == "Numeric":
+            value = self.entry.value()
+            return(value)
+        
+        if self.type == "Boolean":
+            value = self.entry.isChecked()
+            return(value)
+        
+        if self.type == "NoneType":
+            value = self.entry.text()
+
+            if value == '':
+                return(None)
+            
+            value = float(value)
+
+            return(value)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
