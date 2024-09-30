@@ -119,6 +119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_mode = False
         self.plotted = {}
         self.known_time_columns = ['ts','time']
+        self.arrhythmia_settings = arrhythmia_detection.Settings()
         self.attach_buttons()
         
         self.reset_gui()
@@ -139,6 +140,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_Clear_Files.clicked.connect(self.action_Clear_Files)
         self.listWidget_Files.clicked.connect(self.action_update_selected_file)
         self.listWidget_Signals.clicked.connect(self.add_signal)
+        self.pushButton_Edit_Settings.clicked.connect(self.action_Edit_Settings)
         self.pushButton_BeatDetection.clicked.connect(
             self.action_BeatDetection
         )
@@ -1013,7 +1015,62 @@ class MainWindow(QtWidgets.QMainWindow):
         bad_data_df.to_excel(writer, 'bad_data_marks', index=False)
         writer.close()
         print('finished')
-        
+
+    def action_Edit_Settings(self):
+        window = SubWindow(parent = self)
+        window.exec()
+
+class SubWindow(QtWidgets.QDialog):
+    def __init__(self, parent = None):
+        super().__init__(parent)
+        self.settingsOptions = {}
+        self.parentFrame = parent
+
+        layout= QtWidgets.QVBoxLayout()
+        list_layout=QtWidgets.QFormLayout()
+        self.label= QtWidgets.QLabel("Settings")
+        list_layout.addWidget(self.label)
+        self.setWindowTitle('ECG Analysis - Settings')
+        if parent is not None:
+            settings = parent.arrhythmia_settings
+
+            options = {}
+
+            for k, v in settings.__dict__.items():
+            
+                spinBox = QtWidgets.QDoubleSpinBox()
+
+                options[k] = spinBox
+
+                spinBox.setMinimum(0)
+                spinBox.setMaximum(10000)
+                spinBox.setValue(v)
+                list_layout.addRow(k, spinBox)
+
+
+        self.settingsOptions = options
+
+        layout.addLayout(list_layout)
+
+
+        self.button = QtWidgets.QPushButton('Update Settings')
+        self.button.clicked.connect(self.updateSettings)
+
+        layout.addWidget(self.button) 
+        self.setLayout(layout)
+
+    def updateSettings(self):
+        print(self.parentFrame.arrhythmia_settings.__dict__)
+
+        for k,v in self.settingsOptions.items():
+            self.parentFrame.arrhythmia_settings.__dict__[k] = v.value()
+
+        print(self.parentFrame.arrhythmia_settings.__dict__)
+
+        self.close()
+
+
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
