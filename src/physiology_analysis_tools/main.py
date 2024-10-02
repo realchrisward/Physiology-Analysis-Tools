@@ -125,6 +125,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_mode = False
         self.plotted = {}
 
+        self.start_of_file = 0
+        self.end_of_file = 0
+
         self.known_time_columns = ["ts", "time"]
 
         self.beat_settings = heartbeat_detection.Settings()
@@ -136,9 +139,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.horizontalScrollBar_Time.setMaximum(100)
 
         self.attach_buttons()
-
-        self.reset_gui()
         self.add_graph()
+        self.reset_gui()
 
     def attach_buttons(self):
         # menu items
@@ -979,7 +981,7 @@ class SettingsWindow(QtWidgets.QDialog):
         beat_settings = parent.beat_settings
         beat_options = {}
 
-        for k, v in beat_settings.items():
+        for k, v in beat_settings.__dict__.items():
             EntryWidget = FlexibleEntryWidget(value=v)
             beat_options[k] = EntryWidget
             beat_layout.addRow(k, EntryWidget.entry)
@@ -1019,13 +1021,13 @@ class SettingsWindow(QtWidgets.QDialog):
     def updateSettings(self):
 
         for k, v in self.beatSettingsOptions.items():
-            self.parentFrame.beat_settings[k] = v.getValues()
+            self.parentFrame.beat_settings.__dict__[k] = v.getValues()
 
         for k, v in self.arrSettingsOptions.items():
             self.parentFrame.arrhythmia_settings.__dict__[k] = v.value()
 
         print(
-            self.parentFrame.beat_settings,
+            self.parentFrame.beat_settings.__dict__,
             self.parentFrame.arrhythmia_settings.__dict__,
         )
         self.close()
