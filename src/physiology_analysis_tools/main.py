@@ -125,6 +125,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_mode = False
         self.plotted = {}
         self.known_time_columns = ["ts", "time"]
+
+        self.horizontalScrollBar_Time.setMinimum(0)
+        self.horizontalScrollBar_Time.setMaximum(100)
+
         self.attach_buttons()
 
         self.reset_gui()
@@ -172,6 +176,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_get_start_and_end_time
         )
 
+        self.doubleSpinBox_x_window.valueChanged.connect(self.update_graph)
+        self.doubleSpinBox_x_min.valueChanged.connect(self.update_graph)
+
         self.checkBox_auto_y.stateChanged.connect(self.update_graph)
         self.checkBox_plot_filtered.stateChanged.connect(self.update_graph)
 
@@ -187,6 +194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comboBox_arrhyth_assign.addItems(
             arrhythmia_detection.annot_arrhythmia_categories
         )
+
+        self.horizontalScrollBar_Time.valueChanged.connect(self.action_scroll_time)
 
     def reset_gui(self):
         self.filepath_dict = {}
@@ -524,6 +533,19 @@ class MainWindow(QtWidgets.QMainWindow):
             padding=0,
         )
 
+        # adjust slider if needed
+        self.horizontalScrollBar_Time.setValue(
+            int(
+                (self.doubleSpinBox_x_min.value() - self.start_of_file)
+                / (
+                    self.end_of_file
+                    - self.start_of_file
+                    - self.doubleSpinBox_x_window.value()
+                )
+                * 100
+            )
+        )
+
     def categorize_beat_arrhythmias(self):
         annotation_columns = [i for i in self.beat_df.columns if i.startswith("annot")]
         category_list = [
@@ -675,6 +697,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.doubleSpinBox_x_min.value() - self.doubleSpinBox_x_window.value(),
             )
         )
+        self.update_graph()
+
+    def action_scroll_time(self):
+        self.doubleSpinBox_x_min.setValue(
+            self.horizontalScrollBar_Time.value()
+            / 100
+            * (
+                self.end_of_file
+                - self.start_of_file
+                - self.doubleSpinBox_x_window.value()
+            )
+            + self.start_of_file
+        )
+
         self.update_graph()
 
     # def action_Reset_Beats(self):
