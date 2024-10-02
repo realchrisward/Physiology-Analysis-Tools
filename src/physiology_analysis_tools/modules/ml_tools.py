@@ -4,6 +4,8 @@ import pandas as pd
 import sklearn.decomposition 
 import sklearn.cluster
 
+__version__ = "0.0.1"
+
 def basic_filter(
     order,
     signal,
@@ -127,19 +129,21 @@ def call_arrhythmias_PCA(filtered_data_df,
     
     cluster_dict = beat_clusterer(beat_epochs_dict, eps = settings.eps, min_samples=settings.min_samples)
 
-    cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
-    cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
-
+    #cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
+    #cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
+    cluster_df = pd.DataFrame.from_dict(cluster_dict,orient="index").rename(columns={0:"abn_cluster"}).astype("bool")
+    cluster_df['annot_abn_cluster'] = cluster_df['abn_cluster'].astype(int)
     # Clear previously assigned arrythmias. e.g if Heuristic model was used first
 
-    for col in beats_df.columns:
-        if col not in ["ts", "RR", "HR", "beats"]:
-            beats_df = beats_df.drop(columns = col)
+    # for col in beats_df.columns:
+    #     if col not in ["ts", "RR", "HR", "beats"]:
+    #         beats_df = beats_df.drop(columns = col)
 
-    beats_df = beats_df.join(cluster_df, how = "inner")
+    # beats_df = beats_df.join(cluster_df, how = "inner")
 
-    return beats_df
+    # return beats_df
 
+    return cluster_df
 
 class Settings():
     def __init__(self):
