@@ -22,11 +22,12 @@ import importlib
 try:
     heartbeat_detection = importlib.import_module('modules.heartbeat_detection','modules')
     arrhythmia_detection = importlib.import_module('modules.arrhythmia_detection','modules')
+    ml_tools = importlib.import_module('modules.ml_tools','modules')
 except:
     print('use of relative import')
     heartbeat_detection = importlib.import_module('modules.heartbeat_detection','.modules')
     arrhythmia_detection = importlib.import_module('modules.arrhythmia_detection','.modules')
-
+    ml_tools = importlib.import_module('modules.ml_tools','.modules')
 
 import traceback
 from pyqtgraph import PlotWidget, plot
@@ -139,8 +140,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actionBeat_Detection.triggered.connect(self.action_BeatDetection)
         self.actionArrhythmia_Analysis.triggered.connect(self.action_Arrhythmia_Analysis)
         self.actionQuality_Scoring.triggered.connect(self.action_Quality_Scoring)
-        
-        
+
         # gui buttons
         self.pushButton_Add_Files.clicked.connect(self.action_Add_Files)
         self.pushButton_Clear_Files.clicked.connect(self.action_Clear_Files)
@@ -204,12 +204,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comboBox_time_column.currentTextChanged.connect(
             self.action_get_start_and_end_time
         )
+
+
         self.checkBox_auto_y.stateChanged.connect(self.update_graph)
         self.checkBox_plot_filtered.stateChanged.connect(self.update_graph)
         
 
         self.doubleSpinBox_filt_freq.valueChanged.connect(self.action_update_filtered_signals)
         self.doubleSpinBox_filt_order.valueChanged.connect(self.action_update_filtered_signals)
+
+        self.action_set_arr_method()
         
     
         self.comboBox_arrhyth_assign.addItems(arrhythmia_detection.annot_arrhythmia_categories)
@@ -591,8 +595,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def action_Clear_Files(self):
         self.filepath_dict = {}
         self.listWidget_Files.clear()
-        
-        
+          
     def action_Add_Files(self):
         for p in QFileDialog.getOpenFileNames(
             self,
@@ -663,7 +666,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     output='sos'
                     )
         
-        
+
     def action_update_available_signals(self):
         self.listWidget_Signals.clear()
         self.listWidget_Signals.addItems(self.data.columns)
@@ -705,7 +708,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.action_update_filtered_signals()
     
-    
+    def action_set_arr_method(self):
+        self.comboBox_arr_method.clear()
+        self.comboBox_arr_method.addItems(["Heuristics", "Unsupervised"])
+
     def action_start_of_file(self):
         self.doubleSpinBox_x_min.setValue(
             self.start_of_file
@@ -846,13 +852,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
         
-        
         self.beat_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
             arrhythmia_detection.Settings(),
             arrhythmia_detection.arrhythmia_categories
+            signals = self.data,
+            selected_signal = self.listWidget_Signals.currentItem().text()
         )
-        # print(self.beat_df)
+
         
         self.arrhythmia_only_df = self.beat_df[
             self.beat_df.any_arrhythmia
