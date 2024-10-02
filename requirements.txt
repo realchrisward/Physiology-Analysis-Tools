@@ -11,4 +11,5 @@ PyQtWebEngine==5.15.6
 qt6-applications==6.4.3.2.3
 qt6-tools==6.4.3.1.3
 scipy==1.11.1
+scikit-learn==1.5.2
 XlsxWriter==3.2.0
