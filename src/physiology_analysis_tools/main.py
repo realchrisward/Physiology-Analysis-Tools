@@ -996,14 +996,9 @@ class SettingsWindow(QtWidgets.QDialog):
 
         for k, v in arr_settings.__dict__.items():
 
-            spinBox = QtWidgets.QDoubleSpinBox()
-
-            arr_options[k] = spinBox
-
-            spinBox.setMinimum(0)
-            spinBox.setMaximum(10000)
-            spinBox.setValue(v)
-            arr_layout.addRow(k, spinBox)
+            EntryWidget = FlexibleEntryWidget(value=v)
+            arr_options[k] = EntryWidget
+            arr_layout.addRow(k, EntryWidget.entry)
 
         self.beatSettingsOptions = beat_options
         self.arrSettingsOptions = arr_options
@@ -1024,12 +1019,8 @@ class SettingsWindow(QtWidgets.QDialog):
             self.parentFrame.beat_settings.__dict__[k] = v.getValues()
 
         for k, v in self.arrSettingsOptions.items():
-            self.parentFrame.arrhythmia_settings.__dict__[k] = v.value()
+            self.parentFrame.arrhythmia_settings.__dict__[k] = v.getValues()
 
-        print(
-            self.parentFrame.beat_settings.__dict__,
-            self.parentFrame.arrhythmia_settings.__dict__,
-        )
         self.close()
 
 
@@ -1052,15 +1043,18 @@ class FlexibleEntryWidget:
 
         else:
             self.type = "Numeric"
-            self.entry = QtWidgets.QDoubleSpinBox()
-            self.entry.setMinimum(0)
-            self.entry.setMaximum(1000)
-            self.entry.setValue(value)
+            self.entry = QtWidgets.QLineEdit()
+            self.entry.setText(str(value))
 
     def getValues(self):
 
         if self.type == "Numeric":
-            value = self.entry.value()
+            value = self.entry.text()
+            if value == "":
+                return None
+            else:
+                value = float(value)
+
             return value
 
         if self.type == "Boolean":
