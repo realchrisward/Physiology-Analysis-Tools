@@ -35,7 +35,7 @@ def basic_filter(order, signal, fs=1000, cutoff=5, output="sos"):
 
 
 def beatepocher(
-    filtered_data_frame, beat_index, voltage_column="ecg", window=250, **kwargs
+    filtered_data_frame, beat_df, voltage_column="ecg", time_column = "time", window=250, **kwargs
 ):
     """
     Create a list numpy arrays, of the voltage over heartbeats detected in ECG, detrended and normalised. Takes ECG signal and the timestamps of the heartbeats as input.
@@ -67,7 +67,9 @@ def beatepocher(
 
     epochs_dict = {}
 
-    for index in beat_index:
+    for idx, ts in enumerate(beat_df.ts):
+
+        index = list(filtered_data_frame[time_column]).index(ts)
 
         start = index - round(pre_window, 0)
         end = index + round(post_window, 0)
@@ -81,7 +83,7 @@ def beatepocher(
 
         beat_epoch = data_epoch[voltage_column].to_numpy()
 
-        epochs_dict[index] = detrend_normalise(beat_epoch)
+        epochs_dict[idx] = detrend_normalise(beat_epoch)
 
     return epochs_dict
 
@@ -119,11 +121,13 @@ def beat_clusterer(epochs_dict, eps=0.5, min_samples=20):
     return cluster_dict
 
 
-def call_arrhythmias_PCA(filtered_data_df, beats_df, voltage_column_name, settings):
+def call_arrhythmias_PCA(filtered_data_df, beats_df, voltage_column_name, time_column_name, settings):
+
     beat_epochs_dict = beatepocher(
         filtered_data_df,
-        beats_df.index,
+        beats_df,
         voltage_column=voltage_column_name,
+        time_column=time_column_name,
         window=settings.window_size,
     )
 
@@ -131,26 +135,31 @@ def call_arrhythmias_PCA(filtered_data_df, beats_df, voltage_column_name, settin
         beat_epochs_dict, eps=settings.eps, min_samples=settings.min_samples
     )
 
+    abn_cluster_dict = {}
+    for k,v in cluster_dict.items():
+        if v == 0:
+            abn_cluster_dict[k] = False
+        else:
+            abn_cluster_dict[k] = True
+
     # cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
     # cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
     cluster_df = (
-        pd.DataFrame.from_dict(cluster_dict, orient="index")
+        pd.DataFrame.from_dict(abn_cluster_dict, orient="index")
         .rename(columns={0: "abn_cluster"})
-        .astype("bool")
     )
 
-    # Clear previously assigned arrythmias. e.g if Heuristic model was used first
+    # Clear previously assigned abn_clusters. i.e if rerunning PCA analysis
 
-    # for col in beats_df.columns:
-    #     if col not in ["ts", "RR", "HR", "beats"]:
-    #         beats_df = beats_df.drop(columns = col)
+    for col in beats_df.columns:
+        if col == "abn_cluster":
+            beats_df = beats_df.drop(columns = col)
 
-    # beats_df = beats_df.join(cluster_df, how = "inner")
+    beats_df = beats_df.join(cluster_df, how = "left")
 
-    # return beats_df
+    return beats_df
 
-    return cluster_df
-
+    #return cluster_df
 
 # class Settings():
 #     def __init__(self):

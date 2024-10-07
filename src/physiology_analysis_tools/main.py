@@ -799,8 +799,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.beat_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
             self.arrhythmia_settings,
-            signals=self.data,
+            signals=self.filtered_data,
             selected_signal=self.listWidget_Signals.currentItem().text(),
+            selected_time = self.comboBox_time_column.currentText(),
             arr_methods=self.comboBox_arr_method.currentText(),
         )
 
