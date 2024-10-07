@@ -5,14 +5,14 @@ heartbeat_detection for ECG Analysis Tool
 written by Christopher S Ward (C) 2024
 """
 
-__verison__ = "0.0.1"
+__verison__ = "0.0.2"
 
 # %% import libraries
 import scipy
 import pandas
 import numpy
 
-
+print('loading heartbeat detection')
 # %% define functions
 
 def basic_filter(
@@ -20,7 +20,8 @@ def basic_filter(
     signal,
     fs = 1000,
     cutoff = 5,
-    output = 'sos'  
+    output = 'sos',
+    use_pandas = True 
 ):
     sos = scipy.signal.butter(
         order,
@@ -30,9 +31,51 @@ def basic_filter(
         output='sos'    
     )
     filtered_data = scipy.signal.sosfiltfilt(sos,signal)
+
+    if use_pandas:
+        return pandas.Series(filtered_data)
+    else:  
+        return filtered_data
     
-    return filtered_data
+
+
+def calculate_moving_average(input_series, window, include_current=True):
+    """
+    Calculates a moving average of a series, with an option to exclude the current value
+    from the average calculation.
+
+    Parameters
+    ----------
+    input_series : pd.Series
+        Data to use for moving average calculation.
+    window : int
+        Number of samples to use for the moving average.
+    include_current : bool, optional
+        Whether to include the 'middle' value in the moving average calculation.
+        The default is True.
+
+    Returns
+    -------
+    moving_average : pd.Series
+        Moving average smoothed series paired to the input_series.
+    """
     
+    if include_current:
+        moving_average = input_series.rolling(window, center=True, min_periods=1).mean()
+    else:
+        # Adjust for excluding the current value:
+        # Calculate the sum over the window, subtract the current value, and divide by the adjusted count.
+        total_sum = input_series.rolling(window, center=True, min_periods=1).sum()
+        count = input_series.rolling(window, center=True, min_periods=1).count() - 1
+        # Ensure we do not divide by zero
+        count = count.apply(lambda x: max(x, 1))
+        adjusted_sum = total_sum - input_series
+        moving_average = adjusted_sum / count
+
+    return moving_average
+
+
+
 def beatcaller(
     df,
     voltage_column = 'ecg', 
@@ -45,6 +88,8 @@ def beatcaller(
     ecg_filt_cutoff = 5,
     abs_thresh = None,
     perc_thresh = None,
+    breath_filter = True,
+    breath_filter_cutoff = None
     
 ):
     """
@@ -60,7 +105,7 @@ def beatcaller(
     Returns:
     - DataFrame: DataFrame containing timestamps, RR intervals, and heart rates.
     """
-    
+    df = df.reset_index(drop=True)
     time = df[time_column]
     voltage = df[voltage_column]
     
@@ -70,7 +115,7 @@ def beatcaller(
     
     
     if ecg_abs_value:
-        voltage = numpy.abs(voltage)
+        voltage = voltage.abs()
     
     sampling_frequency = 1/(time[1]-time[0])
     
@@ -103,10 +148,25 @@ def beatcaller(
     )  
     
     # Extract timestamps for the detected peaks
-    timestamps_peaks = numpy.take(time, peaks, axis=0)
+    timestamps_peaks = time.take(peaks)
     
+    # Calculate R peak heights
+    r_amp = voltage.take(peaks)
+
+    if breath_filter or breath_filter_cutoff is not None:
+        if breath_filter_cutoff is None: breath_filter_cutoff = 0.4
+
+        R_amplitude_neighbors = calculate_moving_average(voltage,window=3,include_current=False)
+
+        R_amplitude_filter = R_amplitude_neighbors>=breath_filter_cutoff
+
+        timestamps_peaks = timestamps_peaks[R_amplitude_filter]
+        r_amp = r_amp[R_amplitude_filter]
+
+
     # Calculate RR intervals in seconds
     rr_intervals = numpy.diff(timestamps_peaks)
+
     
     # Calculate heart rate from rr intervals
     heart_rates = [60/ri for ri in rr_intervals]
@@ -114,11 +174,16 @@ def beatcaller(
     ones = [1 for ri in rr_intervals]
     
     # Prepare dataframe to return
-    beat_df = pandas.DataFrame({
-        'ts': timestamps_peaks[:-1], # Exclude the last timestamp
-        'RR': rr_intervals,
-        'HR': heart_rates,
-        'beats' : ones
-        })
+    beat_df = pandas.DataFrame(
+        {
+            'ts': timestamps_peaks[1:-1], # Exclude the last timestamp
+            'RR': rr_intervals[:-1],
+            'R_amplitude': r_amp[1:-1],
+            'HR': heart_rates[:-1],
+            'beats' : ones[:-1]
+        }
+    )
    
+
+
     return beat_df 
