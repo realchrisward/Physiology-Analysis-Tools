@@ -162,9 +162,9 @@ def call_arrhythmias(
             raise TypeError(
                 "signal information not adequately provided to signals and selected_signal arguments of call_arrhythmias()"
             )
-        df= ml_tools.call_arrhythmias_PCA(
+        df["abn_cluster"]= ml_tools.call_arrhythmias_PCA(
             signals, df, selected_signal, selected_time, settings
-        )
+        )["abn_cluster"]
 
     df["any_arrhythmia"] = df[arrhythmia_categories].any(axis=1, bool_only=True)
 
