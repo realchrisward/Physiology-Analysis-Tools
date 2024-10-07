@@ -1033,36 +1033,38 @@ class FlexibleEntryWidget:
 
     def __init__(self, value):
 
-        if value is None:
-            self.type = "NoneType"
+        self.type = type(value)
+
+        if self.type ==type(None) :
             self.entry = QtWidgets.QLineEdit()
 
-        elif value in (True, False):
-            self.type = "Boolean"
+        elif self.type == bool:
             self.entry = QtWidgets.QCheckBox()
             self.entry.setChecked(value)
 
         else:
-            self.type = "Numeric"
             self.entry = QtWidgets.QLineEdit()
             self.entry.setText(str(value))
 
     def getValues(self):
 
-        if self.type == "Numeric":
+        if self.type in [float, int]:
             value = self.entry.text()
             if value == "":
                 return None
             else:
-                value = float(value)
+                if self.type == float:
+                    value = float(value)
+                if self.type == int:
+                    value = int(value)
 
             return value
 
-        if self.type == "Boolean":
+        elif self.type == bool:
             value = self.entry.isChecked()
             return value
 
-        if self.type == "NoneType":
+        else:
             value = self.entry.text()
 
             if value == "":
