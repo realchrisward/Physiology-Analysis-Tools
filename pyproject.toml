@@ -21,10 +21,11 @@ dependencies = [
   "qt6-applications",
   "qt6-tools",
   "scipy",
+  "scikit-learn",
   "XlsxWriter"
 ]
 
-requires-python = ">= 3.8"
+requires-python = ">= 3.9"
 maintainers = [
   {name = "Chris Ward", email = "ward.chris.s@gmail.com"}
 ]
