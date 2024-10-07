@@ -5,7 +5,8 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.11"
+__version__ = "0.0.12"
+
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -124,6 +125,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_markers = None
         self.bad_data_mode = False
         self.plotted = {}
+
+        self.start_of_file = 0
+        self.end_of_file = 0
+
+        self.known_time_columns = ["ts", "time"]
+
+        self.beat_settings = heartbeat_detection.Settings()
+        self.arrhythmia_settings = arrhythmia_detection.Settings()
+
         self.known_time_columns = ["ts", "time"]
 
         self.horizontalScrollBar_Time.setMinimum(0)
@@ -131,9 +141,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.attach_buttons()
 
-        self.reset_gui()
         self.add_graph()
+        self.reset_gui()
 
+        
+        
     def attach_buttons(self):
         # menu items
         self.actionOpen_Files.triggered.connect(self.action_Add_Files)
@@ -149,7 +161,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_Clear_Files.clicked.connect(self.action_Clear_Files)
         self.listWidget_Files.clicked.connect(self.action_update_selected_file)
         self.listWidget_Signals.clicked.connect(self.add_signal)
+        self.pushButton_Edit_Settings.clicked.connect(self.action_Edit_Settings)
         self.pushButton_BeatDetection.clicked.connect(self.action_BeatDetection)
+
         self.pushButton_Arrhythmia_Analysis.clicked.connect(
             self.action_Arrhythmia_Analysis
         )
@@ -739,35 +753,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.beat_markers = None
 
         print(f"searching for beats in {self.voltage_column} by self.time_column")
-        anesth_config = {
-            "min_RR": 60,
-            "ecg_invert": False,
-            "ecg_filter": True,
-            "ecg_filt_order": 2,
-            "ecg_filt_cutoff": 5,
-            "abs_thresh": None,
-            "perc_thresh": 97,
-        }
-        ecgenie_config = {
-            "min_RR": 60,
-            "ecg_invert": False,
-            "ecg_filter": True,
-            "ecg_abs_value": True,
-            "ecg_filt_order": 2,
-            "ecg_filt_cutoff": 5,
-            "abs_thresh": None,
-            "perc_thresh": 97,
-        }
-        if self.current_filepath[-6:] == "adicht":
-            config_to_use = anesth_config
-        elif self.current_filepath[-3:] == "txt":
-            config_to_use = ecgenie_config
 
         self.beat_df = heartbeat_detection.beatcaller(
             self.data,
             time_column=self.comboBox_time_column.currentText(),
             voltage_column=self.listWidget_Signals.currentItem().text(),
-            **config_to_use,
+            **self.beat_settings.__dict__,
         ).reset_index(drop=True)
 
         self.beat_markers = self.add_plot(
@@ -811,9 +802,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.beat_df = arrhythmia_detection.call_arrhythmias(
             self.beat_df,
-            arrhythmia_detection.Settings(),
-            signals=self.data,
+            self.arrhythmia_settings,
+            signals=self.filtered_data,
             selected_signal=self.listWidget_Signals.currentItem().text(),
+            selected_time = self.comboBox_time_column.currentText(),
             arr_methods=self.comboBox_arr_method.currentText(),
         )
 
@@ -972,6 +964,121 @@ class MainWindow(QtWidgets.QMainWindow):
         bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
         writer.close()
         print("finished")
+
+
+        def action_Edit_Settings(self):
+        window = SettingsWindow(parent=self)
+        window.exec()
+
+
+class SettingsWindow(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.settingsOptions = {}
+        self.parentFrame = parent
+        self.setWindowTitle("ECG Analysis - Settings")
+
+        outer_layout = QtWidgets.QVBoxLayout()
+        inner_layout = QtWidgets.QHBoxLayout()
+
+        # Create layout for heartbeat detection
+
+        beat_layout = QtWidgets.QFormLayout()
+        beat_settings = parent.beat_settings
+        beat_options = {}
+
+        for k, v in beat_settings.__dict__.items():
+            EntryWidget = FlexibleEntryWidget(value=v)
+            beat_options[k] = EntryWidget
+            beat_layout.addRow(k, EntryWidget.entry)
+
+        # Create layout for arrhythmia detection
+
+        arr_layout = QtWidgets.QFormLayout()
+
+        arr_settings = parent.arrhythmia_settings
+
+        arr_options = {}
+
+        for k, v in arr_settings.__dict__.items():
+
+            EntryWidget = FlexibleEntryWidget(value=v)
+            arr_options[k] = EntryWidget
+            arr_layout.addRow(k, EntryWidget.entry)
+
+        self.beatSettingsOptions = beat_options
+        self.arrSettingsOptions = arr_options
+
+        inner_layout.addLayout(beat_layout)
+        inner_layout.addLayout(arr_layout)
+
+        self.button = QtWidgets.QPushButton("Update Settings")
+        self.button.clicked.connect(self.updateSettings)
+
+        outer_layout.addLayout(inner_layout)
+        outer_layout.addWidget(self.button)
+        self.setLayout(outer_layout)
+
+    def updateSettings(self):
+
+        for k, v in self.beatSettingsOptions.items():
+            self.parentFrame.beat_settings.__dict__[k] = v.getValues()
+
+        for k, v in self.arrSettingsOptions.items():
+            self.parentFrame.arrhythmia_settings.__dict__[k] = v.getValues()
+
+        self.close()
+
+
+class FlexibleEntryWidget:
+    """
+    Class to allow for a flexible 'data entry' widget that will adjust the type depending on the input data type
+    This allows for easier building of layouts where the form and format of the input is not known/will change
+    """
+
+    def __init__(self, value):
+
+        self.type = type(value)
+
+        if self.type ==type(None) :
+            self.entry = QtWidgets.QLineEdit()
+
+        elif self.type == bool:
+            self.entry = QtWidgets.QCheckBox()
+            self.entry.setChecked(value)
+
+        else:
+            self.entry = QtWidgets.QLineEdit()
+            self.entry.setText(str(value))
+
+    def getValues(self):
+
+        if self.type in [float, int]:
+            value = self.entry.text()
+            if value == "":
+                return None
+            else:
+                if self.type == float:
+                    value = float(value)
+                if self.type == int:
+                    value = int(value)
+
+            return value
+
+        elif self.type == bool:
+            value = self.entry.isChecked()
+            return value
+
+        else:
+            value = self.entry.text()
+
+            if value == "":
+                return None
+
+            value = float(value)
+
+            return value
+
 
 
 def main():

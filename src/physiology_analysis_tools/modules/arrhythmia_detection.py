@@ -80,8 +80,9 @@ class Settings:
         self.premature_beat_multiple_rr = 0.7
         # unsupervised settings
         self.window_size = 100
-        self.eps = 0.5
-        self.min_samples = 20
+        self.eps = 0.03
+        self.min_samples = 30
+
 
 
 def call_bradycardia_absolute(df, rr_column_name, threshold):
@@ -123,7 +124,7 @@ def call_premature_beat_multiple(df, rr_column_name, ts_column_name, threshold):
 
 
 def call_arrhythmias(
-    df, settings, signals=None, selected_signal=None, arr_methods=None
+    df, settings, signals=None, selected_signal=None, selected_time = None, arr_methods=None
 ):
     if arr_methods == "Both":
         arr_methods = ["Heuristic", "Unsupervised"]
@@ -162,8 +163,9 @@ def call_arrhythmias(
             raise TypeError(
                 "signal information not adequately provided to signals and selected_signal arguments of call_arrhythmias()"
             )
-        df["abn_cluster"] = ml_tools.call_arrhythmias_PCA(
-            signals, df, selected_signal, settings
+
+        df["abn_cluster"]= ml_tools.call_arrhythmias_PCA(
+            signals, df, selected_signal, selected_time, settings
         )["abn_cluster"]
 
     df["any_arrhythmia"] = df[arrhythmia_categories].any(axis=1, bool_only=True)
@@ -173,7 +175,8 @@ def call_arrhythmias(
     arrhythmia_categories += ["any_arrhythmia", "other_arrhythmia"]
 
     for a in arrhythmia_categories:
-        if a in df.columns:
-            df[f"annot_{a}"] = df[a].fillna(0).astype(int)
+       if a in df.columns:
+           df[f"annot_{a}"] = df[a].fillna(0).astype(int)
+
 
     return df
