@@ -144,8 +144,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_graph()
         self.reset_gui()
 
-        
-        
     def attach_buttons(self):
         # menu items
         self.actionOpen_Files.triggered.connect(self.action_Add_Files)
@@ -805,7 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.arrhythmia_settings,
             signals=self.filtered_data,
             selected_signal=self.listWidget_Signals.currentItem().text(),
-            selected_time = self.comboBox_time_column.currentText(),
+            selected_time=self.comboBox_time_column.currentText(),
             arr_methods=self.comboBox_arr_method.currentText(),
         )
 
@@ -965,8 +963,7 @@ class MainWindow(QtWidgets.QMainWindow):
         writer.close()
         print("finished")
 
-
-        def action_Edit_Settings(self):
+    def action_Edit_Settings(self):
         window = SettingsWindow(parent=self)
         window.exec()
 
@@ -1040,7 +1037,7 @@ class FlexibleEntryWidget:
 
         self.type = type(value)
 
-        if self.type ==type(None) :
+        if self.type == type(None):
             self.entry = QtWidgets.QLineEdit()
 
         elif self.type == bool:
@@ -1078,7 +1075,6 @@ class FlexibleEntryWidget:
             value = float(value)
 
             return value
-
 
 
 def main():
