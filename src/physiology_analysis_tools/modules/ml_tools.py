@@ -142,8 +142,6 @@ def call_arrhythmias_PCA(filtered_data_df, beats_df, voltage_column_name, time_c
         else:
             abn_cluster_dict[k] = True
 
-    # cluster_df =  pd.DataFrame.from_dict(cluster_dict, orient="index").rename(columns={0:"any_arrhythmia"}).astype("bool")
-    # cluster_df['annot_any_arrhythmia'] = cluster_df["any_arrhythmia"].astype(int)
     cluster_df = (
         pd.DataFrame.from_dict(abn_cluster_dict, orient="index")
         .rename(columns={0: "abn_cluster"})
@@ -159,10 +157,4 @@ def call_arrhythmias_PCA(filtered_data_df, beats_df, voltage_column_name, time_c
 
     return beats_df
 
-    #return cluster_df
 
-# class Settings():
-#     def __init__(self):
-#         self.window_size = 100
-#         self.eps = 0.5
-#         self.min_samples = 20

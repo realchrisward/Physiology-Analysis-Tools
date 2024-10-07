@@ -84,6 +84,7 @@ class Settings:
         self.min_samples = 30
 
 
+
 def call_bradycardia_absolute(df, rr_column_name, threshold):
     output = df[rr_column_name] >= threshold
     print(f"brady {output.shape}")
@@ -162,6 +163,7 @@ def call_arrhythmias(
             raise TypeError(
                 "signal information not adequately provided to signals and selected_signal arguments of call_arrhythmias()"
             )
+
         df["abn_cluster"]= ml_tools.call_arrhythmias_PCA(
             signals, df, selected_signal, selected_time, settings
         )["abn_cluster"]
@@ -175,5 +177,6 @@ def call_arrhythmias(
     for a in arrhythmia_categories:
        if a in df.columns:
            df[f"annot_{a}"] = df[a].fillna(0).astype(int)
+
 
     return df

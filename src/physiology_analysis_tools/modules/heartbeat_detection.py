@@ -13,6 +13,7 @@ import pandas
 import numpy
 
 
+
 class Settings:
     def __init__(self):
         self.min_RR = 60
@@ -41,6 +42,7 @@ class Settings:
         self.ecg_filt_cutoff = 5
         self.abs_thresh = None
         self.perc_thresh = 97
+
 
 
 # %% define functions
@@ -88,6 +90,7 @@ def calculate_moving_average(input_series, window, include_current=True):
         moving_average = adjusted_sum / count
 
     return moving_average
+
 
 
 def beatcaller(

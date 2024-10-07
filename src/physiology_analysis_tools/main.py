@@ -6,6 +6,7 @@ written by Christopher S Ward (C) 2024
 """
 
 __version__ = "0.0.12"
+
 # try:
 from PyQt6 import QtWidgets, uic, QtCore
 from PyQt6.QtWidgets import QFileDialog
@@ -139,9 +140,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.horizontalScrollBar_Time.setMaximum(100)
 
         self.attach_buttons()
+
         self.add_graph()
         self.reset_gui()
 
+        
+        
     def attach_buttons(self):
         # menu items
         self.actionOpen_Files.triggered.connect(self.action_Add_Files)
@@ -961,7 +965,8 @@ class MainWindow(QtWidgets.QMainWindow):
         writer.close()
         print("finished")
 
-    def action_Edit_Settings(self):
+
+        def action_Edit_Settings(self):
         window = SettingsWindow(parent=self)
         window.exec()
 
@@ -1073,6 +1078,7 @@ class FlexibleEntryWidget:
             value = float(value)
 
             return value
+
 
 
 def main():
