@@ -5,7 +5,7 @@ heartbeat_detection for ECG Analysis Tool
 written by Christopher S Ward (C) 2024
 """
 
-__verison__ = "0.0.3"
+__version__ = "0.0.4"
 
 # %% import libraries
 import scipy

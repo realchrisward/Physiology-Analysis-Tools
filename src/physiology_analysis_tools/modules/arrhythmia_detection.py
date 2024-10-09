@@ -5,15 +5,16 @@ arrhythmia_detection for ECG Analysis Tool
 written by Christopher S Ward (C) 2024
 """
 
-__verison__ = "0.0.6"
+__version__ = "0.0.8"
 
 # %% import libraries
 import scipy
 import pandas
 from modules import ml_tools
-
-# import numpy
-
+try:
+    from modules import ml_tools
+except:
+    from physiology_analysis_tools.modules import ml_tools
 
 # %% define functions
 
