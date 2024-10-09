@@ -5,12 +5,13 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.12"
+__version__ = "0.0.14"
 
 # try:
-from PyQt6 import QtWidgets, uic, QtCore
-from PyQt6.QtWidgets import QFileDialog
-from PyQt6.QtCore import Qt
+from PySide6 import QtWidgets
+from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtCore import Qt, QFile
+from PySide6.QtUiTools import QUiLoader
 
 # except:
 #     from PyQt5 import QtWidgets, uic, QtCore
@@ -33,12 +34,14 @@ try:
 except:
     print("use of relative import")
     heartbeat_detection = importlib.import_module(
-        "modules.heartbeat_detection", ".modules"
+        "physiology_analysis_tools.modules.heartbeat_detection", "physiology_analysis_tools.modules"
     )
     arrhythmia_detection = importlib.import_module(
-        "modules.arrhythmia_detection", ".modules"
+        "physiology_analysis_tools.modules.arrhythmia_detection", "physiology_analysis_tools.modules"
     )
-    ml_tools = importlib.import_module("modules.ml_tools", ".modules")
+    ml_tools = importlib.import_module("physiology_analysis_tools.modules.ml_tools", "physiology_analysis_tools.modules")
+
+
 
 import traceback
 from pyqtgraph import PlotWidget, plot
@@ -95,11 +98,20 @@ def gather_data(
 
 # %% setup the main window
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, ui, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        uic.loadUi(
-            os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui"), self
-        )
+        # uic.loadUi(
+        #     os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui"), self
+        # )
+
+        self.ui = ui
+
+        # migrate ui children to parent level of class
+        for att, val in ui.__dict__.items():
+            setattr(self, att, val)
+
+        self.ui.setWindowTitle("Physiology Analysis Tools")
+
         self.label_Title_and_Version.setText(f"ECG Analysis - {__version__}")
         self.plotted_counter = 0
         self.beat_df = None
@@ -153,6 +165,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_Arrhythmia_Analysis
         )
         self.actionQuality_Scoring.triggered.connect(self.action_Quality_Scoring)
+        self.actionAbout.triggered.connect(self.action_about)
 
         # gui buttons
         self.pushButton_Add_Files.clicked.connect(self.action_Add_Files)
@@ -208,6 +221,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.horizontalScrollBar_Time.valueChanged.connect(self.action_scroll_time)
+
+    def action_about(self):
+        QMessageBox.information(
+            None,
+            "About Physiology Analysis Tools",
+            "\n".join([f"{k} : {v}" for k, v in self.version_info.items()]),
+        )
+
+
 
     def reset_gui(self):
         self.filepath_dict = {}
@@ -1078,10 +1100,29 @@ class FlexibleEntryWidget:
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
 
-    window = MainWindow()
-    window.show()
+    loader = QUiLoader()
+    print('1')
+    app = QtWidgets.QApplication(sys.argv)
+    print('2')
+    ui_file = QFile(
+            os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui")
+    )
+    print('3')
+    ui = loader.load(ui_file)
+    print('4')
+
+    window = MainWindow(ui)
+
+    window.version_info = {
+        'main':__version__,
+        'heartbeat_detection':heartbeat_detection.__version__,
+        'arrhythmia_detection':arrhythmia_detection.__version__,
+        'ml_tools':ml_tools.__version__
+    }
+
+    
+    ui.show()
 
     app.exec()
 
