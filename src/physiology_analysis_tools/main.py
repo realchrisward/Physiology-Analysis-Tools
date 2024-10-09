@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.14"
+__version__ = "0.0.15"
 
 # try:
 from PySide6 import QtWidgets
@@ -34,13 +34,17 @@ try:
 except:
     print("use of relative import")
     heartbeat_detection = importlib.import_module(
-        "physiology_analysis_tools.modules.heartbeat_detection", "physiology_analysis_tools.modules"
+        "physiology_analysis_tools.modules.heartbeat_detection",
+        "physiology_analysis_tools.modules",
     )
     arrhythmia_detection = importlib.import_module(
-        "physiology_analysis_tools.modules.arrhythmia_detection", "physiology_analysis_tools.modules"
+        "physiology_analysis_tools.modules.arrhythmia_detection",
+        "physiology_analysis_tools.modules",
     )
-    ml_tools = importlib.import_module("physiology_analysis_tools.modules.ml_tools", "physiology_analysis_tools.modules")
-
+    ml_tools = importlib.import_module(
+        "physiology_analysis_tools.modules.ml_tools",
+        "physiology_analysis_tools.modules",
+    )
 
 
 import traceback
@@ -228,8 +232,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "About Physiology Analysis Tools",
             "\n".join([f"{k} : {v}" for k, v in self.version_info.items()]),
         )
-
-
 
     def reset_gui(self):
         self.filepath_dict = {}
@@ -1102,26 +1104,23 @@ class FlexibleEntryWidget:
 def main():
 
     loader = QUiLoader()
-    print('1')
+    print("1")
     app = QtWidgets.QApplication(sys.argv)
-    print('2')
-    ui_file = QFile(
-            os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui")
-    )
-    print('3')
+    print("2")
+    ui_file = QFile(os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui"))
+    print("3")
     ui = loader.load(ui_file)
-    print('4')
+    print("4")
 
     window = MainWindow(ui)
 
     window.version_info = {
-        'main':__version__,
-        'heartbeat_detection':heartbeat_detection.__version__,
-        'arrhythmia_detection':arrhythmia_detection.__version__,
-        'ml_tools':ml_tools.__version__
+        "main": __version__,
+        "heartbeat_detection": heartbeat_detection.__version__,
+        "arrhythmia_detection": arrhythmia_detection.__version__,
+        "ml_tools": ml_tools.__version__,
     }
 
-    
     ui.show()
 
     app.exec()
