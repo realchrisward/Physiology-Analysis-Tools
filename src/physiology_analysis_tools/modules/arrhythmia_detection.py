@@ -5,12 +5,12 @@ arrhythmia_detection for ECG Analysis Tool
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.8"
+__version__ = "0.0.9"
 
 # %% import libraries
 import scipy
 import pandas
-from modules import ml_tools
+# from modules import ml_tools
 try:
     from modules import ml_tools
 except:
