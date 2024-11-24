@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.16"
+__version__ = "0.0.17"
 
 # try:
 from PySide6 import QtWidgets
