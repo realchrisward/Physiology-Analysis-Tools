@@ -5,7 +5,7 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.15"
+__version__ = "0.0.16"
 
 # try:
 from PySide6 import QtWidgets
@@ -117,6 +117,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.setWindowTitle("Physiology Analysis Tools")
 
         self.label_Title_and_Version.setText(f"ECG Analysis - {__version__}")
+        self.data = None
         self.plotted_counter = 0
         self.beat_df = None
         self.bad_beat_only_df = None
@@ -153,7 +154,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.known_time_columns = ["ts", "time"]
 
         self.horizontalScrollBar_Time.setMinimum(0)
-        self.horizontalScrollBar_Time.setMaximum(100)
+        self.horizontalScrollBar_Time.setMaximum(1000000)
+        self.horizontalScrollBar_Time.setFocusPolicy(Qt.StrongFocus)
 
         self.attach_buttons()
 
@@ -163,6 +165,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def attach_buttons(self):
         # menu items
         self.actionOpen_Files.triggered.connect(self.action_Add_Files)
+        self.actionSettings.triggered.connect(self.action_Edit_Settings)
         self.actionExit.triggered.connect(QtWidgets.QApplication.instance().quit)
         self.actionBeat_Detection.triggered.connect(self.action_BeatDetection)
         self.actionArrhythmia_Analysis.triggered.connect(
@@ -201,11 +204,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.pushButton_Reject_Arrhythmia.clicked.connect(self.action_reject_arrhythmia)
 
-        self.comboBox_time_column.currentTextChanged.connect(
-            self.action_get_start_and_end_time
-        )
+        # self.comboBox_time_column.currentTextChanged.connect(
+        #     self.action_get_start_and_end_time
+        # )
 
         self.doubleSpinBox_x_window.valueChanged.connect(self.update_graph)
+        # self.doubleSpinBox_x_window.valueChanged.connect(self.action_get_start_and_end_time)
+
         self.doubleSpinBox_x_min.valueChanged.connect(self.update_graph)
 
         self.checkBox_auto_y.stateChanged.connect(self.update_graph)
@@ -447,6 +452,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_graph()
 
     def add_signal(self):
+        # update timing info
+        self.action_get_start_and_end_time()
+
         # remove prior signal if present
         # print(f'line if {self.line}')
         if self.line is not None:
@@ -578,7 +586,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     - self.start_of_file
                     - self.doubleSpinBox_x_window.value()
                 )
-                * 100
+                * 1000000
             )
         )
 
@@ -647,26 +655,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_list = []
 
     def action_update_filtered_signals(self):
+        if self.data is not None and self.comboBox_time_column.currentText() != '':
+            # !!! need to update logic flow for this
+            # for some reason - comboBox_time_column is an empty string until the first 
+            # signal channel is selected - changing that behavior would be ideal, until then
+            # the above logic check ensures that a time column is set before running the code
+            # of this method... which doesn't cause a crash, but does raise an error.
+            self.filtered_data = pandas.DataFrame()
 
-        # !!! need to update logic flow for this
-        self.filtered_data = pandas.DataFrame()
+            sampling_frequency = 1 / (
+                self.data[self.comboBox_time_column.currentText()][1]
+                - self.data[self.comboBox_time_column.currentText()][0]
+            )
 
-        sampling_frequency = 1 / (
-            self.data[self.comboBox_time_column.currentText()][1]
-            - self.data[self.comboBox_time_column.currentText()][0]
-        )
-
-        for c in self.data.columns:
-            if c in self.known_time_columns:
-                self.filtered_data[c] = self.data[c]
-            else:
-                self.filtered_data[c] = heartbeat_detection.basic_filter(
-                    self.doubleSpinBox_filt_order.value(),
-                    self.data[c],
-                    fs=sampling_frequency,
-                    cutoff=self.doubleSpinBox_filt_freq.value(),
-                    output="sos",
-                )
+            for c in self.data.columns:
+                if c in self.known_time_columns:
+                    self.filtered_data[c] = self.data[c]
+                else:
+                    self.filtered_data[c] = heartbeat_detection.basic_filter(
+                        self.doubleSpinBox_filt_order.value(),
+                        self.data[c],
+                        fs=sampling_frequency,
+                        cutoff=self.doubleSpinBox_filt_freq.value(),
+                        output="sos",
+                    )
 
     def action_update_available_signals(self):
         self.listWidget_Signals.clear()
@@ -683,24 +695,45 @@ class MainWindow(QtWidgets.QMainWindow):
             any([c in self.known_time_columns for c in self.data.columns])
             and self.comboBox_time_column.currentText() not in self.known_time_columns
         ):
-            # print('time column available')
+            print('time column available')
             for c in self.data.columns:
                 if c in self.known_time_columns:
-                    # print(f'time set as {c}')
+                    print(f'time set as {c}')
                     self.comboBox_time_column.setCurrentText(c)
                     break
         elif self.comboBox_time_column.currentText() in self.known_time_columns:
-            # print('time column found')
+            print('time column found')
             pass
         else:
-            # print('unknown time column')
+            print('unknown time column')
             return
-        self.action_get_start_and_end_time()
+        # self.action_get_start_and_end_time()
 
     def action_get_start_and_end_time(self):
-        # print(f' time: {self.comboBox_time_column.currentText()}')
+        print(f' time: {self.comboBox_time_column.currentText()}')
         self.end_of_file = max(self.data[self.comboBox_time_column.currentText()])
         self.start_of_file = min(self.data[self.comboBox_time_column.currentText()])
+
+        self.horizontalScrollBar_Time.setPageStep(
+            int(
+                (
+                self.doubleSpinBox_x_window.value()/(self.end_of_file-self.start_of_file)
+                )*1000000*0.9
+            )
+        )
+        
+        self.horizontalScrollBar_Time.setSingleStep(
+            int(
+                (
+                self.doubleSpinBox_x_window.value()/(self.end_of_file-self.start_of_file)
+                )*1000000*0.05
+            )
+        )
+
+        print(f'step size:{self.horizontalScrollBar_Time.singleStep()}')
+
+
+
         self.action_update_filtered_signals()
 
     def action_set_arr_method(self):
@@ -738,7 +771,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def action_scroll_time(self):
         self.doubleSpinBox_x_min.setValue(
             self.horizontalScrollBar_Time.value()
-            / 100
+            / 1000000
             * (
                 self.end_of_file
                 - self.start_of_file
@@ -980,10 +1013,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         bad_data_df = pandas.DataFrame(self.bad_data_list, columns=["start", "stop"])
 
+        settings_df = pandas.DataFrame(
+            {
+                **self.beat_settings.__dict__,
+                **self.arrhythmia_settings.__dict__,
+                'main_version': __version__,
+                'heartbeat_version': heartbeat_detection.__version__,
+                'arrhythmia_version': arrhythmia_detection.__version__,
+                'ml_version':ml_tools.__version__
+            },
+            index=[0]
+        )
+
         print(output_path)
         writer = pandas.ExcelWriter(output_path, engine="xlsxwriter")
         self.beat_df.to_excel(writer, sheet_name="beats", index=False)
         bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
+        settings_df.to_excel(writer, sheet_name="settings", index=False)
         writer.close()
         print("finished")
 
