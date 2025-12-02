@@ -5,12 +5,12 @@ ECG_ANALYSIS_TOOL
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.19"
+__version__ = "0.0.20"
 
 # try:
 from PySide6 import QtWidgets
 from PySide6.QtWidgets import QFileDialog, QMessageBox
-from PySide6.QtCore import Qt, QFile
+from PySide6.QtCore import Qt, QFile, QObject, Signal
 from PySide6.QtUiTools import QUiLoader
 
 # except:
@@ -20,6 +20,7 @@ from PySide6.QtUiTools import QUiLoader
 import sys
 import os
 import importlib
+import logging
 
 # include regular and relative import -
 # !!! temporary solution - needed for pip distribution
@@ -100,6 +101,51 @@ def gather_data(
     return list(x_val), list(y_val)
 
 
+class LogEmitter(QObject):
+    """
+    LogEmitter is used by QTextEditLogger to enable access to
+    QObject Signal for emitting to and
+    """
+
+    log = Signal(str)
+
+
+
+class QTextEditLogger(logging.Handler):
+    """
+    QTextEditLogger serves as a logging handler to display logging messages
+    within the GUI if running the client in interactive mode
+    """
+
+    def __init__(self, text_edit_widget):
+        super().__init__()
+        self.widget = text_edit_widget
+        self.widget.setReadOnly(True)
+        self.widget.setStyleSheet("background-color: lightgray;")
+
+        self.log_emitter = LogEmitter()
+        self.log_emitter.log.connect(self.widget.insertHtml)
+
+    def emit(self, record):
+        msg = self.format(record)
+        # color code messages
+        if "| INFO |" in msg:
+            msg = f'<span style="color:black">{msg}</span><br>'
+        elif "| DEBUG |" in msg:
+            msg = f'<span style="color:green">{msg}</span><br>'
+        elif "| WARNING |" in msg:
+            msg = f'<span style="color:red">{msg}</span><br>'
+        elif "| ERROR |" in msg:
+            msg = f'<span style="color:red"><strong>{msg}</strong></span><br>'
+        else:
+            msg = f'<span style="color:black"><strong>{msg}</strong></span><br>'
+        self.log_emitter.log.emit(msg)
+        self.widget.verticalScrollBar().setSliderPosition(
+            self.widget.verticalScrollBar().maximum()
+        )
+
+
+
 # %% setup the main window
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, ui, *args, **kwargs):
@@ -116,7 +162,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.ui.setWindowTitle("Physiology Analysis Tools")
 
+        # create a logger
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG)
+        self.logging_format = logging.Formatter(
+            "%(asctime)s | %(name)s | %(levelname)s | %(message)s\n"
+        )
+        self.logging_text_browser = QTextEditLogger(self.textBrowser_Status)
+        self.logging_text_browser.setFormatter(self.logging_format)
+        self.logging_text_browser.setLevel(logging.INFO)
+        self.logger.addHandler(self.logging_text_browser)
+        debug_log_handler = logging.FileHandler("debug.log", mode="w", encoding="utf-8")
+        debug_log_handler.setLevel = logging.DEBUG
+        self.logger.addHandler(debug_log_handler)
+
         self.label_Title_and_Version.setText(f"ECG Analysis - {__version__}")
+
+        # test logging output
+        self.logger.info(f"ECG Analysis - {__version__}")
+        self.logger.debug("DEBUG - test")
+        self.logger.info("INFO - test")
+
         self.data = None
         self.plotted_counter = 0
         self.beat_df = None
@@ -142,6 +208,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bad_data_markers = None
         self.bad_data_mode = False
         self.plotted = {}
+        self.review_data = pandas.DataFrame()
 
         self.start_of_file = 0
         self.end_of_file = 0
@@ -203,6 +270,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_confirm_arrhythmia
         )
         self.pushButton_Reject_Arrhythmia.clicked.connect(self.action_reject_arrhythmia)
+
+        # review mode related buttons
+        self.pushButton_Load_Review_File.clicked.connect(self.action_load_review_file)
+        self.pushButton_Prev_Review.clicked.connect(self.action_prev_review)
+        self.pushButton_Next_Review.clicked.connect(self.action_next_review)
+        self.pushButton_Review_Normal.clicked.connect(self.action_review_normal)
+        self.pushButton_Review_Abnormal.clicked.connect(self.action_review_abnormal)
+        self.pushButton_Review_Bad_Data.clicked.connect(self.action_review_bad_data)
+        self.pushButton_Review_Other.clicked.connect(self.action_review_other)
+        self.pushButton_Save_Review_File.clicked.connect(self.action_save_review_file)
 
         # self.comboBox_time_column.currentTextChanged.connect(
         #     self.action_get_start_and_end_time
@@ -299,6 +376,77 @@ class MainWindow(QtWidgets.QMainWindow):
             # print('bad_data_markers already exist')
             self.graph.removeItem(self.bad_data_markers)
         self.bad_data_markers = None
+
+
+
+    # review mode related functions
+    # need combo box on click method to bring up the selected entry
+    # !!!TODO!!!
+    def action_review_animal_and_timestamp(self):
+        # load animal data
+        # load signal
+        # set view to center on timestamp
+        # place marker on timestamp
+        pass
+
+    def action_update_review_combobox(self):
+        # if review column in self.review_data - include marks for normal, abnormal, bad data, other for entries if data present
+
+    def action_load_review_file(self):
+        self.logger.info("load_review_file")    
+        print(self.logger.handlers)
+        # gui to select file
+
+        # parse file to get animal and timestamp info
+
+        # populate self.review_data dataframe
+
+        # populate combobox
+
+        # attmpt to go to first entry
+
+
+    def action_prev_review(self):
+        self.logger.info("prev review")
+        # select prev (wrap around if at start) entry
+        self.action_review_animal_and_timestamp()
+
+
+    def action_next_review(self):
+        self.logger.info("next review")
+        # select next (wrap around if at end) entry
+        self.action_review_animal_and_timestamp
+
+
+    def action_review_normal(self):
+        self.logger.info("review normal")
+        # update dataframe for selected animal and timestamp to "normal"
+        # update combobox to reflect updated record
+
+
+    def action_review_abnormal(self):
+        self.logger.info("review abnormal")
+        # update dataframe for selected animal and timestamp to "abnormal"
+        # update combobox to reflect updated record
+
+
+    def action_review_bad_data(self):
+        self.logger.info("bad data")
+        # update dataframe for selected animal and timestamp to "bad data"
+        # update combobox to reflect updated record
+
+
+    def action_review_other(self):
+        self.logger.info("other")
+        # update dataframe for selected animal and timestamp to "other"
+        # update combobox to reflect updated record
+    
+
+    def action_save_review_file(self):
+        self.logger.info("save_review_file")
+        # gui to create filename
+        # save self.review_data to desired filename
+
 
     def assign_arrhyth_category(self):
         self.beat_df.at[

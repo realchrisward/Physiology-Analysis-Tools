@@ -792,6 +792,19 @@
      <string>Other</string>
     </property>
    </widget>
+   <widget class="QPushButton" name="pushButton_Save_Review_File">
+    <property name="geometry">
+     <rect>
+      <x>1010</x>
+      <y>650</y>
+      <width>151</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Save Review File</string>
+    </property>
+   </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">

@@ -4,3 +4,4 @@
 /venv
 /analysis
 uv.lock
+debug.log
