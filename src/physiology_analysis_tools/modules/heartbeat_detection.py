@@ -107,6 +107,7 @@ def beatcaller(
     perc_thresh=None,
     breath_filter=True,
     breath_filter_cutoff=None,
+    min_relative_amplitude=0.6,
 ):
     """
     Create a Dataframe of ECG outcome measures using an ecg signal as input
@@ -147,10 +148,13 @@ def beatcaller(
     isoelectric_line = pandas.Series(voltage).median()
 
     # Set threshold
-    if perc_thresh:
+    threshold = None
+    if perc_thresh is not None:
         threshold = pandas.Series(voltage).quantile(perc_thresh / 100)
-    if abs_thresh:
+    if abs_thresh is not None:
         threshold = abs_thresh
+    if threshold is None:
+        raise ValueError("Either perc_thresh or abs_thresh must be provided for beat detection threshold.")
 
     print(f"beat detection threshold: {threshold}")
 
@@ -169,14 +173,21 @@ def beatcaller(
         if breath_filter_cutoff is None:
             breath_filter_cutoff = 0.4
 
+        # Average of neighboring R amplitudes (excluding current peak)
         R_amplitude_neighbors = calculate_moving_average(
-            voltage, window=3, include_current=False
+            pandas.Series(r_amp), window=3, include_current=False
         )
 
-        R_amplitude_filter = R_amplitude_neighbors >= breath_filter_cutoff
+        # Calculate relative amplitude of each peak compared to its neighbors
+        relative_r_amp = pandas.Series(r_amp) / R_amplitude_neighbors.replace(0, numpy.nan)
 
-        timestamps_peaks = timestamps_peaks[R_amplitude_filter]
-        r_amp = r_amp[R_amplitude_filter]
+        # Create a mask to filter out peaks that are below the minimum relative amplitude threshold
+        peak_mask = relative_r_amp >= min_relative_amplitude
+        peak_mask = peak_mask.fillna(False).to_numpy()
+
+        # Apply the mask to filter peaks and their corresponding R amplitudes
+        timestamps_peaks = timestamps_peaks[peak_mask]
+        r_amp = r_amp[peak_mask]
 
     # Calculate RR intervals in seconds
     rr_intervals = numpy.diff(timestamps_peaks)
