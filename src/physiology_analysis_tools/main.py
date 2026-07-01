@@ -9,8 +9,8 @@ __version__ = "0.0.18"
 
 # try:
 from PySide6 import QtWidgets
-from PySide6.QtWidgets import QFileDialog, QMessageBox
-from PySide6.QtCore import Qt, QFile
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtCore import Qt, QFile, QThread, QObject, Signal
 from PySide6.QtUiTools import QUiLoader
 
 # except:
@@ -31,7 +31,7 @@ try:
         "modules.arrhythmia_detection", "modules"
     )
     ml_tools = importlib.import_module("modules.ml_tools", "modules")
-except:
+except ImportError:
     print("use of relative import")
     heartbeat_detection = importlib.import_module(
         "physiology_analysis_tools.modules.heartbeat_detection",
@@ -62,7 +62,7 @@ try:
         pklgzip_extract,
         pcc_extract,
     )
-except:
+except ImportError:
     from .modules.signal_converters import (
         dsi_fp_matlab_extract,
         adi_extract,
@@ -71,6 +71,18 @@ except:
         pcc_extract,
     )
 
+# edf_extract depends on the optional pyedflib package - import it separately
+# so that a missing/broken pyedflib install disables EDF support instead of
+# crashing the whole application on startup
+try:
+    try:
+        from modules.signal_converters import edf_extract
+    except ImportError:
+        from .modules.signal_converters import edf_extract
+except ImportError as e:
+    edf_extract = None
+    print(f"EDF support disabled - unable to import edf_extract ({e})")
+
 extractors = {
     "adi": {"module": adi_extract, "ext": ".adicht"},
     "labchart_text": {"module": labchart_text_extract, "ext": ".txt"},
@@ -78,6 +90,9 @@ extractors = {
     "pklgzip": {"module": pklgzip_extract, "ext": ".gzip"},
     "pcc": {"module": pcc_extract, "ext": ".txt"},
 }
+
+if edf_extract is not None:
+    extractors["edf"] = {"module": edf_extract, "ext": ".edf"}
 
 
 # %% define functions
@@ -98,6 +113,40 @@ def gather_data(
         y_val = y_val[::downsample_factor]
 
     return list(x_val), list(y_val)
+
+
+class ArrhythmiaAnalysisWorker(QObject):
+    """
+    Runs arrhythmia_detection.call_arrhythmias() (which includes the
+    PCA/DBSCAN unsupervised clustering) on a background thread so the UI
+    doesn't freeze for the duration of the analysis.
+    """
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, beat_df, settings, signals, selected_signal, selected_time, arr_methods):
+        super().__init__()
+        self.beat_df = beat_df
+        self.settings = settings
+        self.signals = signals
+        self.selected_signal = selected_signal
+        self.selected_time = selected_time
+        self.arr_methods = arr_methods
+
+    def run(self):
+        try:
+            result = arrhythmia_detection.call_arrhythmias(
+                self.beat_df,
+                self.settings,
+                signals=self.signals,
+                selected_signal=self.selected_signal,
+                selected_time=self.selected_time,
+                arr_methods=self.arr_methods,
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # %% setup the main window
@@ -162,6 +211,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_graph()
         self.reset_gui()
 
+    def log_status(self, message):
+        """Print message to console and append it to the status browser in the UI."""
+        print(message)
+        self.textBrowser_Status.append(message)
+
     def attach_buttons(self):
         # menu items
         self.actionOpen_Files.triggered.connect(self.action_Add_Files)
@@ -203,6 +257,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_confirm_arrhythmia
         )
         self.pushButton_Reject_Arrhythmia.clicked.connect(self.action_reject_arrhythmia)
+        self.pushButton_Clear_Rejected.clicked.connect(
+            self.action_clear_rejected_arrhythmias
+        )
 
         # self.comboBox_time_column.currentTextChanged.connect(
         #     self.action_get_start_and_end_time
@@ -289,6 +346,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # print('current arrhythmia_marker already exists')
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
+
+        self.pushButton_Clear_Rejected.setVisible(False)
 
         if self.current_beat is not None:
             # print('current beat_marker already exists')
@@ -633,17 +692,31 @@ class MainWindow(QtWidgets.QMainWindow):
             if i["ext"] == os.path.splitext(self.current_filepath)[1]
         ]
 
+        if not extract_tools:
+            self.log_status(
+                f"No extractor available for file type "
+                f"'{os.path.splitext(self.current_filepath)[1]}': "
+                f"{os.path.basename(self.current_filepath)}"
+            )
+
         self.data = None
         for i in extract_tools:
             if self.data is None:
                 try:
                     self.data = i["module"].SASSI_extract(self.current_filepath)
-                except:
-                    print("unable to open - trying another extractor")
+                except Exception as e:
+                    self.log_status(
+                        f"unable to open with {i['module'].__name__} - "
+                        f"trying another extractor ({e})"
+                    )
 
         if self.data is not None:
-            # print('data opened')
+            self.log_status(f"Loaded file: {os.path.basename(self.current_filepath)}")
             self.action_update_available_signals()
+        else:
+            self.log_status(
+                f"Failed to load file: {os.path.basename(self.current_filepath)}"
+            )
 
         self.reset_plot()
 
@@ -794,10 +867,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def action_BeatDetection(self):
         if self.DEVMODE:
-            try:
-                importlib.reload(heartbeat_detection)
-            except:
-                importlib.reload(heartbeat_detection)
+            importlib.reload(heartbeat_detection)
         # self.voltage_column = self.listWidget_Signals.currentItem().text()
 
         # self.time_column = self.comboBox_time_column.currentText()
@@ -807,12 +877,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.beat_markers)
         self.beat_markers = None
 
-        print(f"searching for beats in {self.voltage_column} by self.time_column")
+        time_column = self.comboBox_time_column.currentText()
+        voltage_column = self.listWidget_Signals.currentItem().text()
+        self.log_status(f"Searching for beats in {voltage_column} by {time_column}")
 
         self.beat_df = heartbeat_detection.beatcaller(
             self.data,
-            time_column=self.comboBox_time_column.currentText(),
-            voltage_column=self.listWidget_Signals.currentItem().text(),
+            time_column=time_column,
+            voltage_column=voltage_column,
             **self.beat_settings.__dict__,
         ).reset_index(drop=True)
 
@@ -830,19 +902,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.bad_data_list != []:
             self.action_update_bad_data_marks()
 
-        # print(self.beat_df)
+        beat_count = self.beat_df.shape[0]
+        if beat_count > 0:
+            mean_hr = self.beat_df["HR"].mean()
+            duration = self.beat_df["ts"].iloc[-1] - self.beat_df["ts"].iloc[0]
+            self.log_status(
+                f"Beat detection complete: {beat_count} beats found | "
+                f"Mean HR: {mean_hr:.0f} bpm | Duration: {duration:.1f}s"
+            )
+        else:
+            self.log_status("Beat detection complete: 0 beats found")
 
         # !!! need to add integration for center/filetype configs
 
     def action_Quality_Scoring(self):
-        print("quality scoring not yet implemented")
+        self.log_status("Quality scoring is not yet implemented")
 
     def action_Arrhythmia_Analysis(self):
         if self.DEVMODE:
-            try:
-                importlib.reload(arrhythmia_detection)
-            except:
-                importlib.reload(arrhythmia_detection)
+            importlib.reload(arrhythmia_detection)
+
+        if self.beat_df is None:
+            self.log_status("Run beat detection before arrhythmia analysis")
+            return
 
         # print(f'arrhyth if {self.arrhythmia_markers}')
         if self.arrhythmia_markers is not None:
@@ -855,14 +937,58 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph.removeItem(self.current_arrhythmia)
         self.current_arrhythmia = None
 
-        self.beat_df = arrhythmia_detection.call_arrhythmias(
-            self.beat_df,
-            self.arrhythmia_settings,
-            signals=self.filtered_data,
-            selected_signal=self.listWidget_Signals.currentItem().text(),
-            selected_time=self.comboBox_time_column.currentText(),
-            arr_methods=self.comboBox_arr_method.currentText(),
+        self.pushButton_Clear_Rejected.setVisible(False)
+
+        self.log_status("Running arrhythmia analysis...")
+
+        # progress indicator - unsupervised (PCA/DBSCAN) analysis can take
+        # 10+ seconds and would otherwise freeze the UI, so run it on a
+        # background thread and show an indeterminate progress dialog
+        self.arrhythmia_progress = QProgressDialog(
+            "Running arrhythmia analysis "
+            "(this may take a moment for unsupervised clustering)...",
+            None,
+            0,
+            0,
+            self,
         )
+        self.arrhythmia_progress.setWindowTitle("Arrhythmia Analysis")
+        self.arrhythmia_progress.setWindowModality(Qt.WindowModal)
+        self.arrhythmia_progress.setMinimumDuration(0)
+        self.arrhythmia_progress.setCancelButton(None)
+        self.arrhythmia_progress.show()
+
+        self.pushButton_Arrhythmia_Analysis.setEnabled(False)
+        self.pushButton_BeatDetection.setEnabled(False)
+
+        self._arrhythmia_thread = QThread(self)
+        self._arrhythmia_worker = ArrhythmiaAnalysisWorker(
+            self.beat_df.copy(),
+            self.arrhythmia_settings,
+            self.filtered_data,
+            self.listWidget_Signals.currentItem().text(),
+            self.comboBox_time_column.currentText(),
+            self.comboBox_arr_method.currentText(),
+        )
+        self._arrhythmia_worker.moveToThread(self._arrhythmia_thread)
+        self._arrhythmia_thread.started.connect(self._arrhythmia_worker.run)
+        self._arrhythmia_worker.finished.connect(self._on_arrhythmia_analysis_finished)
+        self._arrhythmia_worker.error.connect(self._on_arrhythmia_analysis_error)
+        self._arrhythmia_worker.finished.connect(self._arrhythmia_thread.quit)
+        self._arrhythmia_worker.error.connect(self._arrhythmia_thread.quit)
+        self._arrhythmia_thread.finished.connect(self._arrhythmia_worker.deleteLater)
+        self._arrhythmia_thread.finished.connect(self._arrhythmia_thread.deleteLater)
+        self._arrhythmia_thread.start()
+
+    def _cleanup_arrhythmia_progress(self):
+        self.arrhythmia_progress.close()
+        self.pushButton_Arrhythmia_Analysis.setEnabled(True)
+        self.pushButton_BeatDetection.setEnabled(True)
+
+    def _on_arrhythmia_analysis_finished(self, result_df):
+        self._cleanup_arrhythmia_progress()
+
+        self.beat_df = result_df
 
         self.arrhythmia_only_df = self.beat_df[
             self.beat_df.any_arrhythmia
@@ -894,6 +1020,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 symbolPen=(0, 0, 0),
                 symbolSize=14,
             )
+
+        self.log_status(
+            f"Arrhythmia analysis complete: {self.arrhythmia_only_df.shape[0]} "
+            f"arrhythmias flagged out of {self.beat_df.shape[0]} beats"
+        )
+
+    def _on_arrhythmia_analysis_error(self, message):
+        self._cleanup_arrhythmia_progress()
+        self.log_status(f"Arrhythmia analysis failed: {message}")
+        QMessageBox.critical(self, "Arrhythmia Analysis Error", message)
 
     def action_next_arrhythmia(self):
         self.current_arrhythmia_index = min(
@@ -941,7 +1077,69 @@ class MainWindow(QtWidgets.QMainWindow):
             "annot_any_arrhythmia",
         ] = -1
 
+        # a rejected marker now exists on the plot - let the user clear it/redraw
+        self.pushButton_Clear_Rejected.setVisible(True)
+
         self.action_next_arrhythmia()
+
+    def action_clear_rejected_arrhythmias(self):
+        """
+        Remove rejected (annot_any_arrhythmia == -1) markers from the displayed
+        arrhythmia set and redraw. beat_df itself keeps the rejection so it is
+        still recorded in the exported report.
+        """
+        if self.arrhythmia_only_df is None or self.arrhythmia_only_df.shape[0] == 0:
+            self.pushButton_Clear_Rejected.setVisible(False)
+            return
+
+        current_ts = None
+        if self.current_arrhythmia_index < self.arrhythmia_only_df.shape[0]:
+            current_ts = self.arrhythmia_only_df.iloc[self.current_arrhythmia_index]["ts"]
+
+        rejected_count = (self.arrhythmia_only_df["annot_any_arrhythmia"] == -1).sum()
+
+        self.arrhythmia_only_df = self.arrhythmia_only_df[
+            self.arrhythmia_only_df["annot_any_arrhythmia"] != -1
+        ].reset_index(drop=True)
+
+        if self.arrhythmia_markers is not None:
+            self.graph.removeItem(self.arrhythmia_markers)
+        self.arrhythmia_markers = None
+
+        self.arrhythmia_markers = self.add_plot(
+            source=self.arrhythmia_only_df,
+            filt_source=self.arrhythmia_only_df,
+            time_column="ts",
+            signal_column="annot_any_arrhythmia",
+            symbol="t1",
+            symbol_pen=(0, 0, 0),
+            symbol_brush=(255, 0, 0),
+            symbol_size=12,
+        )
+
+        if self.current_arrhythmia is not None:
+            self.graph.removeItem(self.current_arrhythmia)
+        self.current_arrhythmia = None
+
+        if self.arrhythmia_only_df.shape[0] == 0:
+            self.current_arrhythmia_index = 0
+        else:
+            matches = (
+                self.arrhythmia_only_df[self.arrhythmia_only_df["ts"] >= current_ts].index
+                if current_ts is not None
+                else []
+            )
+            if len(matches) > 0:
+                self.current_arrhythmia_index = matches[0]
+            else:
+                self.current_arrhythmia_index = self.arrhythmia_only_df.shape[0] - 1
+            self.action_update_current_arrhythmia()
+
+        self.pushButton_Clear_Rejected.setVisible(False)
+        self.log_status(
+            f"Removed {rejected_count} rejected arrhythmia marker(s) - "
+            f"{self.arrhythmia_only_df.shape[0]} remaining"
+        )
 
     def action_first_arrhythmia(self):
         self.current_arrhythmia_index = 0
@@ -997,13 +1195,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_output_dir.setText(self.output_dir)
 
     def action_generate_report(self):
-        print("generate_report")
+        self.log_status("Generating report...")
         if self.beat_df is None:
-            print("no beat info - did you perform beat and arrhtyhmia detection")
+            self.log_status(
+                "No beat info - did you perform beat and arrhythmia detection?"
+            )
             return
 
         if self.output_dir is None:
-            print("no output dir set")
+            self.log_status("No output directory set")
             return
 
         output_path = os.path.join(
@@ -1025,17 +1225,50 @@ class MainWindow(QtWidgets.QMainWindow):
             index=[0]
         )
 
-        print(output_path)
         writer = pandas.ExcelWriter(output_path, engine="xlsxwriter")
         self.beat_df.to_excel(writer, sheet_name="beats", index=False)
         bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
         settings_df.to_excel(writer, sheet_name="settings", index=False)
         writer.close()
-        print("finished")
+        self.log_status(f"Report saved: {output_path}")
 
     def action_Edit_Settings(self):
         window = SettingsWindow(parent=self)
         window.exec()
+
+
+# tooltip text shown for each setting field in the Settings dialog
+SETTINGS_TOOLTIPS = {
+    # heartbeat_detection.Settings
+    "min_RR": "Minimum inter-beat interval, in milliseconds. Limits the "
+              "maximum detectable heart rate (e.g. 60ms allows up to ~1000 bpm).",
+    "ecg_invert": "Flip (invert) the ECG signal polarity before peak detection.",
+    "ecg_filter": "Apply a Butterworth high-pass filter to remove baseline "
+                  "wander before peak detection.",
+    "ecg_filt_order": "Order of the Butterworth high-pass filter.",
+    "ecg_filt_cutoff": "High-pass filter cutoff frequency, in Hz.",
+    "abs_thresh": "Absolute voltage threshold for R-peak detection. Overrides "
+                  "perc_thresh when set; leave blank to use perc_thresh instead.",
+    "perc_thresh": "Percentile of the signal amplitude used as the R-peak "
+                   "detection threshold (e.g. 97 = top 3% of the signal).",
+    # arrhythmia_detection.Settings
+    "bradycardia_absolute_hr": "Heart rate (bpm) below which a beat is "
+                               "flagged as bradycardia.",
+    "tachycardia_absolute_hr": "Heart rate (bpm) above which a beat is "
+                               "flagged as tachycardia.",
+    "skipped_beat_multiple_rr": "A beat is flagged as a skipped beat when its "
+                                "RR interval exceeds this multiple of the "
+                                "local average RR interval.",
+    "premature_beat_multiple_rr": "A beat is flagged as premature when its RR "
+                                  "interval is below this multiple of the "
+                                  "local average RR interval.",
+    "window_size": "Number of samples per beat epoch used for PCA-based "
+                   "shape clustering (unsupervised method).",
+    "eps": "DBSCAN neighborhood radius (in PCA space) used to group similar "
+           "beat shapes (unsupervised method).",
+    "min_samples": "Minimum number of beats required to form a DBSCAN "
+                   "cluster of 'normal' beat shapes (unsupervised method).",
+}
 
 
 class SettingsWindow(QtWidgets.QDialog):
@@ -1048,8 +1281,9 @@ class SettingsWindow(QtWidgets.QDialog):
         outer_layout = QtWidgets.QVBoxLayout()
         inner_layout = QtWidgets.QHBoxLayout()
 
-        # Create layout for heartbeat detection
+        # Create grouped layout for heartbeat detection
 
+        beat_group = QtWidgets.QGroupBox("Beat Detection Settings")
         beat_layout = QtWidgets.QFormLayout()
         beat_settings = parent.beat_settings
         beat_options = {}
@@ -1057,10 +1291,17 @@ class SettingsWindow(QtWidgets.QDialog):
         for k, v in beat_settings.__dict__.items():
             EntryWidget = FlexibleEntryWidget(value=v)
             beat_options[k] = EntryWidget
-            beat_layout.addRow(k, EntryWidget.entry)
+            tooltip = SETTINGS_TOOLTIPS.get(k, "")
+            label = QtWidgets.QLabel(k)
+            label.setToolTip(tooltip)
+            EntryWidget.entry.setToolTip(tooltip)
+            beat_layout.addRow(label, EntryWidget.entry)
 
-        # Create layout for arrhythmia detection
+        beat_group.setLayout(beat_layout)
 
+        # Create grouped layout for arrhythmia detection
+
+        arr_group = QtWidgets.QGroupBox("Arrhythmia Detection Settings")
         arr_layout = QtWidgets.QFormLayout()
 
         arr_settings = parent.arrhythmia_settings
@@ -1071,19 +1312,32 @@ class SettingsWindow(QtWidgets.QDialog):
 
             EntryWidget = FlexibleEntryWidget(value=v)
             arr_options[k] = EntryWidget
-            arr_layout.addRow(k, EntryWidget.entry)
+            tooltip = SETTINGS_TOOLTIPS.get(k, "")
+            label = QtWidgets.QLabel(k)
+            label.setToolTip(tooltip)
+            EntryWidget.entry.setToolTip(tooltip)
+            arr_layout.addRow(label, EntryWidget.entry)
+
+        arr_group.setLayout(arr_layout)
 
         self.beatSettingsOptions = beat_options
         self.arrSettingsOptions = arr_options
 
-        inner_layout.addLayout(beat_layout)
-        inner_layout.addLayout(arr_layout)
+        inner_layout.addWidget(beat_group)
+        inner_layout.addWidget(arr_group)
 
         self.button = QtWidgets.QPushButton("Update Settings")
         self.button.clicked.connect(self.updateSettings)
 
+        self.restoreDefaultsButton = QtWidgets.QPushButton("Restore Defaults")
+        self.restoreDefaultsButton.clicked.connect(self.restoreDefaults)
+
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addWidget(self.restoreDefaultsButton)
+        button_layout.addWidget(self.button)
+
         outer_layout.addLayout(inner_layout)
-        outer_layout.addWidget(self.button)
+        outer_layout.addLayout(button_layout)
         self.setLayout(outer_layout)
 
     def updateSettings(self):
@@ -1095,6 +1349,17 @@ class SettingsWindow(QtWidgets.QDialog):
             self.parentFrame.arrhythmia_settings.__dict__[k] = v.getValues()
 
         self.close()
+
+    def restoreDefaults(self):
+        """Reset the dialog's fields (not yet applied) to factory defaults."""
+        default_beat_settings = heartbeat_detection.Settings()
+        default_arr_settings = arrhythmia_detection.Settings()
+
+        for k, widget in self.beatSettingsOptions.items():
+            widget.setValue(getattr(default_beat_settings, k))
+
+        for k, widget in self.arrSettingsOptions.items():
+            widget.setValue(getattr(default_arr_settings, k))
 
 
 class FlexibleEntryWidget:
@@ -1136,15 +1401,33 @@ class FlexibleEntryWidget:
             value = self.entry.isChecked()
             return value
 
+        elif self.type == str:
+            value = self.entry.text()
+            return value if value != "" else None
+
         else:
+            # value's original type was None (a nullable numeric setting, e.g.
+            # abs_thresh) - try to parse what the user typed as a float, but
+            # fall back to the raw string instead of crashing on non-numeric
+            # input
             value = self.entry.text()
 
             if value == "":
                 return None
 
-            value = float(value)
+            try:
+                value = float(value)
+            except ValueError:
+                pass
 
             return value
+
+    def setValue(self, value):
+        """Set the displayed value, used by 'Restore Defaults'."""
+        if self.type == bool:
+            self.entry.setChecked(bool(value))
+        else:
+            self.entry.setText("" if value is None else str(value))
 
 
 def main():

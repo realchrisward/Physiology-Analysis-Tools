@@ -102,6 +102,22 @@
      <string>Reject Arrhythmia</string>
     </property>
    </widget>
+   <widget class="QPushButton" name="pushButton_Clear_Rejected">
+    <property name="geometry">
+     <rect>
+      <x>170</x>
+      <y>520</y>
+      <width>200</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="visible">
+     <bool>false</bool>
+    </property>
+    <property name="text">
+     <string>Remove Rejected Markers</string>
+    </property>
+   </widget>
    <widget class="QScrollBar" name="horizontalScrollBar_Time">
     <property name="geometry">
      <rect>

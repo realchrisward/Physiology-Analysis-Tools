@@ -288,6 +288,25 @@ def basspro_extract(filepath, logger=None):
     return edf_extract(filepath)
 
 
+def SASSI_extract(filepath, logger=None):
+    """
+    simple wrapper for calling edf_extract(), matching the common
+    SASSI_extract(filepath) interface used by the other signal extractors
+
+    Parameters
+    ----------
+    filepath : str
+        Path to '.edf' file
+
+    Returns
+    -------
+    pandas DataFrame
+        DataFrame containing contents of '.edf' file
+
+    """
+    return edf_extract(filepath)
+
+
 def main():
     input_files = gui_open_filenames({"title": "select files to convert"})
     output_dir = gui_directory({"title": "select output directory"})
@@ -296,8 +315,8 @@ def main():
         print(f"working on file - {os.path.basename(f)}")
         try:
             convert_to_pickle(f, output_dir)
-        except:
-            print(f"unable to process file: {f}")
+        except Exception as e:
+            print(f"unable to process file: {f} ({e})")
 
 
 # %% run main

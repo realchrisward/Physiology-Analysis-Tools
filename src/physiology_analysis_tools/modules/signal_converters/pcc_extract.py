@@ -584,8 +584,8 @@ def main():
         logger.info(f"working on file - {os.path.basename(f)}")
         try:
             convert_to_pickle(f, output_dir,logger = logger)
-        except:
-            logger.info(f"unable to process file: {f}")
+        except Exception as e:
+            logger.info(f"unable to process file: {f} ({e})")
 
 
 #%% run main

@@ -404,8 +404,8 @@ def main():
         print(f"working on file - {os.path.basename(f)}")
         try:
             convert_to_pickle(f, output_dir)
-        except:
-            print(f"unable to process file: {f}")
+        except Exception as e:
+            print(f"unable to process file: {f} ({e})")
 
 
 #%% run main

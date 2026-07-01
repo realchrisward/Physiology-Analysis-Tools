@@ -209,8 +209,8 @@ def dsi_fp_matlab_extract(filepath, logger = None):
         df_chamber_temp[['time','chamber_temp']],on='time',how='left'
         ).merge(df_chamber_hum[['time','chamber_hum']],on='time',how='left')
     
-    df.loc[:,'chamber_temp'] = df['chamber_temp'].fillna(method='ffill')
-    df.loc[:,'chamber_hum'] = df['chamber_hum'].fillna(method='ffill')
+    df.loc[:,'chamber_temp'] = df['chamber_temp'].ffill()
+    df.loc[:,'chamber_hum'] = df['chamber_hum'].ffill()
     
     ts = 0
     for k,v in event_dict.items():
@@ -288,8 +288,8 @@ def main():
     for f in input_files:
         try:
             convert_to_pickle(f, output_dir)
-        except:
-            print(f'unable to process file: {f}')
+        except Exception as e:
+            print(f'unable to process file: {f} ({e})')
             
 #%% run main
 

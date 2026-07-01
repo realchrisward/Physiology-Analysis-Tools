@@ -13,7 +13,7 @@ import pandas
 # from modules import ml_tools
 try:
     from modules import ml_tools
-except:
+except ImportError:
     from physiology_analysis_tools.modules import ml_tools
 
 # %% define functions
@@ -109,8 +109,6 @@ def call_skipped_beat_multiple(
     )
     print(f"skip bt {output.shape}")
     return output
-    print("test")
-    #
 
 
 def call_premature_beat_multiple(df, rr_column_name, ts_column_name, threshold):
