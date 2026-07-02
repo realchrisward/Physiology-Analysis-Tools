@@ -51,6 +51,7 @@ import traceback
 from pyqtgraph import PlotWidget, plot
 import pyqtgraph
 import pandas
+import numpy
 
 # include regular and relative import -
 # !!! temporary solution - needed for pip distribution
@@ -96,6 +97,47 @@ if edf_extract is not None:
 
 
 # %% define functions
+def min_max_downsample(x_val, y_val, n_bins):
+    """
+    Downsample (x_val, y_val) to roughly 2 * n_bins points by splitting the
+    series into n_bins equal-sized bins and keeping both the min and max
+    y-sample (in original chronological order) from each bin.
+
+    Unlike stride/decimation downsampling (which just keeps every Nth
+    sample), this preserves transient spikes - e.g. arrhythmic beats - that
+    would otherwise be skipped over entirely when zoomed out.
+    """
+    x_arr = numpy.asarray(x_val)
+    y_arr = numpy.asarray(y_val)
+    n = len(x_arr)
+
+    if n_bins <= 0:
+        return [], []
+
+    bin_edges = numpy.linspace(0, n, n_bins + 1).astype(int)
+
+    x_out = []
+    y_out = []
+    for i in range(n_bins):
+        start, stop = bin_edges[i], bin_edges[i + 1]
+        if start >= stop:
+            continue
+        bin_x = x_arr[start:stop]
+        bin_y = y_arr[start:stop]
+        min_idx = int(numpy.argmin(bin_y))
+        max_idx = int(numpy.argmax(bin_y))
+        # preserve chronological order of the min/max pair within the bin
+        if min_idx > max_idx:
+            min_idx, max_idx = max_idx, min_idx
+        x_out.append(bin_x[min_idx])
+        y_out.append(bin_y[min_idx])
+        if max_idx != min_idx:
+            x_out.append(bin_x[max_idx])
+            y_out.append(bin_y[max_idx])
+
+    return x_out, y_out
+
+
 def gather_data(
     source, time_column, signal_column, filt_column, x_min, x_max, graph_width
 ):
@@ -107,12 +149,13 @@ def gather_data(
     x_val = source[time_column][data_filter]
     y_val = source[signal_column][data_filter]
 
-    if len(x_val) > graph_width * 4:
-        downsample_factor = int(len(x_val) / graph_width / 4)
-        x_val = x_val[::downsample_factor]
-        y_val = y_val[::downsample_factor]
+    if graph_width > 0 and len(x_val) > graph_width * 4:
+        x_val, y_val = min_max_downsample(x_val, y_val, graph_width * 2)
+    else:
+        x_val = list(x_val)
+        y_val = list(y_val)
 
-    return list(x_val), list(y_val)
+    return x_val, y_val
 
 
 class ArrhythmiaAnalysisWorker(QObject):
@@ -207,6 +250,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.horizontalScrollBar_Time.setFocusPolicy(Qt.StrongFocus)
 
         self.attach_buttons()
+
+        # give the center (graph) column resize priority over the sidebars
+        # when the window is resized
+        self.splitter_main.setStretchFactor(0, 0)
+        self.splitter_main.setStretchFactor(1, 1)
+        self.splitter_main.setStretchFactor(2, 0)
 
         self.add_graph()
         self.reset_gui()
@@ -957,19 +1006,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # progress indicator - unsupervised (PCA/DBSCAN) analysis can take
         # 10+ seconds and would otherwise freeze the UI, so run it on a
         # background thread and show an indeterminate progress dialog
+        # parent to self.ui (the actual visible window), not self (the
+        # MainWindow instance is a separate QMainWindow that is never shown -
+        # parenting a WindowModal, non-exec() dialog to it left the dialog
+        # blank/stuck since Qt had no visible surface to anchor against)
         self.arrhythmia_progress = QProgressDialog(
             "Running arrhythmia analysis "
             "(this may take a moment for unsupervised clustering)...",
             None,
             0,
             0,
-            self,
+            self.ui,
         )
         self.arrhythmia_progress.setWindowTitle("Arrhythmia Analysis")
         self.arrhythmia_progress.setWindowModality(Qt.WindowModal)
         self.arrhythmia_progress.setMinimumDuration(0)
         self.arrhythmia_progress.setCancelButton(None)
         self.arrhythmia_progress.show()
+        self.arrhythmia_progress.repaint()
+        QtWidgets.QApplication.processEvents()
 
         self.pushButton_Arrhythmia_Analysis.setEnabled(False)
         self.pushButton_BeatDetection.setEnabled(False)
@@ -1042,7 +1097,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_arrhythmia_analysis_error(self, message):
         self._cleanup_arrhythmia_progress()
         self.log_status(f"Arrhythmia analysis failed: {message}")
-        QMessageBox.critical(self, "Arrhythmia Analysis Error", message)
+        QMessageBox.critical(self.ui, "Arrhythmia Analysis Error", message)
 
     def action_next_arrhythmia(self):
         self.current_arrhythmia_index = min(
@@ -1256,6 +1311,12 @@ SETTINGS_TOOLTIPS = {
     "min_RR": "Minimum inter-beat interval, in milliseconds. Limits the "
               "maximum detectable heart rate (e.g. 60ms allows up to ~1000 bpm).",
     "ecg_invert": "Flip (invert) the ECG signal polarity before peak detection.",
+    "auto_detect_invert": "Automatically detect and correct inverted R-peaks "
+                          "by comparing positive vs. negative peak amplitude, "
+                          "instead of relying on the ecg_invert flag above. "
+                          "Useful for files where R-peaks point downward "
+                          "(a known cause of poor beat detection). Overrides "
+                          "ecg_invert when enabled.",
     "ecg_filter": "Apply a Butterworth high-pass filter to remove baseline "
                   "wander before peak detection.",
     "ecg_filt_order": "Order of the Butterworth high-pass filter.",

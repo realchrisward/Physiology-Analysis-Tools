@@ -12,12 +12,17 @@ import scipy
 import pandas
 import numpy
 
+# minimum number of positive/negative peaks required before trusting the
+# auto_detect_invert percentile comparison in beatcaller() - see beatcaller()
+_MIN_PEAKS_FOR_INVERT_DETECTION = 30
+
 
 
 class Settings:
     def __init__(self):
         self.min_RR = 60
         self.ecg_invert = False
+        self.auto_detect_invert = False
         self.ecg_filter = True
         self.ecg_filt_order = 2
         self.ecg_filt_cutoff = 5
@@ -27,6 +32,7 @@ class Settings:
     def use_anesthetized_default(self):
         self.min_RR = 60
         self.ecg_invert = False
+        self.auto_detect_invert = False
         self.ecg_filter = True
         self.ecg_filt_order = 2
         self.ecg_filt_cutoff = 5
@@ -37,6 +43,7 @@ class Settings:
         # need to update this !!!
         self.min_RR = 60
         self.ecg_invert = False
+        self.auto_detect_invert = False
         self.ecg_filter = True
         self.ecg_filt_order = 2
         self.ecg_filt_cutoff = 5
@@ -99,6 +106,7 @@ def beatcaller(
     time_column="time",
     min_RR=100,
     ecg_invert=False,
+    auto_detect_invert=False,
     ecg_abs_value=False,
     ecg_filter=True,
     ecg_filt_order=2,
@@ -119,6 +127,14 @@ def beatcaller(
     *Note, if both abs_thresh and perc_thresh are provided, abs_thresh will be
     used
 
+    *Note, auto_detect_invert (default False) addresses files with inverted
+    R-peaks (a documented cause of poor beat detection - GitHub issue #40/#13)
+    by comparing mean positive vs. negative peak amplitude on the filtered
+    signal and flipping polarity automatically if the negative peaks are more
+    prominent. When True, it takes precedence over the manual ecg_invert flag.
+    Left off by default so existing behavior/results are unchanged unless a
+    user opts in.
+
     Returns:
     - DataFrame: DataFrame containing timestamps, RR intervals, and heart rates.
     """
@@ -126,8 +142,9 @@ def beatcaller(
     time = df[time_column]
     voltage = df[voltage_column]
 
-    # Invert ECG signal if required
-    if ecg_invert:
+    # Invert ECG signal if required (manual - skipped when auto_detect_invert
+    # is enabled, since that decides polarity itself further below)
+    if ecg_invert and not auto_detect_invert:
         voltage = voltage * -1
 
     if ecg_abs_value:
@@ -143,6 +160,32 @@ def beatcaller(
             cutoff=ecg_filt_cutoff,
             output="sos",
         )
+
+    if auto_detect_invert:
+        voltage = pandas.Series(voltage)
+        peak_distance = max(int(min_RR / 1000 * sampling_frequency), 1)
+        pos_peaks, _ = scipy.signal.find_peaks(voltage, distance=peak_distance)
+        neg_peaks, _ = scipy.signal.find_peaks(-voltage, distance=peak_distance)
+        # Require enough peaks on both sides for the percentile comparison
+        # below to be statistically meaningful - on very short/sparse
+        # recordings (verified: real sample clips with <30 peaks), the 97th
+        # percentile collapses to essentially the single max value, which is
+        # too sensitive to filter edge-effect artifacts and can misfire. With
+        # too few peaks to trust, leave polarity as given instead of guessing.
+        if len(pos_peaks) >= _MIN_PEAKS_FOR_INVERT_DETECTION and len(
+            neg_peaks
+        ) >= _MIN_PEAKS_FOR_INVERT_DETECTION:
+            # Compare the 97th percentile of |amplitude| among positive vs.
+            # negative peaks, rather than the mean of all peaks - real ECG
+            # has many small local-maxima from noise/S-waves/T-waves on both
+            # sides of zero, which dilutes a plain mean enough to misfire on
+            # correctly-oriented signals (verified against real sample data).
+            # The dominant R-wave, whichever polarity, stands well clear of
+            # that noise floor at the 97th percentile.
+            pos_p97 = numpy.percentile(voltage.take(pos_peaks).abs(), 97)
+            neg_p97 = numpy.percentile(voltage.take(neg_peaks).abs(), 97)
+            if neg_p97 > pos_p97:
+                voltage = voltage * -1
 
     # Calculate isoelectric line
     isoelectric_line = pandas.Series(voltage).median()
