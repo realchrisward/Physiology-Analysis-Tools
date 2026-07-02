@@ -309,10 +309,23 @@ class MainWindow(QtWidgets.QMainWindow):
         pass
 
     def add_graph(self):
+        legend_hint = QtWidgets.QLabel(
+            "Legend: click an item's line/marker swatch below to show/hide it on the graph"
+        )
+        legend_hint.setStyleSheet(
+            "color: #6b7280; font-size: 8pt; font-style: italic; background: transparent;"
+        )
+        self.verticalLayout_graph.addWidget(legend_hint)
+
         self.graph = pyqtgraph.PlotWidget()
-        self.legend = self.graph.addLegend()
+        self.legend = self.graph.addLegend(
+            offset=(-10, 10),
+            pen=pyqtgraph.mkPen(color=(207, 212, 220), width=1),
+            brush=pyqtgraph.mkBrush(255, 255, 255, 235),
+            labelTextColor=(31, 41, 55),
+            labelTextSize="8pt",
+        )
         self.legend.setColumnCount(3)
-        self.legend.setOffset([0.1, -0.1])
         self.verticalLayout_graph.addWidget(self.graph)
         self.graph.setXRange(
             self.doubleSpinBox_x_min.value(),
@@ -1430,11 +1443,157 @@ class FlexibleEntryWidget:
             self.entry.setText("" if value is None else str(value))
 
 
+# light, flat, "modern web-UI" theme - applied at the QApplication level so it
+# covers the main window, the Settings dialog, and any QMessageBox/QProgressDialog.
+# Deliberately leaves the pyqtgraph plot area alone (it manages its own
+# background via setBackground("w") and draws directly with QPainter, not QSS).
+APP_STYLESHEET = """
+QWidget {
+    background-color: #f5f6f8;
+    color: #1f2937;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 9.5pt;
+}
+
+QPushButton {
+    background-color: #ffffff;
+    color: #1f2937;
+    border: 1px solid #cfd4dc;
+    border-radius: 6px;
+    padding: 3px 5px;
+}
+
+QPushButton:hover {
+    background-color: #eef2ff;
+    border: 1px solid #6366f1;
+}
+
+QPushButton:pressed {
+    background-color: #e0e7ff;
+}
+
+QPushButton:disabled {
+    background-color: #f1f2f4;
+    color: #9ca3af;
+    border: 1px solid #e5e7eb;
+}
+
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background-color: #ffffff;
+    border: 1px solid #cfd4dc;
+    border-radius: 4px;
+    padding: 2px 4px;
+    selection-background-color: #6366f1;
+    selection-color: #ffffff;
+}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #6366f1;
+}
+
+QListWidget, QTextBrowser {
+    background-color: #ffffff;
+    border: 1px solid #cfd4dc;
+    border-radius: 6px;
+}
+
+QListWidget::item:selected {
+    background-color: #6366f1;
+    color: #ffffff;
+}
+
+QCheckBox {
+    spacing: 6px;
+}
+
+QGroupBox {
+    border: 1px solid #d7dbe0;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding-top: 8px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    color: #374151;
+}
+
+QMenuBar {
+    background-color: #ffffff;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+QMenuBar::item:selected {
+    background-color: #eef2ff;
+}
+
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid #cfd4dc;
+}
+
+QMenu::item:selected {
+    background-color: #eef2ff;
+}
+
+QStatusBar {
+    background-color: #ffffff;
+    border-top: 1px solid #e5e7eb;
+}
+
+QLabel {
+    color: #374151;
+    background-color: transparent;
+}
+
+QLabel#label_Title_and_Version {
+    color: #4338ca;
+    font-size: 13pt;
+    font-weight: 700;
+}
+
+/* primary workflow actions get an accent color so they stand out from
+   secondary/navigation buttons */
+QPushButton#pushButton_BeatDetection,
+QPushButton#pushButton_Arrhythmia_Analysis,
+QPushButton#pushButton_generate_report {
+    background-color: #4f46e5;
+    color: #ffffff;
+    border: 1px solid #4338ca;
+    font-weight: 600;
+}
+
+QPushButton#pushButton_BeatDetection:hover,
+QPushButton#pushButton_Arrhythmia_Analysis:hover,
+QPushButton#pushButton_generate_report:hover {
+    background-color: #4338ca;
+}
+
+QPushButton#pushButton_BeatDetection:pressed,
+QPushButton#pushButton_Arrhythmia_Analysis:pressed,
+QPushButton#pushButton_generate_report:pressed {
+    background-color: #3730a3;
+}
+
+QPushButton#pushButton_BeatDetection:disabled,
+QPushButton#pushButton_Arrhythmia_Analysis:disabled,
+QPushButton#pushButton_generate_report:disabled {
+    background-color: #c7d2fe;
+    color: #eef2ff;
+    border: 1px solid #c7d2fe;
+}
+"""
+
+
 def main():
 
     loader = QUiLoader()
     print("1")
     app = QtWidgets.QApplication(sys.argv)
+    app.setStyleSheet(APP_STYLESHEET)
     print("2")
     ui_file = QFile(os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui"))
     print("3")
