@@ -17,7 +17,7 @@ Layout
 written for Physiology Analysis Tools (C) 2024
 """
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import json
 
@@ -35,6 +35,15 @@ from .pipeline import DEFAULT_NORMALIZER, Pipeline, next_color, run_pipelines
 
 MANUAL = "__manual__"
 CONSENSUS = "__consensus__"
+
+# Analysis segment length used when the window first opens. Filtering, beat
+# calling and plotting all operate on the segment, never on the whole file: a
+# 3 h recording at 1 kHz is ~10.8 M samples, which takes minutes per pipeline
+# and makes pyqtgraph unusable. Widen it deliberately once a grid looks right.
+DEFAULT_SEGMENT_S = 60.0
+
+# Above this many samples, confirm before analysing (roughly 10 min at 1 kHz).
+LARGE_SEGMENT_SAMPLES = 600_000
 
 
 # %% settings form (mirrors main.FlexibleEntryWidget, kept local to avoid a
@@ -110,12 +119,14 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.setWindowTitle("Filter / Beat-caller Comparison")
         self.resize(1400, 850)
 
-        self.data = data.reset_index(drop=True)
+        self.full_data = data.reset_index(drop=True)
         self.time_column = time_column
         self.voltage_column = voltage_column
-        self.time = numpy.asarray(self.data[time_column], dtype=float)
-        self.voltage = numpy.asarray(self.data[voltage_column], dtype=float)
-        self.fs = sampling_frequency(self.time)
+
+        self.full_time = numpy.asarray(self.full_data[time_column], dtype=float)
+        self.file_start = float(self.full_time[0])
+        self.file_end = float(self.full_time[-1])
+        self.fs = sampling_frequency(self.full_time)
 
         self.pipelines = []
         self.results = {}
@@ -125,8 +136,140 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.review_index = 0
         self.beat_items = {}
 
+        # The analysis segment. self.data / self.time / self.voltage always
+        # refer to the segment, so every downstream consumer (run_pipelines,
+        # the plots, annotation snapping) is confined to it automatically.
+        self.ui_ready = False
+        span = self.file_end - self.file_start
+        self.segment_start = self.file_start
+        self.segment_duration = (
+            min(DEFAULT_SEGMENT_S, span) if span > 0 else DEFAULT_SEGMENT_S
+        )
+        self.apply_segment()
+
         self.build_ui()
+        self.ui_ready = True
+        self.sync_segment_widgets()
         self.add_pipeline()
+
+    # -- analysis segment --------------------------------------------------
+    def apply_segment(self):
+        """Slice the recording down to [segment_start, +segment_duration]."""
+        start = float(self.segment_start)
+        stop = start + float(self.segment_duration)
+
+        i0 = int(numpy.searchsorted(self.full_time, start, side="left"))
+        i1 = int(numpy.searchsorted(self.full_time, stop, side="right"))
+        i1 = min(max(i1, i0 + 2), self.full_time.size)  # filters need >1 sample
+        i0 = min(i0, max(i1 - 2, 0))
+
+        self.segment_slice = (i0, i1)
+        self.data = self.full_data.iloc[i0:i1].reset_index(drop=True)
+        self.time = self.full_time[i0:i1]
+        self.voltage = numpy.asarray(self.data[self.voltage_column], dtype=float)
+
+        # Results were computed against the previous slice: their signal arrays
+        # are a different length than self.time, so they can be neither drawn
+        # nor scored. Drop them rather than silently mis-aligning.
+        self.results = {}
+        self.review_windows = numpy.array([])
+        self.review_index = 0
+
+    def segment_bounds(self):
+        return float(self.time[0]), float(self.time[-1])
+
+    def segment_changed(self):
+        if not self.ui_ready:
+            return
+        start = self.spin_seg_start.value()
+        duration = self.spin_seg_len.value()
+        samples = int(duration * self.fs)
+        if samples > LARGE_SEGMENT_SAMPLES:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Large segment",
+                f"{duration:.0f} s is about {samples:,} samples per pipeline.\n"
+                "Running a grid over this will be slow and the plots will be "
+                "sluggish.\n\nContinue?",
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                self.sync_segment_widgets()
+                return
+
+        self.segment_start = start
+        self.segment_duration = duration
+        self.apply_segment()
+        self.sync_segment_widgets()
+        self.rebuild_reference_combo()
+        self.redraw_all()
+        self.status.setText(
+            "segment changed - previous results discarded, re-run the pipelines"
+        )
+
+    def use_current_view(self):
+        """Shrink the analysis segment to whatever is on screen right now."""
+        if not self.ui_ready:
+            return
+        self.spin_seg_start.blockSignals(True)
+        self.spin_seg_len.blockSignals(True)
+        self.spin_seg_start.setValue(self.spin_x_min.value())
+        self.spin_seg_len.setValue(self.spin_x_window.value())
+        self.spin_seg_start.blockSignals(False)
+        self.spin_seg_len.blockSignals(False)
+        self.segment_changed()
+
+    def use_whole_recording(self):
+        if not self.ui_ready:
+            return
+        self.spin_seg_start.blockSignals(True)
+        self.spin_seg_len.blockSignals(True)
+        self.spin_seg_start.setValue(self.file_start)
+        self.spin_seg_len.setValue(self.file_end - self.file_start)
+        self.spin_seg_start.blockSignals(False)
+        self.spin_seg_len.blockSignals(False)
+        self.segment_changed()
+
+    def sync_segment_widgets(self):
+        """Push segment state back into the widgets and the view spinboxes."""
+        if not self.ui_ready:
+            return
+        low, high = self.segment_bounds()
+        span = self.file_end - self.file_start
+        i0, i1 = self.segment_slice
+
+        for spin, lo, hi, value in (
+            (self.spin_seg_start, self.file_start, self.file_end, self.segment_start),
+            (self.spin_seg_len, 0.05, max(span, 0.05), self.segment_duration),
+            (self.spin_x_min, low, high, low),
+        ):
+            spin.blockSignals(True)
+            spin.setRange(lo, hi)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+        self.spin_x_window.blockSignals(True)
+        self.spin_x_window.setRange(0.05, max(high - low, 0.05))
+        self.spin_x_window.setValue(min(self.spin_x_window.value(), high - low))
+        self.spin_x_window.blockSignals(False)
+
+        n_manual = len(self.manual_ts) - len(self.manual_in_segment())
+        outside = f"  |  {n_manual} annotation(s) outside segment" if n_manual else ""
+        self.label_segment.setText(
+            f"analysing {high - low:.1f} s of {span:.1f} s "
+            f"({i1 - i0:,} of {self.full_time.size:,} samples){outside}"
+        )
+        self.update_range()
+
+    def manual_in_segment(self):
+        """
+        Annotations outside the segment must not be scored against: the
+        detectors never saw that stretch of signal, so every annotation out
+        there would be counted as a false negative and quietly tank recall.
+        """
+        if not self.manual_ts:
+            return []
+        low, high = self.segment_bounds()
+        return [t for t in self.manual_ts if low <= t <= high]
 
     # -- construction ------------------------------------------------------
     def build_ui(self):
@@ -138,6 +281,45 @@ class ComparisonWindow(QtWidgets.QDialog):
             f"<b>Pipelines</b> &mdash; signal: {self.voltage_column} "
             f"@ {self.fs:.0f} Hz"
         ))
+
+        # --- analysis segment -----------------------------------------
+        seg_box = QtWidgets.QGroupBox("Analysis segment")
+        seg_box.setToolTip(
+            "Filtering, beat calling and plotting are limited to this slice.\n"
+            "Tune a grid on a short segment, then widen it once it looks right."
+        )
+        seg_outer = QtWidgets.QVBoxLayout()
+        seg_row = QtWidgets.QHBoxLayout()
+        seg_row.addWidget(QtWidgets.QLabel("Start (s):"))
+        self.spin_seg_start = QtWidgets.QDoubleSpinBox()
+        self.spin_seg_start.setDecimals(3)
+        self.spin_seg_start.setRange(self.file_start, self.file_end)
+        self.spin_seg_start.setValue(self.segment_start)
+        self.spin_seg_start.setKeyboardTracking(False)
+        self.spin_seg_start.editingFinished.connect(self.segment_changed)
+        seg_row.addWidget(self.spin_seg_start)
+
+        seg_row.addWidget(QtWidgets.QLabel("Length (s):"))
+        self.spin_seg_len = QtWidgets.QDoubleSpinBox()
+        self.spin_seg_len.setDecimals(3)
+        self.spin_seg_len.setRange(0.05, max(self.file_end - self.file_start, 0.05))
+        self.spin_seg_len.setValue(self.segment_duration)
+        self.spin_seg_len.setKeyboardTracking(False)
+        self.spin_seg_len.editingFinished.connect(self.segment_changed)
+        seg_row.addWidget(self.spin_seg_len)
+
+        button_view = QtWidgets.QPushButton("Use current view")
+        button_view.clicked.connect(self.use_current_view)
+        seg_row.addWidget(button_view)
+        button_whole = QtWidgets.QPushButton("Whole recording")
+        button_whole.clicked.connect(self.use_whole_recording)
+        seg_row.addWidget(button_whole)
+        seg_outer.addLayout(seg_row)
+
+        self.label_segment = QtWidgets.QLabel("")
+        seg_outer.addWidget(self.label_segment)
+        seg_box.setLayout(seg_outer)
+        left.addWidget(seg_box)
 
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -236,6 +418,10 @@ class ComparisonWindow(QtWidgets.QDialog):
 
         self.signal_plot = pyqtgraph.PlotWidget()
         self.signal_plot.setBackground("w")
+        # peak-preserving downsampling: keeps R peaks visible while drawing far
+        # fewer points than the segment contains
+        self.signal_plot.setDownsampling(auto=True, mode="peak")
+        self.signal_plot.setClipToView(True)
         self.signal_plot.addLegend(offset=(10, 10))
         self.signal_plot.scene().sigMouseClicked.connect(self.plot_clicked)
         self.view_box = self.signal_plot.plotItem.vb
@@ -272,15 +458,17 @@ class ComparisonWindow(QtWidgets.QDialog):
 
         nav.addStretch(1)
         nav.addWidget(QtWidgets.QLabel("Time (s):"))
+        low, high = self.segment_bounds()
         self.spin_x_min = QtWidgets.QDoubleSpinBox()
-        self.spin_x_min.setRange(float(self.time.min()), float(self.time.max()))
+        self.spin_x_min.setRange(low, high)
+        self.spin_x_min.setValue(low)
         self.spin_x_min.setDecimals(3)
         self.spin_x_min.valueChanged.connect(self.update_range)
         nav.addWidget(self.spin_x_min)
         nav.addWidget(QtWidgets.QLabel("Window (s):"))
         self.spin_x_window = QtWidgets.QDoubleSpinBox()
-        self.spin_x_window.setRange(0.05, 3600)
-        self.spin_x_window.setValue(5.0)
+        self.spin_x_window.setRange(0.05, max(high - low, 0.05))
+        self.spin_x_window.setValue(min(5.0, max(high - low, 0.05)))
         self.spin_x_window.valueChanged.connect(self.update_range)
         nav.addWidget(self.spin_x_window)
 
@@ -514,7 +702,12 @@ class ComparisonWindow(QtWidgets.QDialog):
             for r in self.results.values()
             if r.ok
         )
-        self.status.setText(counts + ("  |  FAILED: " + "; ".join(errors) if errors else ""))
+        low, high = self.segment_bounds()
+        self.status.setText(
+            f"[{low:.1f}-{high:.1f} s]  "
+            + counts
+            + ("  |  FAILED: " + "; ".join(errors) if errors else "")
+        )
 
         self.rebuild_reference_combo()
         self.redraw_all()
@@ -536,7 +729,7 @@ class ComparisonWindow(QtWidgets.QDialog):
     def reference_ts(self):
         key = self.combo_reference.currentData()
         if key == MANUAL:
-            return numpy.sort(numpy.array(self.manual_ts, dtype=float))
+            return numpy.sort(numpy.array(self.manual_in_segment(), dtype=float))
         if key == CONSENSUS:
             return comparison.consensus_beats(
                 [r.beats for r in self.results.values() if r.ok],
@@ -709,8 +902,8 @@ class ComparisonWindow(QtWidgets.QDialog):
                 )
 
         # manual annotations also sit on the waveform itself while annotating
-        if self.manual_ts:
-            manual = numpy.array(self.manual_ts)
+        if self.manual_in_segment():
+            manual = numpy.array(self.manual_in_segment())
             self.signal_plot.plot(
                 manual, numpy.interp(manual, self.time, self.voltage),
                 pen=None, symbol="d", symbolBrush=(0, 0, 0), symbolSize=9,
@@ -763,10 +956,10 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.raster_plot.setMaximumHeight(max(140, 34 * (len(lanes) + 1)))
 
     def update_range(self):
-        x_min = self.spin_x_min.value()
-        self.signal_plot.setXRange(
-            x_min, x_min + self.spin_x_window.value(), padding=0
-        )
+        low, high = self.segment_bounds()
+        x_min = min(max(self.spin_x_min.value(), low), high)
+        x_max = min(x_min + self.spin_x_window.value(), high)
+        self.signal_plot.setXRange(x_min, max(x_max, x_min + 0.05), padding=0)
 
     # -- manual annotation -------------------------------------------------
     def set_annotate_mode(self, on):
@@ -775,6 +968,7 @@ class ComparisonWindow(QtWidgets.QDialog):
 
     def clear_annotations(self):
         self.manual_ts = []
+        self.sync_segment_widgets()
         self.redraw_all()
 
     def plot_clicked(self, event):
@@ -782,6 +976,13 @@ class ComparisonWindow(QtWidgets.QDialog):
             return
         point = self.view_box.mapSceneToView(event.scenePos())
         clicked = float(point.x())
+
+        low, high = self.segment_bounds()
+        if not low <= clicked <= high:
+            self.status.setText(
+                "click is outside the analysis segment - annotation ignored"
+            )
+            return
 
         # ctrl-click removes the nearest annotation
         if event.modifiers() & QtCore.Qt.ControlModifier:
@@ -799,6 +1000,7 @@ class ComparisonWindow(QtWidgets.QDialog):
             self.manual_ts.append(float(self.time[snapped]))
             self.manual_ts.sort()
 
+        self.sync_segment_widgets()
         self.redraw_all()
 
     # -- review navigation -------------------------------------------------
@@ -865,9 +1067,27 @@ class ComparisonWindow(QtWidgets.QDialog):
             writer, sheet_name="disagreements", index=False
         )
 
-        pandas.DataFrame({"ts": self.manual_ts}).to_excel(
-            writer, sheet_name="manual_annotations", index=False
-        )
+        low, high = self.segment_bounds()
+        i0, i1 = self.segment_slice
+        pandas.DataFrame(
+            [{
+                "segment_start_s": low,
+                "segment_stop_s": high,
+                "segment_samples": i1 - i0,
+                "file_start_s": self.file_start,
+                "file_stop_s": self.file_end,
+                "file_samples": int(self.full_time.size),
+                "sampling_rate_hz": self.fs,
+                "signal_column": self.voltage_column,
+            }]
+        ).to_excel(writer, sheet_name="segment", index=False)
+
+        pandas.DataFrame(
+            {
+                "ts": self.manual_ts,
+                "in_segment": [low <= t <= high for t in self.manual_ts],
+            }
+        ).to_excel(writer, sheet_name="manual_annotations", index=False)
 
         for uid, result in self.results.items():
             if result.ok and len(result.beats):
@@ -933,9 +1153,10 @@ class ComparisonWindow(QtWidgets.QDialog):
                 symbol_brush=(0, 255, 0),
                 symbol_size=8,
             )
+            low, high = self.segment_bounds()
             self.status.setText(
                 f"sent {len(result.beats)} beats from '{result.pipeline.label}' "
-                "to the main window"
+                f"to the main window (segment {low:.1f}-{high:.1f} s only)"
             )
 
 

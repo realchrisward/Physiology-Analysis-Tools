@@ -216,6 +216,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__(*args, **kwargs)
 
         self.ui = ui
+        self.DEVMODE = True
 
         # Migrate ui children to parent level for convenience
         for att, val in ui.__dict__.items():
@@ -1745,6 +1746,7 @@ def main():
         "pipeline": pipeline.__version__,
         "comparison": comparison.__version__,
     }
+    window.DEVMODE = True
     ui.show()
     app.exec()
 
