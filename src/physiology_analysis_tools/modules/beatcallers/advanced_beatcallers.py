@@ -17,7 +17,7 @@ import numpy
 import pandas
 import scipy.signal
 
-from . import BEATCALLERS
+from ..registries import BEATCALLERS
 from ..algorithms import (
     BeatCaller,
     Settings,

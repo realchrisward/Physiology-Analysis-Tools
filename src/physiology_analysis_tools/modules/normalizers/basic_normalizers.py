@@ -21,7 +21,7 @@ __version__ = "0.0.1"
 import numpy
 import pandas
 
-from . import NORMALIZERS
+from ..registries import NORMALIZERS
 from ..algorithms import Settings, SignalNormalizer
 
 EPSILON = 1e-12

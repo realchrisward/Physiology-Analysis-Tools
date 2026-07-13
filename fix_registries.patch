@@ -1,0 +1,184 @@
+diff --git a/src/physiology_analysis_tools/modules/beatcallers/__init__.py b/src/physiology_analysis_tools/modules/beatcallers/__init__.py
+index c8f9be4..9a30b73 100644
+--- a/src/physiology_analysis_tools/modules/beatcallers/__init__.py
++++ b/src/physiology_analysis_tools/modules/beatcallers/__init__.py
+@@ -1,5 +1,20 @@
+-from ..registry import Registry, discover
++# -*- coding: utf-8 -*-
++"""
++Pluggable beat callers.
+ 
+-FILTERS = Registry("beatcallers")
++Add one by dropping a module in this package that defines a class decorated
++with @BEATCALLERS.register. Nothing else needs to change - not this file, not
++main.py, not the UI.
+ 
+-discover(__name__, __path__)
+\ No newline at end of file
++The registry itself lives in modules.registries, so the order of the lines
++below cannot break anything.
++"""
++
++__version__ = "0.0.2"
++
++from ..registries import BEATCALLERS  # re-exported for convenience
++from ..registry import discover
++
++discover(__name__, __path__)
++
++__all__ = ["BEATCALLERS"]
+diff --git a/src/physiology_analysis_tools/modules/beatcallers/advanced_beatcallers.py b/src/physiology_analysis_tools/modules/beatcallers/advanced_beatcallers.py
+index 9f54a0d..f64dedf 100644
+--- a/src/physiology_analysis_tools/modules/beatcallers/advanced_beatcallers.py
++++ b/src/physiology_analysis_tools/modules/beatcallers/advanced_beatcallers.py
+@@ -17,7 +17,7 @@ import numpy
+ import pandas
+ import scipy.signal
+ 
+-from . import BEATCALLERS
++from ..registries import BEATCALLERS
+ from ..algorithms import (
+     BeatCaller,
+     Settings,
+diff --git a/src/physiology_analysis_tools/modules/beatcallers/basic_beatcallers.py b/src/physiology_analysis_tools/modules/beatcallers/basic_beatcallers.py
+index b3ec1f9..0ce84bd 100644
+--- a/src/physiology_analysis_tools/modules/beatcallers/basic_beatcallers.py
++++ b/src/physiology_analysis_tools/modules/beatcallers/basic_beatcallers.py
+@@ -14,7 +14,7 @@ import numpy
+ import pandas
+ import scipy.signal
+ 
+-from . import BEATCALLERS
++from ..registries import BEATCALLERS
+ from ..algorithms import (
+     BeatCaller,
+     Settings,
+diff --git a/src/physiology_analysis_tools/modules/filters/__init__.py b/src/physiology_analysis_tools/modules/filters/__init__.py
+index 6ba603d..c0993c5 100644
+--- a/src/physiology_analysis_tools/modules/filters/__init__.py
++++ b/src/physiology_analysis_tools/modules/filters/__init__.py
+@@ -1,5 +1,20 @@
+-from ..registry import Registry, discover
++# -*- coding: utf-8 -*-
++"""
++Pluggable filters.
+ 
+-FILTERS = Registry("filters")
++Add one by dropping a module in this package that defines a class decorated
++with @FILTERS.register. Nothing else needs to change - not this file, not
++main.py, not the UI.
+ 
+-discover(__name__, __path__)
+\ No newline at end of file
++The registry itself lives in modules.registries, so the order of the lines
++below cannot break anything.
++"""
++
++__version__ = "0.0.2"
++
++from ..registries import FILTERS  # re-exported for convenience
++from ..registry import discover
++
++discover(__name__, __path__)
++
++__all__ = ["FILTERS"]
+diff --git a/src/physiology_analysis_tools/modules/filters/advanced_filters.py b/src/physiology_analysis_tools/modules/filters/advanced_filters.py
+index 5f3f861..c879391 100644
+--- a/src/physiology_analysis_tools/modules/filters/advanced_filters.py
++++ b/src/physiology_analysis_tools/modules/filters/advanced_filters.py
+@@ -14,7 +14,7 @@ import numpy
+ import pandas
+ import scipy.signal
+ 
+-from . import FILTERS
++from ..registries import FILTERS
+ from ..algorithms import Settings, SignalFilter
+ from .. import ml_tools
+ from ..signal_converters import signal_filters_and_analyzers
+diff --git a/src/physiology_analysis_tools/modules/filters/basic_filters.py b/src/physiology_analysis_tools/modules/filters/basic_filters.py
+index 43564ae..ee5bf5d 100644
+--- a/src/physiology_analysis_tools/modules/filters/basic_filters.py
++++ b/src/physiology_analysis_tools/modules/filters/basic_filters.py
+@@ -11,7 +11,7 @@ __version__ = "0.0.1"
+ import numpy
+ import scipy.signal
+ 
+-from . import FILTERS
++from ..registries import FILTERS
+ from ..algorithms import Settings, SignalFilter
+ 
+ 
+diff --git a/src/physiology_analysis_tools/modules/normalizers/__init__.py b/src/physiology_analysis_tools/modules/normalizers/__init__.py
+index 0386efd..3a4bf9e 100644
+--- a/src/physiology_analysis_tools/modules/normalizers/__init__.py
++++ b/src/physiology_analysis_tools/modules/normalizers/__init__.py
+@@ -1,5 +1,20 @@
+-from ..registry import Registry, discover
++# -*- coding: utf-8 -*-
++"""
++Pluggable normalisers.
+ 
+-FILTERS = Registry("normalizers")
++Add one by dropping a module in this package that defines a class decorated
++with @NORMALIZERS.register. Nothing else needs to change - not this file, not
++main.py, not the UI.
+ 
+-discover(__name__, __path__)
+\ No newline at end of file
++The registry itself lives in modules.registries, so the order of the lines
++below cannot break anything.
++"""
++
++__version__ = "0.0.2"
++
++from ..registries import NORMALIZERS  # re-exported for convenience
++from ..registry import discover
++
++discover(__name__, __path__)
++
++__all__ = ["NORMALIZERS"]
+diff --git a/src/physiology_analysis_tools/modules/normalizers/basic_normalizers.py b/src/physiology_analysis_tools/modules/normalizers/basic_normalizers.py
+index 5fa14f3..10e13af 100644
+--- a/src/physiology_analysis_tools/modules/normalizers/basic_normalizers.py
++++ b/src/physiology_analysis_tools/modules/normalizers/basic_normalizers.py
+@@ -21,7 +21,7 @@ __version__ = "0.0.1"
+ import numpy
+ import pandas
+ 
+-from . import NORMALIZERS
++from ..registries import NORMALIZERS
+ from ..algorithms import Settings, SignalNormalizer
+ 
+ EPSILON = 1e-12
+diff --git a/src/physiology_analysis_tools/modules/registries.py b/src/physiology_analysis_tools/modules/registries.py
+new file mode 100644
+index 0000000..c37fe39
+--- /dev/null
++++ b/src/physiology_analysis_tools/modules/registries.py
+@@ -0,0 +1,26 @@
++# -*- coding: utf-8 -*-
++"""
++The three plugin registries, defined in one import-safe place.
++
++Why this module exists: if a registry is defined inside its own package's
++__init__.py, then that __init__ has to define the registry BEFORE it calls
++discover() - because discovery imports submodules that ask the half-initialised
++package for the registry. That makes the file order-sensitive, and getting it
++wrong produces a baffling "partially initialized module ... circular import"
++error. Defining the registries here removes the hazard entirely: the packages
++just re-export them and run discovery, and the order cannot matter.
++
++Algorithm modules import from HERE:
++
++    from ..registries import BEATCALLERS
++
++written for Physiology Analysis Tools (C) 2024
++"""
++
++__version__ = "0.0.1"
++
++from .registry import Registry
++
++FILTERS = Registry("filter")
++NORMALIZERS = Registry("normalizer")
++BEATCALLERS = Registry("beatcaller")

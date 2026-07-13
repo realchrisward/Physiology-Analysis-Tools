@@ -14,7 +14,7 @@ import numpy
 import pandas
 import scipy.signal
 
-from . import FILTERS
+from ..registries import FILTERS
 from ..algorithms import Settings, SignalFilter
 from .. import ml_tools
 from ..signal_converters import signal_filters_and_analyzers

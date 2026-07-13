@@ -11,7 +11,7 @@ __version__ = "0.0.1"
 import numpy
 import scipy.signal
 
-from . import FILTERS
+from ..registries import FILTERS
 from ..algorithms import Settings, SignalFilter
 
 
