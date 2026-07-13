@@ -1650,7 +1650,6 @@ def main():
         "pipeline": pipeline.__version__,
         "comparison": comparison.__version__,
     }
-    }
     ui.show()
     app.exec()
 
