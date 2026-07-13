@@ -13,6 +13,7 @@ dependencies = [
   "pandas>=2.2.3",
   "PySide6>=6.8.2",
   "pyqtgraph>=0.13.7",
+  "PyWavelets>=1.6",
   "scipy>=1.15.1",
   "scikit-learn>=1.6.1",
   "XlsxWriter>=3.2.2"
