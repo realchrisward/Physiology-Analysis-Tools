@@ -5,7 +5,7 @@ heartbeat_detection for ECG Analysis Tool
 written by Christopher S Ward (C) 2024
 """
 
-__version__ = "0.0.4"
+__version__ = "0.0.5"
 
 # %% import libraries
 import scipy
@@ -47,11 +47,42 @@ class Settings:
 
 # %% define functions
 def basic_filter(order, signal, fs=1000, cutoff=5, output="sos", use_pandas=True):
+    """
+    Zero-phase highpass filter.
+
+    The input is coerced to float up front so that a non-numeric column (e.g.
+    ``comment``) raises a legible TypeError here rather than an opaque
+    ``unsupported operand type(s) for -: 'str' and 'str'`` from inside
+    ``scipy.signal.sosfiltfilt``.
+
+    Non-finite samples are also rejected: ``sosfiltfilt`` propagates a single
+    NaN across the whole output, and an all-NaN trace yields zero detected
+    beats - which is indistinguishable from a detector that simply failed.
+    Better to fail loudly than to poison a comparison grid.
+    """
+    try:
+        samples = numpy.asarray(signal, dtype=float)
+    except (TypeError, ValueError) as e:
+        raise TypeError(
+            "basic_filter() requires a numeric signal; received a column of "
+            f"dtype {getattr(signal, 'dtype', type(signal).__name__)}"
+        ) from e
+
+    if samples.size == 0:
+        raise ValueError("basic_filter() received an empty signal")
+
+    if not numpy.isfinite(samples).all():
+        n_bad = int((~numpy.isfinite(samples)).sum())
+        raise ValueError(
+            f"basic_filter() received {n_bad} non-finite sample(s) "
+            f"(of {samples.size}); sosfiltfilt would return all-NaN"
+        )
+
     sos = scipy.signal.butter(order, cutoff, fs=fs, btype="highpass", output="sos")
-    filtered_data = scipy.signal.sosfiltfilt(sos, signal)
+    filtered_data = scipy.signal.sosfiltfilt(sos, samples)
 
     if use_pandas:
-        return pandas.Series(filtered_data)
+        return pandas.Series(filtered_data, index=getattr(signal, "index", None))
     else:
         return filtered_data
 

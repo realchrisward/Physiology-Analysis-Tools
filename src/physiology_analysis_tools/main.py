@@ -107,6 +107,44 @@ AUDIT_COLORS = {
 # ---------------------------------------------------------------------------
 
 
+def is_numeric_signal(series):
+    """
+    True if a column could plausibly be a physiological trace.
+
+    Signal files routinely carry metadata columns alongside the traces
+    (``comment`` from every extractor; ``mode_block``, ``parameter`` and
+    ``arduino_comments`` from PCC-derived ``.pkl.gzip`` files). Those hold
+    strings, and passing one to ``scipy.signal.sosfiltfilt`` fails deep inside
+    scipy with an unhelpful
+    ``TypeError: unsupported operand type(s) for -: 'str' and 'str'``.
+
+    Note the empty-comment case: ``pklgzip_extract`` rewrites empty comments to
+    ``numpy.nan``, so a recording with no comments at all yields an all-NaN
+    *float64* column that a naive dtype check would happily accept.
+    """
+    if not pandas.api.types.is_numeric_dtype(series):
+        return False
+    if pandas.api.types.is_bool_dtype(series):
+        return False
+    values = series.to_numpy(dtype=float, copy=False)
+    return bool(numpy.isfinite(values).any())
+
+
+def is_filterable_column(series):
+    """
+    True if a column can actually be run through a digital filter.
+
+    Stricter than :func:`is_numeric_signal`: every sample must be finite.
+    ``sosfiltfilt`` propagates a single NaN across the entire output, so a
+    partially-NaN channel would come back all-NaN and any detector fed it would
+    report zero beats - a data problem masquerading as an algorithm failure.
+    """
+    if not is_numeric_signal(series):
+        return False
+    values = series.to_numpy(dtype=float, copy=False)
+    return bool(numpy.isfinite(values).all())
+
+
 def gather_data(
     source, time_column, signal_column, filt_column, x_min, x_max, graph_width
 ):
@@ -344,6 +382,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.listWidget_Signals.currentItem() is None:
             QMessageBox.warning(None, "Comparison", "Select a signal channel first.")
+            return
+
+        selected_signal = self.listWidget_Signals.currentItem().text()
+        if not is_numeric_signal(self.data[selected_signal]):
+            QMessageBox.warning(
+                None,
+                "Comparison",
+                f"'{selected_signal}' is not a numeric signal column "
+                f"(dtype {self.data[selected_signal].dtype}) and cannot be "
+                "filtered or beat-called.",
+            )
+            return
+
+        n_bad = int(
+            (~numpy.isfinite(self.data[selected_signal].to_numpy(dtype=float))).sum()
+        )
+        if n_bad:
+            # sosfiltfilt propagates a single NaN across the entire output, so a
+            # pipeline fed this trace would report zero beats and look like an
+            # algorithm failure rather than a data problem.
+            QMessageBox.warning(
+                None,
+                "Comparison",
+                f"'{selected_signal}' contains {n_bad} non-finite sample(s). "
+                "Filtering would return an all-NaN trace and every pipeline "
+                "would detect zero beats. Clean or trim the recording first.",
+            )
             return
 
         if self.DEVMODE:
@@ -960,7 +1025,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 - self.data[self.comboBox_time_column.currentText()][0]
             )
             for c in self.data.columns:
-                if c in self.known_time_columns:
+                if c in self.known_time_columns or not is_filterable_column(
+                    self.data[c]
+                ):
+                    # Time columns, metadata columns (comment, mode_block,
+                    # parameter, arduino_comments, ...) and any channel holding
+                    # non-finite samples pass through untouched. Handing a
+                    # string column to sosfiltfilt fails inside scipy with
+                    # "unsupported operand type(s) for -: 'str' and 'str'".
+                    if c not in self.known_time_columns and is_numeric_signal(
+                        self.data[c]
+                    ):
+                        print(
+                            f"column '{c}' contains non-finite samples - "
+                            "passed through unfiltered"
+                        )
                     self.filtered_data[c] = self.data[c]
                 else:
                     self.filtered_data[c] = heartbeat_detection.basic_filter(
@@ -972,10 +1051,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
 
     def action_update_available_signals(self):
+        signal_columns = [
+            c
+            for c in self.data.columns
+            if c not in self.known_time_columns and is_numeric_signal(self.data[c])
+        ]
+        time_columns = [
+            c for c in self.data.columns if is_filterable_column(self.data[c])
+        ]
+
+        if not signal_columns:
+            print(
+                "no numeric signal columns found in "
+                f"{os.path.basename(str(self.current_filepath))} - "
+                f"columns present: {list(self.data.columns)}"
+            )
+
         self.listWidget_Signals.clear()
-        self.listWidget_Signals.addItems(self.data.columns)
+        self.listWidget_Signals.addItems(signal_columns)
         self.comboBox_time_column.clear()
-        self.comboBox_time_column.addItems(self.data.columns)
+        self.comboBox_time_column.addItems(time_columns)
         self.action_update_time_column()
 
     def action_update_time_column(self):
