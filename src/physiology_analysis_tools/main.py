@@ -18,6 +18,32 @@ from PySide6.QtUiTools import QUiLoader
 import sys
 import os
 import importlib
+import faulthandler
+import traceback as _traceback
+
+# A Python exception raised inside a Qt slot terminates the process under
+# PySide6 >= 6.5, and a segfault inside Qt/pyqtgraph prints nothing at all.
+# Both look like "it just closed". These two hooks make them distinguishable:
+# faulthandler dumps the C stack on a hard crash, and the excepthook below
+# shows the Python traceback in a dialog before anything gets a chance to abort.
+faulthandler.enable()
+
+
+def _install_excepthook():
+    def hook(exc_type, exc_value, exc_tb):
+        text = "".join(_traceback.format_exception(exc_type, exc_value, exc_tb))
+        print(text, file=sys.stderr, flush=True)
+        try:
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle("Unhandled exception")
+            box.setText(f"{exc_type.__name__}: {exc_value}")
+            box.setDetailedText(text)
+            box.exec()
+        except Exception:
+            pass
+
+    sys.excepthook = hook
 
 # include regular and relative import -
 # !!! temporary solution - needed for pip distribution
@@ -415,13 +441,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.DEVMODE:
             importlib.reload(comparison_window)
 
-        window = comparison_window.ComparisonWindow(
-            data=self.data,
-            time_column=self.comboBox_time_column.currentText(),
-            voltage_column=self.listWidget_Signals.currentItem().text(),
-            parent=self,
-        )
-        window.exec()
+        try:
+            window = comparison_window.ComparisonWindow(
+                data=self.data,
+                time_column=self.comboBox_time_column.currentText(),
+                voltage_column=self.listWidget_Signals.currentItem().text(),
+                parent=self,
+            )
+            window.exec()
+        except Exception as error:
+            text = _traceback.format_exc()
+            print(text, file=sys.stderr, flush=True)
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle("Comparison window failed to open")
+            box.setText(f"{type(error).__name__}: {error}")
+            box.setDetailedText(text)
+            box.exec()
 
     # -----------------------------------------------------------------------
     # GUI reset / initialisation helpers
@@ -1735,6 +1771,7 @@ class FlexibleEntryWidget:
 def main():
     loader = QUiLoader()
     app = QtWidgets.QApplication(sys.argv)
+    _install_excepthook()
     ui_file = QFile(os.path.join(os.path.dirname(__file__), "ecg_analysis_tool.ui"))
     ui = loader.load(ui_file)
     window = MainWindow(ui)
