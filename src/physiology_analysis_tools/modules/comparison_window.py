@@ -17,14 +17,14 @@ Layout
 written for Physiology Analysis Tools (C) 2024
 """
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 import json
 
 import numpy
 import pandas
 import pyqtgraph
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import batch, comparison
 from .algorithms import sampling_frequency
@@ -117,7 +117,17 @@ class ComparisonWindow(QtWidgets.QDialog):
     def __init__(self, data, time_column, voltage_column, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Filter / Beat-caller Comparison")
-        self.resize(1400, 850)
+        # sized to fit inside the available screen rather than assuming a wide
+        # monitor - the old fixed 1400 px pushed the plots off smaller displays
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(
+                min(1180, int(available.width() * 0.92)),
+                min(820, int(available.height() * 0.92)),
+            )
+        else:
+            self.resize(1180, 820)
 
         self.full_data = data.reset_index(drop=True)
         self.time_column = time_column
@@ -151,6 +161,24 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.ui_ready = True
         self.sync_segment_widgets()
         self.add_pipeline()
+
+    # -- pipeline identity -------------------------------------------------
+    def tag(self, pipeline):
+        """Stable short handle, "P3", matching the row number in the table."""
+        try:
+            return f"P{self.pipelines.index(pipeline) + 1}"
+        except ValueError:
+            return "P?"
+
+    def display_label(self, pipeline):
+        """What the plots, the metrics table and the report all call it."""
+        return f"{self.tag(pipeline)}  {pipeline.short_label()}"
+
+    def display_labels(self):
+        return {
+            r.pipeline.uid: self.display_label(r.pipeline)
+            for r in self.results.values()
+        }
 
     # -- analysis segment --------------------------------------------------
     def apply_segment(self):
@@ -274,9 +302,12 @@ class ComparisonWindow(QtWidgets.QDialog):
     # -- construction ------------------------------------------------------
     def build_ui(self):
         outer = QtWidgets.QHBoxLayout(self)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
         # --- left: pipelines ------------------------------------------
-        left = QtWidgets.QVBoxLayout()
+        left_panel = QtWidgets.QWidget()
+        left = QtWidgets.QVBoxLayout(left_panel)
+        left.setContentsMargins(0, 0, 6, 0)
         left.addWidget(QtWidgets.QLabel(
             f"<b>Pipelines</b> &mdash; signal: {self.voltage_column} "
             f"@ {self.fs:.0f} Hz"
@@ -325,15 +356,19 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.table.setHorizontalHeaderLabels(
             ["run", "show", "Filter", "Normalise", "Beat caller", ""]
         )
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setColumnWidth(0, 36)
-        self.table.setColumnWidth(1, 40)
-        self.table.setColumnWidth(2, 180)
-        self.table.setColumnWidth(3, 180)
-        self.table.setColumnWidth(4, 180)
-        self.table.setColumnWidth(5, 80)
-        self.table.setMinimumWidth(740)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in (2, 3, 4):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 56)
+        self.table.setColumnWidth(1, 44)
+        self.table.setColumnWidth(5, 74)
+        self.table.setMinimumWidth(460)
+        self.table.verticalHeader().setVisible(False)
         self.table.setToolTip(
+            "The coloured P-number is the pipeline's handle: it is the same "
+            "handle used\nin the plot legend, the raster lanes and the metrics "
+            "table.\n\n"
             "run = include in the next run;  show = draw in the plots.\n"
             "Run a large grid, then show only the few you are comparing."
         )
@@ -411,10 +446,12 @@ class ComparisonWindow(QtWidgets.QDialog):
         config_row.addWidget(load_config)
         left.addLayout(config_row)
 
-        outer.addLayout(left, 0)
+        splitter.addWidget(left_panel)
 
         # --- right: plots ---------------------------------------------
-        right = QtWidgets.QVBoxLayout()
+        right_panel = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(right_panel)
+        right.setContentsMargins(6, 0, 0, 0)
 
         self.signal_plot = pyqtgraph.PlotWidget()
         self.signal_plot.setBackground("w")
@@ -430,7 +467,10 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.raster_plot.setBackground("w")
         self.raster_plot.setMaximumHeight(260)
         self.raster_plot.setXLink(self.signal_plot)
-        self.raster_plot.getAxis("left").setWidth(60)
+        # wide enough for "P12  butter_bandpass / zscore / pan_tompkins"; the
+        # raster axis is the one place the full combination is spelled out
+        self.raster_plot.getAxis("left").setWidth(250)
+        self.raster_plot.getAxis("left").setStyle(tickFont=QtGui.QFont("", 8))
 
         right.addWidget(self.signal_plot, 3)
         right.addWidget(self.raster_plot, 1)
@@ -475,9 +515,14 @@ class ComparisonWindow(QtWidgets.QDialog):
         right.addLayout(nav)
 
         self.status = QtWidgets.QLabel("no pipelines run yet")
+        self.status.setWordWrap(True)
         right.addWidget(self.status)
 
-        outer.addLayout(right, 1)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([480, 700])
+        outer.addWidget(splitter)
 
         self.update_range()
 
@@ -540,7 +585,12 @@ class ComparisonWindow(QtWidgets.QDialog):
             run_check.setCheckState(
                 QtCore.Qt.Checked if pipeline.enabled else QtCore.Qt.Unchecked
             )
+            # colour swatch + handle live in the same cell as the run checkbox:
+            # this cell is the legend for every plot in the window
             run_check.setBackground(pyqtgraph.mkColor(pipeline.color))
+            run_check.setForeground(pyqtgraph.mkColor(255, 255, 255))
+            run_check.setText(f" P{row + 1}")
+            run_check.setToolTip(pipeline.label)
             self.table.setItem(row, 0, run_check)
 
             show_check = QtWidgets.QTableWidgetItem()
@@ -693,12 +743,12 @@ class ComparisonWindow(QtWidgets.QDialog):
         progress.close()
 
         errors = [
-            f"{r.pipeline.label}: {r.error}"
+            f"{self.display_label(r.pipeline)}: {r.error}"
             for r in self.results.values()
             if not r.ok
         ]
         counts = ", ".join(
-            f"{r.pipeline.label}: {len(r.beats)} beats ({r.runtime_s:.2f}s)"
+            f"{self.tag(r.pipeline)}: {len(r.beats)} beats ({r.runtime_s:.2f}s)"
             for r in self.results.values()
             if r.ok
         )
@@ -721,7 +771,9 @@ class ComparisonWindow(QtWidgets.QDialog):
         self.combo_reference.addItem("Consensus (majority of enabled)", CONSENSUS)
         for pipeline in self.pipelines:
             if pipeline.enabled:
-                self.combo_reference.addItem(pipeline.label, pipeline.uid)
+                self.combo_reference.addItem(
+                    self.display_label(pipeline), pipeline.uid
+                )
         index = self.combo_reference.findData(current)
         self.combo_reference.setCurrentIndex(max(index, 0))
         self.combo_reference.blockSignals(False)
@@ -745,7 +797,7 @@ class ComparisonWindow(QtWidgets.QDialog):
     def refresh_metrics(self):
         if not self.results:
             return
-        labels = {r.pipeline.uid: r.pipeline.label for r in self.results.values()}
+        labels = self.display_labels()
         table = comparison.score_table(
             self.results, self.reference_ts(), self.tolerance(), labels
         )
@@ -849,7 +901,7 @@ class ComparisonWindow(QtWidgets.QDialog):
                 self.signal_plot.plot(
                     self.time, result.signal,
                     pen=pyqtgraph.mkPen(result.pipeline.color, width=1),
-                    name=f"detector input: {result.pipeline.label}",
+                    name=f"detector input: {self.display_label(result.pipeline)}",
                 )
 
         # --- beat markers, one lane per shown pipeline, stacked above the trace
@@ -873,10 +925,17 @@ class ComparisonWindow(QtWidgets.QDialog):
                 name=f"reference: {self.combo_reference.currentText()}",
             )
 
+        self.lane_labels = []
+        if reference_ts.size:
+            self.lane_labels.append((self.lane_text("ref", (0, 0, 0)), base))
+
         for i, result in enumerate(shown):
             lane = base + (i + 1) * step
             color = result.pipeline.color
             split = self.agreement(result, reference_ts)
+            self.lane_labels.append(
+                (self.lane_text(self.tag(result.pipeline), color), lane)
+            )
 
             # hits: filled circle in the pipeline colour
             if len(split["hit"]):
@@ -884,7 +943,7 @@ class ComparisonWindow(QtWidgets.QDialog):
                     split["hit"], numpy.full(len(split["hit"]), lane),
                     pen=None, symbol="o", symbolSize=7,
                     symbolBrush=color, symbolPen=color,
-                    name=result.pipeline.label,
+                    name=self.display_label(result.pipeline),
                 )
             # false positives: cross
             if len(split["extra"]):
@@ -949,17 +1008,33 @@ class ComparisonWindow(QtWidgets.QDialog):
                     symbolBrush=None,
                     symbolPen=pyqtgraph.mkPen((200, 0, 0), width=2),
                 )
-            lanes.append((i, result.pipeline.label[:30]))
+            lanes.append((i, self.display_label(result.pipeline)))
 
         self.raster_plot.getAxis("left").setTicks([lanes])
         self.raster_plot.setYRange(-0.5, max(len(lanes) - 0.5, 0.5))
         self.raster_plot.setMaximumHeight(max(140, 34 * (len(lanes) + 1)))
 
+    def lane_text(self, text, color):
+        """A pipeline handle pinned to a beat lane in the signal plot."""
+        item = pyqtgraph.TextItem(text, color=color, anchor=(1, 0.5))
+        item.setZValue(10)
+        self.signal_plot.addItem(item)
+        return item
+
+    def place_lane_labels(self, x_min, x_max):
+        # Anchored to the left edge of the *view*, not the segment, so the
+        # handles stay on screen while panning.
+        offset = (x_max - x_min) * 0.005
+        for item, lane in getattr(self, "lane_labels", []):
+            item.setPos(x_min + offset, lane)
+
     def update_range(self):
         low, high = self.segment_bounds()
         x_min = min(max(self.spin_x_min.value(), low), high)
         x_max = min(x_min + self.spin_x_window.value(), high)
-        self.signal_plot.setXRange(x_min, max(x_max, x_min + 0.05), padding=0)
+        x_max = max(x_max, x_min + 0.05)
+        self.signal_plot.setXRange(x_min, x_max, padding=0)
+        self.place_lane_labels(x_min, x_max)
 
     # -- manual annotation -------------------------------------------------
     def set_annotate_mode(self, on):
@@ -1046,7 +1121,7 @@ class ComparisonWindow(QtWidgets.QDialog):
         if not path:
             return
 
-        labels = {r.pipeline.uid: r.pipeline.label for r in self.results.values()}
+        labels = self.display_labels()
         writer = pandas.ExcelWriter(path, engine="xlsxwriter")
 
         pandas.DataFrame(

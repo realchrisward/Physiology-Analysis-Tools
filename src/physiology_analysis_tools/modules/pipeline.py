@@ -16,7 +16,7 @@ comparable across filters; see modules.normalizers.
 written for Physiology Analysis Tools (C) 2024
 """
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 import hashlib
 import time as _time
@@ -89,6 +89,19 @@ class Pipeline:
             parts.append(NORMALIZERS[self.norm_name].label)
         parts.append(BEATCALLERS[self.caller_name].label)
         return " + ".join(parts)
+
+    def short_label(self):
+        """
+        Compact registry-key label: "butter_bandpass / zscore / pan_tompkins".
+
+        default_label() spells the stages out in prose, which is unreadable on a
+        plot axis or in a metrics row once a grid is more than a few rows deep.
+        """
+        parts = [self.filter_name]
+        if self.norm_name != "none":
+            parts.append(self.norm_name)
+        parts.append(self.caller_name)
+        return " / ".join(parts)
 
     @property
     def filter_key(self):
