@@ -17,7 +17,7 @@ Layout
 written for Physiology Analysis Tools (C) 2024
 """
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 
 import json
 
@@ -470,7 +470,17 @@ class ComparisonWindow(QtWidgets.QDialog):
         # wide enough for "P12  butter_bandpass / zscore / pan_tompkins"; the
         # raster axis is the one place the full combination is spelled out
         self.raster_plot.getAxis("left").setWidth(250)
-        self.raster_plot.getAxis("left").setStyle(tickFont=QtGui.QFont("", 8))
+
+        # NB: build the tick font by COPYING the widget's font and shrinking it.
+        # QtGui.QFont("", 8) - an empty family name - segfaults inside
+        # AxisItem.generateDrawSpecs when Qt hands the null font to
+        # QPainter.boundingRect() during the first paint. It is a hard crash in
+        # C++, not a Python exception, so nothing is printed and the window never
+        # appears. Copying the widget font also means the raster labels follow
+        # the platform/theme font instead of forcing a family.
+        tick_font = QtGui.QFont(self.raster_plot.font())
+        tick_font.setPointSize(8)
+        self.raster_plot.getAxis("left").setStyle(tickFont=tick_font)
 
         right.addWidget(self.signal_plot, 3)
         right.addWidget(self.raster_plot, 1)
