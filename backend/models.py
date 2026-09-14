@@ -66,6 +66,32 @@ class ArrhythmiaSettingsModel(BaseModel):
     min_samples: int
 
 
+class ArrhythmiaDetectRequest(BaseModel):
+    path: str
+    channel: str
+    method: str
+
+
+class ArrhythmiaBeat(BaseModel):
+    ts: float
+    bradycardia_absolute: bool | None = None
+    tachycardia_absolute: bool | None = None
+    skipped_beat: bool | None = None
+    prem_beat: bool | None = None
+    abn_cluster: bool | None = None
+    any_arrhythmia: bool
+    other_arrhythmia: bool
+
+
+class ArrhythmiaDetectionResult(BaseModel):
+    status: str
+    beats: list[ArrhythmiaBeat] = []
+    count: int = 0
+    any_arrhythmia_count: int = 0
+    elapsed_seconds: float = 0.0
+    error: str | None = None
+
+
 class SettingsPayload(BaseModel):
     beat: BeatSettingsModel
     arrhythmia: ArrhythmiaSettingsModel

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from physiology_analysis_tools.modules import arrhythmia_detection, heartbeat_detection
 
+from backend.arrhythmia import router as arrhythmia_router
 from backend.beats import router as beats_router
 from backend.files import router as files_router
 from backend.models import FileImportResult
@@ -35,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(files_router)
     app.include_router(beats_router)
     app.include_router(settings_router)
+    app.include_router(arrhythmia_router)
 
     return app
 

@@ -24,6 +24,17 @@ def real_beats_txt_file() -> str:
 
 
 @pytest.fixture
+def long_txt_file() -> str:
+    """A real LabChart-text-exported ECG file with enough beats (163) for the
+    unsupervised clustering method's default min_samples=30 to run
+    meaningfully, unlike 57.txt's 15 beats which would degrade to all-noise
+    clustering."""
+    return os.path.join(
+        REPO_ROOT, "src", "physiology_analysis_tools", "examples", "9 long.txt"
+    )
+
+
+@pytest.fixture
 def adicht_examples_dir() -> str:
     return os.path.join(
         REPO_ROOT, "src", "physiology_analysis_tools", "examples", "ECG_traces"
