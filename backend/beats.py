@@ -32,6 +32,8 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
     elapsed_seconds = time.monotonic() - start
     request.app.state.beat_cache[payload.path] = df
 
+    # Assumes beatcaller()'s output columns (ts, RR, R_amplitude, HR) — if that
+    # shape ever changes, update this loop too, since it's outside the try/except above.
     beats = [
         Beat(
             ts=row.ts,

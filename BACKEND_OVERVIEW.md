@@ -16,6 +16,7 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 | `backend/extractors.py` | `extract_dataframe(filepath)` — tries each extension-matching extractor from the existing `physiology_analysis_tools.modules.signal_converters.*` in order (`EXTRACTOR_SPECS`), returns the first success. `NoExtractorSucceededError` on total failure. `EXTRACTOR_LOAD_ERRORS` records why an extractor (e.g. EDF) failed to even load. |
 | `backend/models.py` | Pydantic request/response models: `ImportRequest`, `FileImportResult` (path, filename, status, channels, time_column, size, modified_time, default_channel, error), `ImportResponse`. |
 | `backend/files.py` | `POST /files/import`, `GET /files`. Wires `extractors.py` + `channel_selection.py` together; per-file error isolation (one bad file doesn't fail the batch). |
+| `backend/beats.py` | `POST /beats/detect` — wraps the existing `heartbeat_detection.beatcaller()`. Reads the parsed DataFrame from `app.state.signal_cache` (set by `/files/import`), runs beat detection with `app.state.beat_settings`, caches the resulting beats DataFrame into `app.state.beat_cache`. |
 | `backend/requirements.txt` | fastapi, uvicorn, httpx, pytest — not yet split into runtime vs. dev deps (noted below). |
 | `backend/tests/` | `conftest.py` (shared fixtures: `example_txt_file`, `adicht_examples_dir`), one test file per module above, plus `test_adicht_extraction.py` (self-skips unless `adi-reader` is functional). |
 
@@ -26,6 +27,7 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 - **Channel/time-column split**: `channels` (selectable) never includes `ts`/`time`/`comment`; `time_column` surfaces whichever of `ts`/`time` the file actually has, separately, as metadata. One shared constant (`channel_selection.NON_SIGNAL_CHANNELS`) drives both — do not reintroduce a second copy of this set (a final-review finding caught exactly that drift once already).
 - **Default-channel matching is exact name, case-insensitive** — not substring. Falls back to the first non-excluded channel, `matched_rule=False`, if no filename rule fires.
 - **Per-file error isolation**: `POST /files/import` never fails the whole request for one bad path; each result is `status: "ok"|"error"` independently.
+- **`/files/import` now caches the parsed DataFrame** instead of discarding it after channel detection: `app.state.signal_cache[path] -> {df, time_column}`, so `/beats/detect` (and future analysis endpoints) can reuse it without re-parsing. `app.state.beat_settings` holds the current beat-detection settings; mutable settings endpoints to change them are a later milestone, not built yet.
 
 ## Known cross-effects / risks
 
@@ -39,8 +41,8 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 
 ## Progress
 
-- **Done**: Milestone 1 — backend scaffold, channel-selection logic, extractor wrapper, file import/list API. 16 tests passing, 1 correctly skipped. Reviewed (per-task + whole-branch), one fix wave applied and re-reviewed clean.
-- **Not started**: data windowing/LOD for the graph, beat-detection endpoint (auto-run/ETA/stop), arrhythmia analysis endpoint, SQLite annotation persistence, Svelte frontend, Electron packaging, old-UI (`main.py`/PySide6) removal — see the Roadmap section of the plan doc.
+- **Done**: Milestone 1 — backend scaffold, channel-selection logic, extractor wrapper, file import/list API. Milestone 4 — beat-detection endpoint (`POST /beats/detect`, wraps `heartbeat_detection.beatcaller()`, backed by `signal_cache`/`beat_cache`/`beat_settings`). 22 tests passing, 1 correctly skipped (up from 16/1). Reviewed (per-task + whole-branch), one fix wave applied and re-reviewed clean.
+- **Not started**: data windowing/LOD for the graph, auto-run/ETA/stop for beat detection, arrhythmia analysis endpoint, SQLite annotation persistence, Svelte frontend, Electron packaging, old-UI (`main.py`/PySide6) removal — see the Roadmap section of the plan doc.
 - **Branch**: `web-ui-redesign`, not merged to `main`.
 
 ## Frontend/Electron dev setup
