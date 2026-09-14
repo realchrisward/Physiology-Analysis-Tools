@@ -41,16 +41,42 @@ async function startBackend() {
     { cwd: REPO_ROOT, stdio: 'pipe' },
   )
 
+  // Track spawn errors and exit state at spawn time
+  let spawnError = null
+  proc.on('error', (err) => {
+    spawnError = spawnError || err
+    console.error('[backend] process error:', err)
+  })
+
+  let exited = false
+  proc.once('exit', () => {
+    exited = true
+  })
+
   proc.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
   proc.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
 
-  await waitForHealth(port, HEALTH_TIMEOUT_MS)
+  try {
+    await waitForHealth(port, HEALTH_TIMEOUT_MS)
+  } catch (err) {
+    // Kill the process if it's still running before throwing
+    if (!exited) {
+      proc.kill('SIGTERM')
+    }
+    throw spawnError || err
+  }
 
-  const stop = () =>
-    new Promise((resolve) => {
+  const stop = () => {
+    // If already exited, resolve immediately
+    if (exited) {
+      return Promise.resolve()
+    }
+    // Otherwise, attach listener and kill
+    return new Promise((resolve) => {
       proc.once('exit', () => resolve())
       proc.kill('SIGTERM')
     })
+  }
 
   return { port, stop }
 }
