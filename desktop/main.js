@@ -1,5 +1,6 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('node:path')
+const { startBackend } = require('./backend-process')
 
 const DEV_SERVER_URL = 'http://localhost:5173'
 
@@ -28,7 +29,21 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow)
+let stopBackend = null
+
+app.whenReady().then(async () => {
+  const { port, stop } = await startBackend()
+  stopBackend = stop
+  ipcMain.handle('get-backend-port', () => port)
+  createWindow()
+})
+
+app.on('before-quit', async () => {
+  if (stopBackend) {
+    await stopBackend()
+    stopBackend = null
+  }
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
