@@ -3,6 +3,8 @@
 
   const BACKEND_URL = 'http://127.0.0.1:8000'
 
+  type HealthResponse = { status: string }
+
   type Status = 'loading' | 'ok' | 'error'
 
   let status: Status = $state('loading')
@@ -14,7 +16,7 @@
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
-      const data = await response.json()
+      const data: HealthResponse = await response.json()
       status = data.status === 'ok' ? 'ok' : 'error'
     } catch (e) {
       status = 'error'

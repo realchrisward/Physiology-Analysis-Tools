@@ -14,6 +14,13 @@ function createWindow() {
     },
   })
 
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url !== win.webContents.getURL()) {
+      event.preventDefault()
+    }
+  })
+
   if (app.isPackaged) {
     win.loadFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'))
   } else {
@@ -26,5 +33,11 @@ app.whenReady().then(createWindow)
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
   }
 })

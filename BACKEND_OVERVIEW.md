@@ -40,3 +40,11 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 - **Done**: Milestone 1 — backend scaffold, channel-selection logic, extractor wrapper, file import/list API. 16 tests passing, 1 correctly skipped. Reviewed (per-task + whole-branch), one fix wave applied and re-reviewed clean.
 - **Not started**: data windowing/LOD for the graph, beat-detection endpoint (auto-run/ETA/stop), arrhythmia analysis endpoint, SQLite annotation persistence, Svelte frontend, Electron packaging, old-UI (`main.py`/PySide6) removal — see the Roadmap section of the plan doc.
 - **Branch**: `web-ui-redesign`, not merged to `main`.
+
+## Frontend/Electron dev setup
+
+Not npm workspaces yet (planned follow-up), so install separately in three
+places: repo root, `frontend/`, and `desktop/`. Start the backend manually
+first (`source .venv/bin/activate && uvicorn backend.app:app --host 127.0.0.1
+--port 8000`), then run `npm run dev` from repo root to launch Vite +
+Electron together.
