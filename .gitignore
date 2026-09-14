@@ -4,7 +4,7 @@
 /venv
 /analysis
 uv.lock
-
+node_modules
 
 app_analysis.md
 app_screenshot.png
