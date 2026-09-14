@@ -30,23 +30,23 @@ function createWindow() {
 }
 
 let stopBackend = null
+let backendReady = false
+let quitting = false
 
 app.whenReady().then(async () => {
   try {
     const { port, stop } = await startBackend()
+    if (quitting) {
+      await stop()
+      return
+    }
     stopBackend = stop
+    backendReady = true
     ipcMain.handle('get-backend-port', () => port)
     createWindow()
   } catch (err) {
     dialog.showErrorBox('Failed to start backend', err.message || String(err))
     app.quit()
-  }
-})
-
-app.on('before-quit', async () => {
-  if (stopBackend) {
-    await stopBackend()
-    stopBackend = null
   }
 })
 
@@ -56,8 +56,18 @@ app.on('window-all-closed', () => {
   }
 })
 
+app.on('before-quit', (event) => {
+  if (quitting) return
+  quitting = true
+  if (!stopBackend) return
+  event.preventDefault()
+  const stop = stopBackend
+  stopBackend = null
+  stop().finally(() => app.quit())
+})
+
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (backendReady && BrowserWindow.getAllWindows().length === 0) {
     createWindow()
   }
 })

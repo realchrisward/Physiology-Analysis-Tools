@@ -17,18 +17,26 @@ function findFreePort() {
   })
 }
 
-async function waitForHealth(port, timeoutMs) {
+async function waitForHealth(port, timeoutMs, state) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    if (state.exited) {
+      throw new Error(
+        `Backend exited (code=${state.exitInfo.code}, signal=${state.exitInfo.signal}) before becoming healthy:\n${state.stderrTail}`,
+      )
+    }
     try {
       const res = await fetch(`http://127.0.0.1:${port}/health`)
-      if (res.ok) return
+      if (res.ok) {
+        const body = await res.json()
+        if (body.status === 'ok') return
+      }
     } catch {
-      // backend not listening yet
+      // not listening yet
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
   }
-  throw new Error(`Backend did not become healthy within ${timeoutMs}ms on port ${port}`)
+  throw new Error(`Backend did not become healthy within ${timeoutMs}ms on port ${port}:\n${state.stderrTail}`)
 }
 
 async function startBackend() {
@@ -41,39 +49,41 @@ async function startBackend() {
     { cwd: REPO_ROOT, stdio: 'pipe' },
   )
 
-  // Track spawn errors and exit state at spawn time
+  const state = { exited: false, exitInfo: null, stderrTail: '' }
+
   let spawnError = null
   proc.on('error', (err) => {
     spawnError = spawnError || err
     console.error('[backend] process error:', err)
   })
 
-  let exited = false
-  proc.once('exit', () => {
-    exited = true
+  proc.once('exit', (code, signal) => {
+    state.exited = true
+    state.exitInfo = { code, signal }
   })
 
   proc.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
-  proc.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
+  proc.stderr.on('data', (d) => {
+    const s = d.toString()
+    console.error('[backend]', s.trim())
+    state.stderrTail = (state.stderrTail + s).slice(-4000)
+  })
 
   try {
-    await waitForHealth(port, HEALTH_TIMEOUT_MS)
+    await waitForHealth(port, HEALTH_TIMEOUT_MS, state)
   } catch (err) {
-    // Kill the process if it's still running before throwing
-    if (!exited) {
-      proc.kill('SIGTERM')
-    }
+    if (!state.exited) proc.kill('SIGTERM')
     throw spawnError || err
   }
 
   const stop = () => {
-    // If already exited, resolve immediately
-    if (exited) {
-      return Promise.resolve()
-    }
-    // Otherwise, attach listener and kill
+    if (state.exited) return Promise.resolve()
     return new Promise((resolve) => {
-      proc.once('exit', () => resolve())
+      const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 3000)
+      proc.once('exit', () => {
+        clearTimeout(forceKillTimer)
+        resolve()
+      })
       proc.kill('SIGTERM')
     })
   }
@@ -81,4 +91,4 @@ async function startBackend() {
   return { port, stop }
 }
 
-module.exports = { startBackend }
+module.exports = { startBackend, findFreePort, waitForHealth }

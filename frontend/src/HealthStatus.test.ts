@@ -4,6 +4,7 @@ import HealthStatus from './HealthStatus.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  delete (window as any).api
 })
 
 describe('HealthStatus', () => {
@@ -68,9 +69,8 @@ describe('HealthStatus', () => {
     render(HealthStatus)
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:9999/health')
+      expect(screen.getByTestId('health-status')).toHaveTextContent('Backend: ok')
     })
-
-    delete (window as any).api
+    expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:9999/health')
   })
 })
