@@ -44,7 +44,7 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 ## Frontend/Electron dev setup
 
 Not npm workspaces yet (planned follow-up), so install separately in three
-places: repo root, `frontend/`, and `desktop/`. Start the backend manually
-first (`source .venv/bin/activate && uvicorn backend.app:app --host 127.0.0.1
---port 8000`), then run `npm run dev` from repo root to launch Vite +
-Electron together.
+places: repo root, `frontend/`, and `desktop/`. Then run `npm run dev` from
+repo root to launch Vite + Electron together. Electron spawns the backend
+automatically on a dynamically-chosen free port and passes it to the renderer
+over IPC — no manual `uvicorn` start needed.
