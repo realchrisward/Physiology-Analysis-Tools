@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from physiology_analysis_tools.modules import heartbeat_detection
 
+from backend.beats import router as beats_router
 from backend.files import router as files_router
 from backend.models import FileImportResult
 
@@ -16,6 +17,7 @@ def create_app() -> FastAPI:
     app.state.imported_files: dict[str, FileImportResult] = {}
     app.state.signal_cache: dict[str, dict] = {}
     app.state.beat_settings = heartbeat_detection.Settings()
+    app.state.beat_cache: dict[str, "pandas.DataFrame"] = {}
 
     app.add_middleware(
         CORSMiddleware,
@@ -29,6 +31,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(files_router)
+    app.include_router(beats_router)
 
     return app
 
