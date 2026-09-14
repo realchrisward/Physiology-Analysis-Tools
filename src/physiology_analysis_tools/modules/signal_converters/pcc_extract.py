@@ -43,7 +43,6 @@ __version__ = "0.1.1"
 import os
 import sys
 import pandas
-from tkinter import Tk, filedialog
 import logging
 
 __working__ = True
@@ -74,6 +73,7 @@ def gui_open_filenames(kwargs={}):
         List of Strings describing the paths to the files selected by the GUI.
 
     """
+    from tkinter import Tk, filedialog
 
     root = Tk()
     output_text_raw = filedialog.askopenfilenames(**kwargs)
@@ -104,6 +104,7 @@ def gui_directory(kwargs={}):
         Returns the directory path selected by the GUI.
 
     """
+    from tkinter import Tk, filedialog
 
     root = Tk()
     output_text = filedialog.askdirectory(**kwargs)
