@@ -57,4 +57,20 @@ describe('HealthStatus', () => {
       expect(screen.getByTestId('health-status')).toHaveTextContent('Backend: error')
     })
   })
+
+  it('uses the port from window.api when running inside Electron', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ok' }) }),
+    )
+    ;(window as any).api = { getBackendPort: vi.fn().mockResolvedValue(9999) }
+
+    render(HealthStatus)
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:9999/health')
+    })
+
+    delete (window as any).api
+  })
 })

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-
-  const BACKEND_URL = 'http://127.0.0.1:8000'
+  import { getBackendUrl } from './lib/api'
 
   type HealthResponse = { status: string }
 
@@ -12,7 +11,8 @@
 
   onMount(async () => {
     try {
-      const response = await fetch(`${BACKEND_URL}/health`)
+      const backendUrl = await getBackendUrl()
+      const response = await fetch(`${backendUrl}/health`)
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
