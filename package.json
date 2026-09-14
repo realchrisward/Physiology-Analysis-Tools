@@ -1,0 +1,12 @@
+{
+  "name": "physiology-analysis-tools",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"npm run dev --prefix frontend\" \"wait-on http://localhost:5173 && npm start --prefix desktop\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "wait-on": "^9.1.0"
+  }
+}
