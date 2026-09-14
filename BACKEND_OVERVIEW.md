@@ -1,0 +1,42 @@
+# Backend Overview
+
+Living doc for the new FastAPI backend (`backend/`) built as Milestone 1 of
+the UI redesign (`web-ui-redesign` branch). Update this as later milestones
+land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md`
+(architecture) and `docs/superpowers/specs/2026-09-14-ui-workflow-features-design.md`
+(workflow/features), `docs/superpowers/plans/2026-09-14-backend-api-foundation.md`
+(this milestone's plan).
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `backend/app.py` | `create_app()` factory — builds the FastAPI app, owns `app.state.imported_files` (in-memory file registry), registers routers. `GET /health`. |
+| `backend/channel_selection.py` | Pure function `select_default_channel(filename, available_channels)`. Filename-pattern → exact channel-name rules (`CHANNEL_RULES`), confirmed against real sample files. `NON_SIGNAL_CHANNELS` = `{ts, time, comment}` — the single source of truth for what's never a signal channel. |
+| `backend/extractors.py` | `extract_dataframe(filepath)` — tries each extension-matching extractor from the existing `physiology_analysis_tools.modules.signal_converters.*` in order (`EXTRACTOR_SPECS`), returns the first success. `NoExtractorSucceededError` on total failure. `EXTRACTOR_LOAD_ERRORS` records why an extractor (e.g. EDF) failed to even load. |
+| `backend/models.py` | Pydantic request/response models: `ImportRequest`, `FileImportResult` (path, filename, status, channels, time_column, size, modified_time, default_channel, error), `ImportResponse`. |
+| `backend/files.py` | `POST /files/import`, `GET /files`. Wires `extractors.py` + `channel_selection.py` together; per-file error isolation (one bad file doesn't fail the batch). |
+| `backend/requirements.txt` | fastapi, uvicorn, httpx, pytest — not yet split into runtime vs. dev deps (noted below). |
+| `backend/tests/` | `conftest.py` (shared fixtures: `example_txt_file`, `adicht_examples_dir`), one test file per module above, plus `test_adicht_extraction.py` (self-skips unless `adi-reader` is functional). |
+
+## Design decisions
+
+- **Sync `def` endpoints, not `async def`** — FastAPI runs sync handlers in a threadpool, so a slow pandas parse doesn't block the event loop. Deliberate choice to avoid the old app's QThread-freeze problem.
+- **`create_app()` factory + `app.state`**, not a module singleton — isolated state per test/instance; the in-memory `imported_files` dict is a placeholder for the SQLite-backed store a future milestone adds (spec §1).
+- **Channel/time-column split**: `channels` (selectable) never includes `ts`/`time`/`comment`; `time_column` surfaces whichever of `ts`/`time` the file actually has, separately, as metadata. One shared constant (`channel_selection.NON_SIGNAL_CHANNELS`) drives both — do not reintroduce a second copy of this set (a final-review finding caught exactly that drift once already).
+- **Default-channel matching is exact name, case-insensitive** — not substring. Falls back to the first non-excluded channel, `matched_rule=False`, if no filename rule fires.
+- **Per-file error isolation**: `POST /files/import` never fails the whole request for one bad path; each result is `status: "ok"|"error"` independently.
+
+## Known cross-effects / risks
+
+- **Two library files were modified outside `backend/`**: `src/physiology_analysis_tools/modules/signal_converters/{labchart_text_extract,pcc_extract,adi_extract,edf_extract,dsi_fp_matlab_extract}.py` — all five had a module-level `tkinter` import (used only by unused legacy GUI-picker functions) that crashes on any Python build without Tcl/Tk. All five now import tkinter lazily inside those functions only. `SASSI_extract()` behavior is unchanged. This affects the *pip-installed library too*, not just the backend — worth knowing if anything else imports these modules.
+- **`.adicht` extraction is untested in this environment** — `adi-reader`'s native extension doesn't build on macOS; `test_adicht_extraction.py` self-skips here and needs a real run on Windows to confirm the channel rules against real `.adicht` files.
+- **No auth/network hardening yet** — `/files/import` accepts and echoes arbitrary local file paths. Fine today (no port is bound), but must be addressed before the Electron/uvicorn milestone binds one (parked finding, not forgotten).
+- **Error responses are a free-form string** (`error: str | None`), not the structured `{code, message}` the architecture spec describes — parked until more endpoints exist to design the full error taxonomy at once instead of one-off.
+- **`backend/requirements.txt` mixes runtime and dev/test deps** — needs splitting before the PyInstaller/Nuitka sidecar build reads it for packaging.
+
+## Progress
+
+- **Done**: Milestone 1 — backend scaffold, channel-selection logic, extractor wrapper, file import/list API. 16 tests passing, 1 correctly skipped. Reviewed (per-task + whole-branch), one fix wave applied and re-reviewed clean.
+- **Not started**: data windowing/LOD for the graph, beat-detection endpoint (auto-run/ETA/stop), arrhythmia analysis endpoint, SQLite annotation persistence, Svelte frontend, Electron packaging, old-UI (`main.py`/PySide6) removal — see the Roadmap section of the plan doc.
+- **Branch**: `web-ui-redesign`, not merged to `main`.
