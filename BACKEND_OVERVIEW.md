@@ -34,6 +34,8 @@ land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md
 - **No auth/network hardening yet** — `/files/import` accepts and echoes arbitrary local file paths. Fine today (no port is bound), but must be addressed before the Electron/uvicorn milestone binds one (parked finding, not forgotten).
 - **Error responses are a free-form string** (`error: str | None`), not the structured `{code, message}` the architecture spec describes — parked until more endpoints exist to design the full error taxonomy at once instead of one-off.
 - **`backend/requirements.txt` mixes runtime and dev/test deps** — needs splitting before the PyInstaller/Nuitka sidecar build reads it for packaging.
+- **Quitting Electron during backend startup (the ~1-8s health-check window) can orphan the spawned backend process** — `before-quit` only calls `event.preventDefault()` once `stopBackend` is assigned, so a quit requested before `startBackend()` resolves isn't guaranteed to be delayed long enough for cleanup to run. Narrow window, self-limiting (the orphan doesn't block the next launch, which spawns its own backend on a new port), not fixed after a deep review + one fix round — parked rather than risking a 3rd round of changes to this file. `desktop/main.js`'s `before-quit`/`whenReady` handlers.
+- **Test coverage gap**: `desktop/backend-process.test.js`'s "fails fast when already exited" test exercises `waitForHealth()` directly with a hand-built state object, not `startBackend()`'s actual spawn→exit-listener wiring — a regression in that wiring specifically wouldn't be caught by the current suite.
 
 ## Progress
 
