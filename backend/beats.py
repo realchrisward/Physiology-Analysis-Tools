@@ -23,7 +23,7 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
             time_column=cache_entry["time_column"],
             voltage_column=payload.channel,
             **request.app.state.beat_settings.__dict__,
-        )
+        ).reset_index(drop=True)
     except Exception as e:
         return BeatDetectionResult(
             status="error", error=str(e), elapsed_seconds=time.monotonic() - start

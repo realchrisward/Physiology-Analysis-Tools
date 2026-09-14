@@ -66,24 +66,9 @@ def test_both_methods_on_larger_real_file(long_txt_file):
     assert result["status"] == "ok"
     assert result["count"] == 163
 
-    # NOTE: abn_cluster ends up None for every beat here, not True/False as
-    # might be expected for a real "Unsupervised" run. This is a verified,
-    # deterministic characteristic of the current call chain: beat_cache's
-    # DataFrame (as stored by beats.py) keeps beatcaller()'s original sample-
-    # position index, while ml_tools.beatepocher()/call_arrhythmias_PCA()
-    # join the clustering result back in using a plain 0..N-1 positional
-    # index - a mismatch that leaves every join unmatched (NaN), which this
-    # endpoint maps to None rather than erroring. any_arrhythmia_count below
-    # is unaffected because pandas' any(bool_only=True) silently drops the
-    # non-boolean abn_cluster column from that computation, so it reflects
-    # only the heuristic categories - verified real value for this file.
-    # See task-2-report.md for detail; not fixed here as it's a pre-existing
-    # M4 (beat_cache indexing) / upstream ml_tools characteristic, outside
-    # this task's file scope.
-    for beat in result["beats"]:
-        assert beat["abn_cluster"] is None
+    assert any(beat["abn_cluster"] is not None for beat in result["beats"])
 
-    assert result["any_arrhythmia_count"] == 157
+    assert result["any_arrhythmia_count"] == 163
 
 
 def test_beats_not_detected_yet_reports_error(real_beats_txt_file):
