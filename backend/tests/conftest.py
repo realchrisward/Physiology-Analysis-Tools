@@ -11,3 +11,10 @@ def example_txt_file() -> str:
     return os.path.join(
         REPO_ROOT, "src", "physiology_analysis_tools", "examples", "10.txt"
     )
+
+
+@pytest.fixture
+def adicht_examples_dir() -> str:
+    return os.path.join(
+        REPO_ROOT, "src", "physiology_analysis_tools", "examples", "ECG_traces"
+    )

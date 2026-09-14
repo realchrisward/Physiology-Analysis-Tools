@@ -1,6 +1,10 @@
 import pytest
 
-from backend.extractors import NoExtractorSucceededError, extract_dataframe
+from backend.extractors import (
+    EXTRACTOR_SPECS,
+    NoExtractorSucceededError,
+    extract_dataframe,
+)
 
 
 def test_extract_dataframe_loads_labchart_text_file(example_txt_file):
@@ -23,3 +27,9 @@ def test_extract_dataframe_raises_for_missing_file(example_txt_file):
         extract_dataframe(missing)
 
     assert exc_info.value.errors  # at least one candidate extractor's error is recorded
+
+
+def test_txt_candidates_try_labchart_text_before_pcc():
+    txt_candidate_names = [spec.name for spec in EXTRACTOR_SPECS if spec.ext == ".txt"]
+
+    assert txt_candidate_names == ["labchart_text", "pcc"]

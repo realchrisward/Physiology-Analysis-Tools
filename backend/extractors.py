@@ -38,6 +38,8 @@ EXTRACTOR_SPECS: list[ExtractorSpec] = [
     ),
 ]
 
+EXTRACTOR_LOAD_ERRORS: dict[str, str] = {}
+
 try:
     importlib.import_module(
         "physiology_analysis_tools.modules.signal_converters.edf_extract"
@@ -49,8 +51,11 @@ try:
             ".edf",
         )
     )
-except ImportError:
-    pass  # pyedflib not installed - EDF support stays disabled, same as main.py
+except ImportError as e:
+    # Record the real cause instead of assuming a specific one (e.g. missing
+    # pyedflib) - any ImportError while importing edf_extract lands here,
+    # including one raised from deep inside its own import chain.
+    EXTRACTOR_LOAD_ERRORS["edf"] = str(e)
 
 
 class NoExtractorSucceededError(Exception):
@@ -66,8 +71,8 @@ def extract_dataframe(filepath: str):
 
     errors: dict[str, str] = {}
     for spec in candidates:
-        module = importlib.import_module(spec.module_path)
         try:
+            module = importlib.import_module(spec.module_path)
             return module.SASSI_extract(filepath)
         except Exception as e:  # deliberately broad - mirrors main.py's per-extractor fallback
             errors[spec.name] = str(e)

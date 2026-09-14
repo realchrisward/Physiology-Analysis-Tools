@@ -15,6 +15,8 @@ def test_import_labchart_text_file_selects_channel_1(example_txt_file):
     assert result["time_column"] == "ts"
     assert result["default_channel"] == "channel 1"
     assert result["default_channel_matched_rule"] is True
+    assert result["size"] > 0
+    assert result["modified_time"] > 0
 
 
 def test_import_then_list_returns_the_file(example_txt_file):
@@ -39,3 +41,34 @@ def test_import_missing_file_reports_error_not_crash():
     result = response.json()["results"][0]
     assert result["status"] == "error"
     assert result["error"]
+
+
+def test_default_channel_is_always_in_channels_or_none(example_txt_file):
+    client = TestClient(create_app())
+
+    response = client.post("/files/import", json={"paths": [example_txt_file]})
+
+    result = response.json()["results"][0]
+    assert (
+        result["default_channel"] in result["channels"]
+        or result["default_channel"] is None
+    )
+
+
+def test_import_multiple_files_isolates_errors_per_file(example_txt_file):
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/files/import",
+        json={
+            "paths": [
+                example_txt_file,
+                "/nonexistent/path/missing.txt",
+                example_txt_file,
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    statuses = [r["status"] for r in response.json()["results"]]
+    assert statuses == ["ok", "error", "ok"]

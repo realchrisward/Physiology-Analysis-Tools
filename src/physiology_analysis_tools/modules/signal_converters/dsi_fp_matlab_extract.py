@@ -45,8 +45,6 @@ import scipy.io
 import pandas
 import re
 import os
-import tkinter
-import tkinter.filedialog
 
 #%% define functions
 
@@ -72,6 +70,8 @@ def gui_open_filename(kwargs={}):
         String describing the path to the file selected by the GUI.
     
     """
+    import tkinter
+    import tkinter.filedialog
 
     root = tkinter.Tk()
     output_text = tkinter.filedialog.askopenfilename(
@@ -102,6 +102,8 @@ def gui_open_filenames(kwargs={}):
         List of Strings describing the paths to the files selected by the GUI.
     
     """
+    import tkinter
+    import tkinter.filedialog
 
     root = tkinter.Tk()
     output_text_raw = tkinter.filedialog.askopenfilenames(
@@ -133,6 +135,8 @@ def gui_directory(kwargs={}):
         Returns the directory path selected by the GUI.
 
     """
+    import tkinter
+    import tkinter.filedialog
 
     root = tkinter.Tk()
     output_text = tkinter.filedialog.askdirectory(

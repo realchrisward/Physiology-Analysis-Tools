@@ -16,7 +16,6 @@ import pandas
 from pyedflib import highlevel
 import os
 import numpy
-from tkinter import Tk, filedialog
 
 
 # # %% demo
@@ -104,6 +103,7 @@ def gui_open_filenames(kwargs={}):
         List of Strings describing the paths to the files selected by the GUI.
 
     """
+    from tkinter import Tk, filedialog
 
     root = Tk()
     output_text_raw = filedialog.askopenfilenames(**kwargs)
@@ -134,6 +134,7 @@ def gui_directory(kwargs={}):
         Returns the directory path selected by the GUI.
 
     """
+    from tkinter import Tk, filedialog
 
     root = Tk()
     output_text = filedialog.askdirectory(**kwargs)
