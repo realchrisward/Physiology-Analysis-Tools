@@ -25,6 +25,10 @@ def import_files(payload: ImportRequest, request: Request) -> ImportResponse:
             time_column = next(
                 (c for c in channel_names if c.lower() in TIME_COLUMN_NAMES), None
             )
+            request.app.state.signal_cache[path] = {
+                "df": df,
+                "time_column": time_column,
+            }
             selection = select_default_channel(filename, channel_names)
             result = FileImportResult(
                 path=path,

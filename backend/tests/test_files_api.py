@@ -19,6 +19,20 @@ def test_import_labchart_text_file_selects_channel_1(example_txt_file):
     assert result["modified_time"] > 0
 
 
+def test_import_populates_signal_cache(example_txt_file):
+    app = create_app()
+    client = TestClient(app)
+
+    response = client.post("/files/import", json={"paths": [example_txt_file]})
+
+    assert response.status_code == 200
+    assert example_txt_file in app.state.signal_cache
+    cached = app.state.signal_cache[example_txt_file]
+    assert cached["time_column"] == "ts"
+    assert cached["df"].shape[0] == 2280
+    assert "channel 1" in cached["df"].columns
+
+
 def test_import_then_list_returns_the_file(example_txt_file):
     client = TestClient(create_app())
     client.post("/files/import", json={"paths": [example_txt_file]})
