@@ -43,3 +43,35 @@ class BeatDetectionResult(BaseModel):
     elapsed_seconds: float = 0.0
     file_size_bytes: int | None = None
     error: str | None = None
+
+
+class BeatSettingsModel(BaseModel):
+    min_RR: int
+    ecg_invert: bool
+    auto_detect_invert: bool
+    ecg_filter: bool
+    ecg_filt_order: int
+    ecg_filt_cutoff: int
+    abs_thresh: float | None
+    perc_thresh: int | None
+
+
+class ArrhythmiaSettingsModel(BaseModel):
+    bradycardia_absolute_hr: int
+    tachycardia_absolute_hr: int
+    skipped_beat_multiple_rr: float
+    premature_beat_multiple_rr: float
+    window_size: int
+    eps: float
+    min_samples: int
+
+
+class SettingsPayload(BaseModel):
+    beat: BeatSettingsModel
+    arrhythmia: ArrhythmiaSettingsModel
+
+
+class SettingsResult(BaseModel):
+    status: str
+    settings: SettingsPayload | None = None
+    error: str | None = None

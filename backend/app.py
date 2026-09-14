@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from physiology_analysis_tools.modules import heartbeat_detection
+from physiology_analysis_tools.modules import arrhythmia_detection, heartbeat_detection
 
 from backend.beats import router as beats_router
 from backend.files import router as files_router
 from backend.models import FileImportResult
+from backend.settings import router as settings_router
 
 # Origins the Electron renderer loads from: the Vite dev server, and "null"
 # for the packaged app's file:// origin (browsers send Origin: null for
@@ -17,6 +18,7 @@ def create_app() -> FastAPI:
     app.state.imported_files: dict[str, FileImportResult] = {}
     app.state.signal_cache: dict[str, dict] = {}
     app.state.beat_settings = heartbeat_detection.Settings()
+    app.state.arrhythmia_settings = arrhythmia_detection.Settings()
     app.state.beat_cache: dict[str, "pandas.DataFrame"] = {}
 
     app.add_middleware(
@@ -32,6 +34,7 @@ def create_app() -> FastAPI:
 
     app.include_router(files_router)
     app.include_router(beats_router)
+    app.include_router(settings_router)
 
     return app
 
