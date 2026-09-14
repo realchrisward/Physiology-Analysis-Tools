@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('node:path')
 const { startBackend } = require('./backend-process')
 
@@ -32,10 +32,15 @@ function createWindow() {
 let stopBackend = null
 
 app.whenReady().then(async () => {
-  const { port, stop } = await startBackend()
-  stopBackend = stop
-  ipcMain.handle('get-backend-port', () => port)
-  createWindow()
+  try {
+    const { port, stop } = await startBackend()
+    stopBackend = stop
+    ipcMain.handle('get-backend-port', () => port)
+    createWindow()
+  } catch (err) {
+    dialog.showErrorBox('Failed to start backend', err.message || String(err))
+    app.quit()
+  }
 })
 
 app.on('before-quit', async () => {
