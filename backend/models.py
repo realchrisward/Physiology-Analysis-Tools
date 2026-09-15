@@ -103,6 +103,27 @@ class SettingsResult(BaseModel):
     error: str | None = None
 
 
+class WindowBeat(BaseModel):
+    ts: float
+    rr: float
+    r_amplitude: float
+    hr: float
+    bradycardia_absolute: bool | None = None
+    tachycardia_absolute: bool | None = None
+    skipped_beat: bool | None = None
+    prem_beat: bool | None = None
+    abn_cluster: bool | None = None
+    any_arrhythmia: bool | None = None
+    other_arrhythmia: bool | None = None
+
+
+class BeatWindowResult(BaseModel):
+    status: str
+    beats: list[WindowBeat] = []
+    count: int = 0
+    error: str | None = None
+
+
 class ChannelWindowResult(BaseModel):
     status: str
     x: list[float] = []
