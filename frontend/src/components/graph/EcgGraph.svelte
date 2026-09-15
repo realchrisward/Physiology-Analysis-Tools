@@ -439,7 +439,7 @@
   }
 </script>
 
-<div data-testid="ecg-graph">
+<div data-testid="ecg-graph" data-channel={channel}>
   <button data-testid="reset-view-button" onclick={handleResetView}>Reset view</button>
   <button
     type="button"
