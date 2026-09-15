@@ -131,6 +131,54 @@ def test_post_beats_is_idempotent_wholesale_replace(tmp_path, real_beats_txt_fil
     assert len(state["beats"]) == 15
 
 
+def test_post_beats_failure_rolls_back_channel_and_beats_atomically(
+    tmp_path, real_beats_txt_file, monkeypatch
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    client.post(
+        "/beats/detect",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+
+    # First persist succeeds normally, establishing channel 1 as the
+    # durable state.
+    response = client.post(
+        "/files/beats",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+    assert response.json()["status"] == "ok"
+
+    # Force replace_beats to fail on the second persist call, simulating a
+    # mid-transaction failure. If the write isn't atomic, upsert_file's
+    # channel="channel 2" update would be left standing even though the
+    # beats table still holds the channel-1 detection result.
+    from backend import db as db_module
+
+    def failing_replace_beats(*args, **kwargs):
+        raise RuntimeError("simulated replace_beats failure")
+
+    monkeypatch.setattr(db_module, "replace_beats", failing_replace_beats)
+
+    response = client.post(
+        "/files/beats",
+        json={"path": real_beats_txt_file, "channel": "channel 2"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+
+    monkeypatch.undo()
+
+    state_response = client.get(
+        "/files/state", params={"path": real_beats_txt_file}
+    )
+    state = state_response.json()
+    assert state["channel"] == "channel 1"
+    assert len(state["beats"]) == 15
+
+
 def test_post_beats_after_arrhythmia_detection_round_trips_categories(
     tmp_path, real_beats_txt_file
 ):

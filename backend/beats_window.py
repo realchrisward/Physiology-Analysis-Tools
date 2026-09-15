@@ -1,19 +1,12 @@
 import pandas as pd
 from fastapi import APIRouter, Request
 
+from backend import categories
 from backend.models import BeatWindowResult, WindowBeat
 
 router = APIRouter(prefix="/beats", tags=["beats"])
 
-OPTIONAL_COLUMNS = [
-    "bradycardia_absolute",
-    "tachycardia_absolute",
-    "skipped_beat",
-    "prem_beat",
-    "abn_cluster",
-    "any_arrhythmia",
-    "other_arrhythmia",
-]
+OPTIONAL_COLUMNS = categories.ALL_OPTIONAL_COLUMNS
 
 
 @router.get("/window", response_model=BeatWindowResult)

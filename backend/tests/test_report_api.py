@@ -83,6 +83,38 @@ def test_generate_report_without_persisted_data_is_an_error(
     assert result["error"]
 
 
+def test_generate_report_with_only_bad_data_persisted_is_clean_domain_error(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    # A `files` row now exists (created by bad-data alone), but
+    # beat_settings_json/arrhythmia_settings_json are still NULL because
+    # POST /files/beats was never called.
+    client.post(
+        "/files/bad-data",
+        json={"path": real_beats_txt_file, "start": 0.3, "stop": 0.8},
+    )
+
+    output_dir = tmp_path / "reports"
+    os.makedirs(output_dir)
+
+    response = client.post(
+        "/files/report",
+        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert (
+        result["error"]
+        == "No persisted data for this file — run POST /files/beats first"
+    )
+    assert "NoneType" not in result["error"]
+    assert "TypeError" not in result["error"]
+
+
 def test_generate_report_with_nonexistent_output_dir_is_an_error(
     tmp_path, real_beats_txt_file
 ):

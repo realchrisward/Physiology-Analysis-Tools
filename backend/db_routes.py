@@ -9,7 +9,7 @@ from physiology_analysis_tools.modules import (
     ml_tools,
 )
 
-from backend import db
+from backend import categories, db
 from backend.models import (
     ArrhythmiaSettingsModel,
     BadDataAddRequest,
@@ -32,14 +32,7 @@ from backend.models import (
 
 router = APIRouter(prefix="/files", tags=["persistence"])
 
-REASSIGNABLE_CATEGORIES = {
-    "bradycardia_absolute",
-    "tachycardia_absolute",
-    "skipped_beat",
-    "prem_beat",
-    "abn_cluster",
-    "other_arrhythmia",
-}
+REASSIGNABLE_CATEGORIES = set(categories.REASSIGNABLE_CATEGORIES)
 
 
 @router.get("/state", response_model=FileStateResult)
@@ -108,6 +101,8 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             beat_settings=beat_settings,
             arrhythmia_settings=arrhythmia_settings,
         )
+    except Exception as e:
+        return FileStateResult(status="error", error=str(e))
     finally:
         conn.close()
 
@@ -170,10 +165,13 @@ def persist_beats(
             arrhythmia_settings_json=json.dumps(
                 request.app.state.arrhythmia_settings.__dict__
             ),
+            commit=False,
         )
-        db.replace_beats(conn, file_id, beat_df)
+        db.replace_beats(conn, file_id, beat_df, commit=False)
+        conn.commit()
         return PersistBeatsResult(status="ok", count=len(beat_df))
     except Exception as e:
+        conn.rollback()
         return PersistBeatsResult(status="error", error=str(e))
     finally:
         conn.close()
@@ -305,7 +303,7 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
         file_row = db.get_file_row(
             conn, payload.path, imported.size, imported.modified_time
         )
-        if file_row is None:
+        if file_row is None or file_row["beat_settings_json"] is None:
             return ReportResult(
                 status="error",
                 error="No persisted data for this file — run POST /files/beats first",

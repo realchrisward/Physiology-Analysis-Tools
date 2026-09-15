@@ -4,17 +4,11 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from backend import categories
+
 _UNSET = object()
 
-OPTIONAL_BEAT_COLUMNS = [
-    "bradycardia_absolute",
-    "tachycardia_absolute",
-    "skipped_beat",
-    "prem_beat",
-    "abn_cluster",
-    "any_arrhythmia",
-    "other_arrhythmia",
-]
+OPTIONAL_BEAT_COLUMNS = categories.ALL_OPTIONAL_COLUMNS
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS files (
@@ -91,6 +85,7 @@ def upsert_file(
     channel=_UNSET,
     beat_settings_json=_UNSET,
     arrhythmia_settings_json=_UNSET,
+    commit: bool = True,
 ) -> int:
     """Insert or update the `files` row for (path, size, mtime).
 
@@ -98,6 +93,10 @@ def upsert_file(
     overwritten on conflict, so e.g. persisting a channel choice doesn't
     blow away beat/arrhythmia settings JSON a prior persist already saved,
     and vice versa.
+
+    `commit` defaults to True (standalone-call behavior). Pass
+    `commit=False` when this call is one half of a larger transaction the
+    caller will commit (or roll back) itself.
     """
     updated_at = datetime.now(timezone.utc).isoformat()
 
@@ -122,7 +121,8 @@ def upsert_file(
         f"ON CONFLICT(path, size, mtime) DO UPDATE SET {', '.join(update_clauses)}",
         values,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
     # sqlite's last_insert_rowid() isn't reliably updated when an upsert
     # takes the ON CONFLICT DO UPDATE branch, so look the row back up by its
@@ -131,14 +131,7 @@ def upsert_file(
     return row["id"]
 
 
-CATEGORY_COLUMNS = [
-    "bradycardia_absolute",
-    "tachycardia_absolute",
-    "skipped_beat",
-    "prem_beat",
-    "abn_cluster",
-    "other_arrhythmia",
-]
+CATEGORY_COLUMNS = categories.REASSIGNABLE_CATEGORIES
 
 
 def update_beat_category(
@@ -217,12 +210,18 @@ def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -
     return cursor.rowcount > 0
 
 
-def replace_beats(conn: sqlite3.Connection, file_id: int, beat_df) -> None:
+def replace_beats(
+    conn: sqlite3.Connection, file_id: int, beat_df, *, commit: bool = True
+) -> None:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 
     Wholesale-replacing (rather than merging) keeps repeated persists
     idempotent: calling this twice for the same detection result leaves
     exactly one row per beat, not duplicates.
+
+    `commit` defaults to True (standalone-call behavior). Pass
+    `commit=False` when this call is one half of a larger transaction the
+    caller will commit (or roll back) itself.
     """
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 
@@ -239,10 +238,11 @@ def replace_beats(conn: sqlite3.Connection, file_id: int, beat_df) -> None:
             "INSERT INTO beats ("
             "file_id, ts, rr, r_amplitude, hr, "
             "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
-            "prem_beat, abn_cluster, any_arrhythmia, other_arrhythmia, "
+            "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
             "review_state, reassigned_category"
             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unreviewed', NULL)",
             (file_id, row.ts, row.RR, row.R_amplitude, row.HR, *optional_values),
         )
 
-    conn.commit()
+    if commit:
+        conn.commit()

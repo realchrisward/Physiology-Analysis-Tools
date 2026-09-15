@@ -4,6 +4,7 @@ import pandas as pd
 from fastapi import APIRouter, Request
 from physiology_analysis_tools.modules import arrhythmia_detection
 
+from backend import categories
 from backend.models import (
     ArrhythmiaBeat,
     ArrhythmiaDetectionResult,
@@ -58,13 +59,7 @@ def detect_arrhythmias(
 
     elapsed_seconds = time.monotonic() - start
 
-    optional_columns = [
-        "bradycardia_absolute",
-        "tachycardia_absolute",
-        "skipped_beat",
-        "prem_beat",
-        "abn_cluster",
-    ]
+    optional_columns = categories.BASE_CATEGORIES
     present_optional_columns = [c for c in optional_columns if c in df.columns]
     if present_optional_columns:
         # any_arrhythmia is computed internally by call_arrhythmias() as
