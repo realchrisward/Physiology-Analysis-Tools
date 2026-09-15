@@ -7,6 +7,7 @@ from backend.beats import router as beats_router
 from backend.files import router as files_router
 from backend.models import FileImportResult
 from backend.settings import router as settings_router
+from backend.windowing import router as windowing_router
 
 # Origins the Electron renderer loads from: the Vite dev server, and "null"
 # for the packaged app's file:// origin (browsers send Origin: null for
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     app.state.beat_settings = heartbeat_detection.Settings()
     app.state.arrhythmia_settings = arrhythmia_detection.Settings()
     app.state.beat_cache: dict[str, "pandas.DataFrame"] = {}
+    app.state.window_cache: dict = {}
 
     app.add_middleware(
         CORSMiddleware,
@@ -37,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(beats_router)
     app.include_router(settings_router)
     app.include_router(arrhythmia_router)
+    app.include_router(windowing_router)
 
     return app
 

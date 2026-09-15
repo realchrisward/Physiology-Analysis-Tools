@@ -101,3 +101,12 @@ class SettingsResult(BaseModel):
     status: str
     settings: SettingsPayload | None = None
     error: str | None = None
+
+
+class ChannelWindowResult(BaseModel):
+    status: str
+    x: list[float] = []
+    y: list[float] = []
+    point_count: int = 0
+    downsampled: bool = False
+    error: str | None = None
