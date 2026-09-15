@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import EcgGraph from './EcgGraph.svelte'
+import EcgGraph, { buildBeatAlignedData } from './EcgGraph.svelte'
+import type { BadDataMark, WindowBeat } from '../../lib/api/types'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -19,6 +20,79 @@ function channelWindowResponse(overrides: Partial<Record<string, unknown>> = {})
       error: null,
       ...overrides,
     }),
+  }
+}
+
+function beatsWindowResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    ok: true,
+    json: async () => ({
+      status: 'ok',
+      beats: [],
+      count: 0,
+      error: null,
+      ...overrides,
+    }),
+  }
+}
+
+function badDataAddResponse(mark: BadDataMark) {
+  return {
+    ok: true,
+    json: async () => ({ status: 'ok', mark, error: null }),
+  }
+}
+
+function badDataDeleteResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    ok: true,
+    json: async () => ({ status: 'ok', error: null, ...overrides }),
+  }
+}
+
+// Routes the shared fetch mock by URL pathname (and, for the shared
+// `/files/bad-data` path, HTTP method) rather than by call order — every
+// EcgGraph range-change now fires two GETs (`/channels/window` then
+// `/beats/window`; see `fetchMergedWindow` in EcgGraph.svelte), so a
+// generic "respond to every call the same way" mock would hand the beats
+// endpoint a channel-window-shaped body (or vice versa).
+function routedFetch(
+  handlers: {
+    channel?: () => unknown
+    beats?: () => unknown
+    addBadData?: () => unknown
+    deleteBadData?: () => unknown
+  } = {},
+) {
+  return vi.fn((url: string, init?: RequestInit) => {
+    const { pathname } = new URL(url)
+    if (pathname === '/beats/window') {
+      return Promise.resolve((handlers.beats ?? (() => beatsWindowResponse()))())
+    }
+    if (pathname === '/files/bad-data') {
+      if (init?.method === 'DELETE') {
+        return Promise.resolve((handlers.deleteBadData ?? (() => badDataDeleteResponse()))())
+      }
+      return Promise.resolve(
+        (handlers.addBadData ?? (() => badDataAddResponse({ id: 1, start: 0, stop: 1 })))(),
+      )
+    }
+    return Promise.resolve((handlers.channel ?? (() => channelWindowResponse()))())
+  })
+}
+
+function beat(overrides: Partial<WindowBeat> & Pick<WindowBeat, 'ts' | 'r_amplitude'>): WindowBeat {
+  return {
+    rr: 0.8,
+    hr: 75,
+    bradycardia_absolute: false,
+    tachycardia_absolute: false,
+    skipped_beat: false,
+    prem_beat: false,
+    abn_cluster: false,
+    any_arrhythmia: false,
+    other_arrhythmia: false,
+    ...overrides,
   }
 }
 
@@ -46,14 +120,21 @@ function fetchedUrl(fetchMock: ReturnType<typeof vi.fn>, callIndex: number): URL
   return new URL(url as string)
 }
 
+function fetchedBody(fetchMock: ReturnType<typeof vi.fn>, callIndex: number): Record<string, unknown> {
+  const [, init] = fetchMock.mock.calls[callIndex]
+  return JSON.parse((init as RequestInit).body as string)
+}
+
 describe('EcgGraph', () => {
   it('fetches the full range on mount and renders without error', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(channelWindowResponse())
+    const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    // One call for the channel window, one for beats in the same range —
+    // see `fetchMergedWindow` in EcgGraph.svelte.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const url = fetchedUrl(fetchMock, 0)
     expect(url.pathname).toBe('/channels/window')
@@ -67,32 +148,101 @@ describe('EcgGraph', () => {
     })
   })
 
-  it('sends a resolution query param matching the container width', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(channelWindowResponse())
+  it('fetches beat markers for the same window alongside the channel data, on mount and after a pan/zoom re-fetch', async () => {
+    const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     withMockedClientWidth(800, () => {
       render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
     })
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const channelCall = fetchedUrl(fetchMock, 0)
+    const beatsCall = fetchedUrl(fetchMock, 1)
+    expect(channelCall.pathname).toBe('/channels/window')
+    expect(beatsCall.pathname).toBe('/beats/window')
+    expect(beatsCall.searchParams.get('path')).toBe('/data/57.txt')
+    expect(beatsCall.searchParams.get('start')).toBe(channelCall.searchParams.get('start'))
+    expect(beatsCall.searchParams.get('end')).toBe(channelCall.searchParams.get('end'))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    vi.useFakeTimers()
+    over.dispatchEvent(
+      new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
+    )
+    await vi.advanceTimersByTimeAsync(150)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
+    const secondChannelCall = fetchedUrl(fetchMock, 2)
+    const secondBeatsCall = fetchedUrl(fetchMock, 3)
+    expect(secondChannelCall.pathname).toBe('/channels/window')
+    expect(secondBeatsCall.pathname).toBe('/beats/window')
+    expect(secondBeatsCall.searchParams.get('start')).toBe(secondChannelCall.searchParams.get('start'))
+    expect(secondBeatsCall.searchParams.get('end')).toBe(secondChannelCall.searchParams.get('end'))
+  })
+
+  it('renders without error when getBeatsWindow returns a mix of arrhythmia-flagged, normal, and not-yet-evaluated beats', async () => {
+    // End-to-end companion to the `buildBeatAlignedData` unit tests below,
+    // which assert the actual per-category series data precisely (see the
+    // comment there for why that's the exact seam this feature is tested
+    // through, rather than a live uPlot instance's internals) — this test
+    // instead confirms the full fetch-mocked component doesn't error when
+    // handed the same 2-arrhythmia-states-plus-null fixture the brief
+    // describes, i.e. the wiring from a real `getBeatsWindow` response
+    // through to chart construction doesn't throw or surface an error.
+    const fetchMock = routedFetch({
+      beats: () =>
+        beatsWindowResponse({
+          beats: [
+            beat({ ts: 2, r_amplitude: 5, any_arrhythmia: true }),
+            beat({ ts: 5, r_amplitude: 6, any_arrhythmia: false }),
+            beat({ ts: 7, r_amplitude: 7, any_arrhythmia: null }),
+          ],
+          count: 3,
+        }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument())
+  })
+
+  it('sends a resolution query param matching the container width', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const url = fetchedUrl(fetchMock, 0)
     expect(url.searchParams.get('resolution')).toBe('800')
   })
 
   it('debounces a re-fetch after a pan/zoom interaction, with a different range', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(channelWindowResponse({ x: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] }))
-      .mockResolvedValue(channelWindowResponse({ x: [3, 4, 5, 6], y: [-1, 0, 1, 0] }))
+    const fetchMock = routedFetch({
+      channel: (() => {
+        let call = 0
+        return () => {
+          call += 1
+          return call === 1
+            ? channelWindowResponse({ x: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] })
+            : channelWindowResponse({ x: [3, 4, 5, 6], y: [-1, 0, 1, 0] })
+        }
+      })(),
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     withMockedClientWidth(800, () => {
       render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
     })
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
     expect(over).toBeTruthy()
@@ -104,29 +254,36 @@ describe('EcgGraph', () => {
 
     // Not yet — still inside the 150ms debounce window.
     await vi.advanceTimersByTimeAsync(100)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    await vi.advanceTimersByTimeAsync(100)
     expect(fetchMock).toHaveBeenCalledTimes(2)
 
+    await vi.advanceTimersByTimeAsync(100)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
     const firstCall = fetchedUrl(fetchMock, 0)
-    const secondCall = fetchedUrl(fetchMock, 1)
+    const secondCall = fetchedUrl(fetchMock, 2)
     expect(secondCall.searchParams.get('start')).not.toBe(firstCall.searchParams.get('start'))
     expect(secondCall.searchParams.get('end')).not.toBe(firstCall.searchParams.get('end'))
   })
 
   it('restores the initial full extent on reset view, after a pan/zoom re-fetch', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(channelWindowResponse({ x: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] }))
-      .mockResolvedValue(channelWindowResponse({ x: [3, 4, 5, 6], y: [-1, 0, 1, 0] }))
+    const fetchMock = routedFetch({
+      channel: (() => {
+        let call = 0
+        return () => {
+          call += 1
+          return call === 1
+            ? channelWindowResponse({ x: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] })
+            : channelWindowResponse({ x: [3, 4, 5, 6], y: [-1, 0, 1, 0] })
+        }
+      })(),
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     withMockedClientWidth(800, () => {
       render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
     })
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     const initialCall = fetchedUrl(fetchMock, 0)
 
     const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
@@ -136,14 +293,14 @@ describe('EcgGraph', () => {
       new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
     )
     await vi.advanceTimersByTimeAsync(150)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     vi.useRealTimers()
 
     const resetButton = screen.getByTestId('reset-view-button')
     resetButton.click()
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
-    const resetCall = fetchedUrl(fetchMock, 2)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6))
+    const resetCall = fetchedUrl(fetchMock, 4)
     expect(resetCall.searchParams.get('start')).toBe(initialCall.searchParams.get('start') ?? '0')
     // The initial mount requests an effectively-unbounded end
     // (Number.MAX_SAFE_INTEGER) to mean "everything"; the stored full
@@ -153,14 +310,14 @@ describe('EcgGraph', () => {
   })
 
   it('removes document-level drag listeners on unmount, so a stale mid-drag mouseup fetches nothing', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(channelWindowResponse())
+    const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const { unmount } = withMockedClientWidth(800, () =>
       render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
     )
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
     expect(over).toBeTruthy()
@@ -192,5 +349,151 @@ describe('EcgGraph', () => {
     // No new fetch: the listeners were actually removed on unmount, not
     // just orphaned alongside a destroyed chart.
     expect(fetchMock.mock.calls.length).toBe(callsAfterUnmount)
+  })
+
+  it('does not add a bad-data mark on a plain drag when bad-data mode is off (the default)', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+
+    vi.useFakeTimers()
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 300, clientY: 100, bubbles: true }))
+
+    // Let the pan's own debounced re-fetch (channel + beats) fire, so we're
+    // asserting against the fully-settled call list, not a mid-flight one.
+    await vi.advanceTimersByTimeAsync(200)
+
+    const calledPaths = fetchMock.mock.calls.map(([url]) => new URL(url as string).pathname)
+    expect(calledPaths).not.toContain('/files/bad-data')
+    expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument()
+  })
+
+  it('enters bad-data mode via the toggle button, and a drag on the plot adds a mark via addBadData', async () => {
+    const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
+    const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const modeButton = screen.getByTestId('bad-data-mode-button')
+    expect(modeButton.getAttribute('aria-pressed')).toBe('false')
+    modeButton.click()
+    await waitFor(() => expect(modeButton.getAttribute('aria-pressed')).toBe('true'))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    // Drag start/end in either order is fine — the backend auto-sorts, so
+    // this only asserts that both endpoint values are sent, not their order.
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 500, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 100, bubbles: true }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    const addCallUrl = fetchedUrl(fetchMock, 2)
+    expect(addCallUrl.pathname).toBe('/files/bad-data')
+    const [, addInit] = fetchMock.mock.calls[2]
+    expect((addInit as RequestInit).method).toBe('POST')
+    const addBody = fetchedBody(fetchMock, 2)
+    expect(addBody.path).toBe('/data/57.txt')
+    expect(typeof addBody.start).toBe('number')
+    expect(typeof addBody.stop).toBe('number')
+
+    // The response's real mark (id 42) is now tracked locally and rendered.
+    await waitFor(() => {
+      const marks = screen.getAllByTestId('bad-data-mark')
+      expect(marks).toHaveLength(1)
+    })
+
+    // A plain drag no longer pans while bad-data mode stays on (mutually
+    // exclusive per the brief) — not separately asserted here since pan
+    // behavior itself is covered by the earlier pan/zoom tests; this test's
+    // contract is limited to "a drag while in bad-data mode adds a mark".
+  })
+
+  it('removes a bad-data mark via deleteBadData when the mark is clicked', async () => {
+    const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
+    const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    screen.getByTestId('bad-data-mode-button').click()
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 500, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 100, bubbles: true }))
+
+    await waitFor(() => expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    screen.getByTestId('bad-data-mark').click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+
+    const deleteCallUrl = fetchedUrl(fetchMock, 3)
+    expect(deleteCallUrl.pathname).toBe('/files/bad-data')
+    const [, deleteInit] = fetchMock.mock.calls[3]
+    expect((deleteInit as RequestInit).method).toBe('DELETE')
+    const deleteBody = fetchedBody(fetchMock, 3)
+    expect(deleteBody.path).toBe('/data/57.txt')
+    expect(deleteBody.id).toBe(42)
+
+    await waitFor(() => expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument())
+  })
+})
+
+describe('buildBeatAlignedData', () => {
+  // This is the exact "series/point data passed to uPlot" the beat-marker
+  // feature is built on (see EcgGraph.svelte's onMount/refetch, which feed
+  // its output straight into `new uPlot(...)`/`chart.setData(...)`) — so
+  // asserting on its output directly is a precise, uPlot-internals-free way
+  // to verify "the plot receives 3 distinguishable marker points" per
+  // arrhythmia category, without reaching into a live chart instance.
+  it('merges the channel waveform with beat markers into a shared x-axis and 3 per-category y-series', () => {
+    const channelX = [0, 1, 2, 3, 4]
+    const channelY = [0, 1, 0, -1, 0]
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true }),
+      beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false }),
+      // A beat timestamp that doesn't land on a channel sample (4.5) — the
+      // "not yet arrhythmia-detected" case.
+      beat({ ts: 4.5, r_amplitude: 7, any_arrhythmia: null }),
+    ]
+
+    const result = buildBeatAlignedData(channelX, channelY, beats)
+
+    expect(result.xs).toEqual([0, 1, 2, 3, 4, 4.5])
+    // spanGaps on the waveform series (set in EcgGraph.svelte) means this
+    // trailing null doesn't fragment the rendered line.
+    expect(result.channelY).toEqual([0, 1, 0, -1, 0, null])
+    expect(result.arrhythmiaY).toEqual([null, 5, null, null, null, null])
+    expect(result.normalY).toEqual([null, null, 6, null, null, null])
+    expect(result.unevaluatedY).toEqual([null, null, null, null, null, 7])
+  })
+
+  it('returns the channel waveform unchanged when there are no beats', () => {
+    const result = buildBeatAlignedData([0, 1, 2], [1, 2, 3], [])
+    expect(result.xs).toEqual([0, 1, 2])
+    expect(result.channelY).toEqual([1, 2, 3])
+    expect(result.arrhythmiaY).toEqual([null, null, null])
+    expect(result.normalY).toEqual([null, null, null])
+    expect(result.unevaluatedY).toEqual([null, null, null])
   })
 })
