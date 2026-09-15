@@ -4,6 +4,41 @@ from fastapi.testclient import TestClient
 from backend.app import create_app
 
 
+def test_reimport_invalidates_stale_window_cache_entries(example_txt_file):
+    app = create_app()
+    client = TestClient(app)
+    client.post("/files/import", json={"paths": [example_txt_file]})
+
+    params = {
+        "path": example_txt_file,
+        "channel": "channel 1",
+        "start": 0,
+        "end": 1.1394999999999982,
+        "resolution": 10000,
+    }
+    cache_key = (
+        params["path"],
+        params["channel"],
+        params["start"],
+        params["end"],
+        params["resolution"],
+    )
+
+    response = client.get("/channels/window", params=params)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+    # The query above must have been memoized under this exact key.
+    assert cache_key in app.state.window_cache
+
+    # Re-importing the same path (e.g. the technician re-imported after the
+    # file changed on disk) must drop the memoized entry rather than let a
+    # later identical query silently return the old, now-possibly-stale
+    # result.
+    client.post("/files/import", json={"paths": [example_txt_file]})
+    assert cache_key not in app.state.window_cache
+
+
 def test_small_file_full_range_high_resolution_is_passthrough(example_txt_file):
     client = TestClient(create_app())
     client.post("/files/import", json={"paths": [example_txt_file]})

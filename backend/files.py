@@ -29,6 +29,14 @@ def import_files(payload: ImportRequest, request: Request) -> ImportResponse:
                 "df": df,
                 "time_column": time_column,
             }
+            # A re-import means the on-disk file may have changed, so any
+            # previously memoized /channels/window results for this path are
+            # now stale and must be dropped rather than served on the next
+            # matching query.
+            window_cache = request.app.state.window_cache
+            stale_keys = [key for key in window_cache if key[0] == path]
+            for key in stale_keys:
+                del window_cache[key]
             selection = select_default_channel(filename, channel_names)
             result = FileImportResult(
                 path=path,
