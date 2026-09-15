@@ -240,12 +240,6 @@ describe('ImportScreen', () => {
 })
 
 describe('ImportScreen auto-run beat detection', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-    delete (window as any).api
-    resetForTesting()
-  })
-
   it('defaults the auto-run checkbox to checked', () => {
     render(ImportScreen)
     const checkbox = screen.getByTestId('auto-run-checkbox') as HTMLInputElement
@@ -474,6 +468,80 @@ describe('ImportScreen auto-run beat detection', () => {
     })
 
     resolveDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).not.toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).not.toBeDisabled()
+    })
+  })
+
+  it('disables the import buttons as soon as the picker is invoked, before it resolves', async () => {
+    let resolvePickFiles: (value: string[]) => void
+    const pickFilesPromise = new Promise<string[]>((resolve) => {
+      resolvePickFiles = resolve
+    })
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockReturnValue(pickFilesPromise),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ImportScreen)
+
+    // Uncheck auto-run up front — the checkbox itself becomes disabled the
+    // instant the queue goes busy, so it must be set before that click.
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    // The picker promise is still pending — nothing has resolved yet — but
+    // the buttons must already be disabled from the very first click.
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).toBeDisabled()
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    resolvePickFiles!([])
+
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).not.toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).not.toBeDisabled()
+    })
+  })
+
+  it('disables the import buttons while the import request is in flight, before it resolves', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue(['/data/a.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+
+    let resolveImport: (value: unknown) => void
+    const importPromise = new Promise((resolve) => {
+      resolveImport = resolve
+    })
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/files/import')) return importPromise
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ImportScreen)
+
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    // The picker has already resolved (synchronously mocked) but the
+    // import fetch is still pending — buttons must stay disabled through
+    // this window too.
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).toBeDisabled()
+    })
+
+    resolveImport!(
+      importOkResponse([{ path: '/data/a.txt', filename: 'a.txt', size: 100, defaultChannel: 'channel 1' }]),
+    )
 
     await waitFor(() => {
       expect(screen.getByTestId('import-files-button')).not.toBeDisabled()

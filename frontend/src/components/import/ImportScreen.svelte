@@ -18,8 +18,21 @@
   let rows: FileRow[] = $state([])
   let importError: string = $state('')
   let autoRun: boolean = $state(true)
-  let stopped: boolean = $state(false)
-  let queueRunning: boolean = $state(false)
+
+  // Single source of truth for the whole import+detect lifecycle, covering
+  // the picker dialog window, the import network round trip, and the
+  // detection queue as one continuous guarded phase — so it is structurally
+  // impossible for two import attempts to run concurrently (see
+  // handleImportFiles/handleImportFolder, which set 'busy' synchronously
+  // before awaiting anything).
+  //   'idle'     - nothing in flight; Import Files/Import Folder enabled.
+  //   'busy'     - picker open, import in flight, or detection queue
+  //                running; Import Files/Import Folder disabled.
+  //   'stopping' - Stop was clicked mid-queue; the in-flight file finishes,
+  //                remaining files are skipped, then this resolves to
+  //                'idle' via the same finally as the 'busy' path.
+  type QueueState = 'idle' | 'busy' | 'stopping'
+  let queueState: QueueState = $state('idle')
 
   async function importPaths(paths: string[]) {
     if (paths.length === 0) return
@@ -57,38 +70,31 @@
   }
 
   async function runDetectionQueue(queue: FileRow[]) {
-    // Guarded by `queueRunning` disabling the import buttons (see markup),
-    // so a second call can never start while this one is in flight — the
-    // `stopped` reset below can no longer clobber an in-progress Stop.
-    queueRunning = true
-    stopped = false
-    try {
-      for (const row of queue) {
-        if (stopped) break
-        if (row.status !== 'ready' || row.defaultChannel === null) continue
+    for (const row of queue) {
+      if (queueState === 'stopping') break
+      if (row.status !== 'ready' || row.defaultChannel === null) continue
 
-        row.status = 'detecting'
-        const result = await detectBeats(row.path, row.defaultChannel)
+      row.status = 'detecting'
+      const result = await detectBeats(row.path, row.defaultChannel)
 
-        if (result.status === 'ok' && !result.error) {
-          if (row.size !== null) {
-            recordSample(row.size, result.elapsed_seconds)
-          }
-          row.status = 'detected'
-          row.beatCount = result.count
-          row.meanHr = result.mean_hr
-        } else {
-          row.status = 'detection-error'
-          row.error = result.error
+      if (result.status === 'ok' && !result.error) {
+        if (row.size !== null) {
+          recordSample(row.size, result.elapsed_seconds)
         }
+        row.status = 'detected'
+        row.beatCount = result.count
+        row.meanHr = result.mean_hr
+      } else {
+        row.status = 'detection-error'
+        row.error = result.error
       }
-    } finally {
-      queueRunning = false
     }
   }
 
   function handleStop() {
-    stopped = true
+    if (queueState === 'busy') {
+      queueState = 'stopping'
+    }
   }
 
   function formatEta(size: number | null): string {
@@ -99,26 +105,44 @@
   }
 
   async function handleImportFiles() {
-    const paths = (await window.api?.pickFiles()) ?? []
-    await importPaths(paths)
+    // Set synchronously, before awaiting the picker, so the buttons are
+    // disabled from the very first click — covering the picker-open
+    // window, not just the later import/detection windows.
+    queueState = 'busy'
+    try {
+      const paths = (await window.api?.pickFiles()) ?? []
+      await importPaths(paths)
+    } finally {
+      queueState = 'idle'
+    }
   }
 
   async function handleImportFolder() {
-    const paths = (await window.api?.pickFolder()) ?? []
-    await importPaths(paths)
+    queueState = 'busy'
+    try {
+      const paths = (await window.api?.pickFolder()) ?? []
+      await importPaths(paths)
+    } finally {
+      queueState = 'idle'
+    }
   }
 </script>
 
 <div>
   <div>
-    <button data-testid="import-files-button" onclick={handleImportFiles} disabled={queueRunning}>
+    <button data-testid="import-files-button" onclick={handleImportFiles} disabled={queueState !== 'idle'}>
       Import Files
     </button>
-    <button data-testid="import-folder-button" onclick={handleImportFolder} disabled={queueRunning}>
+    <button data-testid="import-folder-button" onclick={handleImportFolder} disabled={queueState !== 'idle'}>
       Import Folder
     </button>
     <label>
-      <input type="checkbox" data-testid="auto-run-checkbox" bind:checked={autoRun} disabled={queueRunning} />
+      <input
+        type="checkbox"
+        data-testid="auto-run-checkbox"
+        bind:checked={autoRun}
+        disabled={queueState !== 'idle'}
+      />
       Auto-run beat detection
     </label>
     <button data-testid="stop-button" onclick={handleStop}>Stop</button>

@@ -68,16 +68,17 @@ Mirrors the backend's shape: each milestone is a working, testable slice.
 - **F1 — Foundation.** API client (all 15 endpoints, typed), design tokens,
   Electron IPC addition for a native "choose output directory" dialog
   (needed by F5's report export). The app shell (Import/Review view switch)
-  is deferred to F2, which needs a shell to render its screen into anyway.
-- **F2 — Import screen.** App shell (Import/Review view switch) plus
-  multi-select + folder import, per-file status, "Auto-run beat detection"
-  tickbox (checked by default), ETA display (starts "Calculating...", then a
-  real running-average estimate — per the session's earlier ETA UX note,
-  never a fabricated hardcoded number presented as real).
-- **F3 — Review workspace shell + graph.** Channel select/switch (re-runs
-  detection on change), `EcgGraph` wired to `GET /channels/window` with
-  real pan/zoom, beat/arrhythmia markers from `GET /beats/window`, bad-data
-  click-drag marking wired to `POST`/`DELETE /files/bad-data`.
+  is deferred to F3, which needs a shell to render its screen into anyway.
+- **F2 — Import screen.** Multi-select + folder import, per-file status,
+  "Auto-run beat detection" tickbox (checked by default), ETA display
+  (starts "Calculating...", then a real running-average estimate — per the
+  session's earlier ETA UX note, never a fabricated hardcoded number
+  presented as real).
+- **F3 — Review workspace shell + graph.** App shell (Import/Review view
+  switch) plus channel select/switch (re-runs detection on change),
+  `EcgGraph` wired to `GET /channels/window` with real pan/zoom,
+  beat/arrhythmia markers from `GET /beats/window`, bad-data click-drag
+  marking wired to `POST`/`DELETE /files/bad-data`.
 - **F4 — Beat/arrhythmia review.** Per-beat category list (only categories
   that actually fired), confirm/reject/reassign controls wired to
   `PATCH /files/beats/category`, arrhythmia re-run controls
