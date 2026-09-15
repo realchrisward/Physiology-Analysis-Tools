@@ -170,6 +170,12 @@ describe('EcgGraph', () => {
     // attached until `onUp` fires (or, before the fix, forever).
     over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
 
+    // A leaked `onUp` (the bug this test guards against) only *schedules* a
+    // re-fetch via `scheduleRefetch`'s 150ms debounce timer — it doesn't
+    // call fetch synchronously. Fake timers let us advance past that
+    // window deterministically instead of racing a real 150ms wait.
+    vi.useFakeTimers()
+
     unmount()
 
     const callsAfterUnmount = fetchMock.mock.calls.length
@@ -178,6 +184,10 @@ describe('EcgGraph', () => {
     // would happen from any later unrelated mouseup on the page.
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 100, bubbles: true }))
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 100, bubbles: true }))
+
+    // Advance well past the 150ms debounce so a leaked listener's scheduled
+    // re-fetch (if any) would have fired by now.
+    await vi.advanceTimersByTimeAsync(200)
 
     // No new fetch: the listeners were actually removed on unmount, not
     // just orphaned alongside a destroyed chart.
