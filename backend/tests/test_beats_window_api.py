@@ -120,15 +120,16 @@ def test_narrow_range_on_larger_file_after_both_methods(long_txt_file):
 
     response = client.get(
         "/beats/window",
-        params={"path": long_txt_file, "start": 0, "end": 1},
+        params={"path": long_txt_file, "start": 0, "end": 3},
     )
 
     assert response.status_code == 200
     result = response.json()
     assert result["status"] == "ok"
+    assert result["count"] >= 5
 
     for beat in result["beats"]:
-        assert 0 <= beat["ts"] <= 1
+        assert 0 <= beat["ts"] <= 3
         assert beat["abn_cluster"] is not None
 
 
