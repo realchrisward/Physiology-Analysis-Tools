@@ -1,7 +1,7 @@
 import { apiGet, apiPost } from './http'
-import type { SettingsPayload, SettingsResult } from './types'
+import type { ApiError, SettingsPayload, SettingsResult } from './types'
 
-export function getSettings(): Promise<SettingsPayload> {
+export function getSettings(): Promise<SettingsPayload | ApiError> {
   return apiGet('/settings')
 }
 

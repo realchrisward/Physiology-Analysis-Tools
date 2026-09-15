@@ -1,6 +1,17 @@
 // Types mirroring backend/models.py exactly (field names, optionality).
 // `| null` corresponds to Pydantic's `| None`.
 
+// Synthesized by apiGet/apiPost (see http.ts) on network failure or a non-2xx
+// HTTP response. Most backend response types already include `status`/`error`
+// fields, so that shape overlaps harmlessly with a successful response's own
+// error state. But a handful of response types don't carry `status`/`error`
+// at all (or aren't an object), so their return type must be unioned with
+// this explicitly to force callers to narrow before accessing success fields.
+export interface ApiError {
+  status: 'error'
+  error: string
+}
+
 export interface FileImportResult {
   path: string
   filename: string

@@ -34,4 +34,27 @@ describe('files api', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files')
   })
+
+  it('importFiles resolves to an ApiError shape (not a crash) on network failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+
+    const result = await importFiles(['/a.txt'])
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.status).toBe('error')
+    }
+  })
+
+  it('listFiles resolves to an ApiError shape (not a raw array) on network failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')))
+
+    const result = await listFiles()
+
+    expect(Array.isArray(result)).toBe(false)
+    if (!Array.isArray(result)) {
+      expect(result.status).toBe('error')
+      expect(result.error).toBeTruthy()
+    }
+  })
 })

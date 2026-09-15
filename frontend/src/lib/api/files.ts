@@ -1,10 +1,10 @@
 import { apiGet, apiPost } from './http'
-import type { FileImportResult, ImportResponse } from './types'
+import type { ApiError, FileImportResult, ImportResponse } from './types'
 
-export function importFiles(paths: string[]): Promise<ImportResponse> {
+export function importFiles(paths: string[]): Promise<ImportResponse | ApiError> {
   return apiPost('/files/import', 'POST', { paths })
 }
 
-export function listFiles(): Promise<FileImportResult[]> {
+export function listFiles(): Promise<FileImportResult[] | ApiError> {
   return apiGet('/files')
 }
