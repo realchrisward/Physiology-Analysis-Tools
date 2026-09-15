@@ -19,6 +19,7 @@
   let importError: string = $state('')
   let autoRun: boolean = $state(true)
   let stopped: boolean = $state(false)
+  let queueRunning: boolean = $state(false)
 
   async function importPaths(paths: string[]) {
     if (paths.length === 0) return
@@ -56,25 +57,33 @@
   }
 
   async function runDetectionQueue(queue: FileRow[]) {
+    // Guarded by `queueRunning` disabling the import buttons (see markup),
+    // so a second call can never start while this one is in flight — the
+    // `stopped` reset below can no longer clobber an in-progress Stop.
+    queueRunning = true
     stopped = false
-    for (const row of queue) {
-      if (stopped) break
-      if (row.status !== 'ready' || row.defaultChannel === null) continue
+    try {
+      for (const row of queue) {
+        if (stopped) break
+        if (row.status !== 'ready' || row.defaultChannel === null) continue
 
-      row.status = 'detecting'
-      const result = await detectBeats(row.path, row.defaultChannel)
+        row.status = 'detecting'
+        const result = await detectBeats(row.path, row.defaultChannel)
 
-      if (result.status === 'ok' && !result.error) {
-        if (row.size !== null) {
-          recordSample(row.size, result.elapsed_seconds)
+        if (result.status === 'ok' && !result.error) {
+          if (row.size !== null) {
+            recordSample(row.size, result.elapsed_seconds)
+          }
+          row.status = 'detected'
+          row.beatCount = result.count
+          row.meanHr = result.mean_hr
+        } else {
+          row.status = 'detection-error'
+          row.error = result.error
         }
-        row.status = 'detected'
-        row.beatCount = result.count
-        row.meanHr = result.mean_hr
-      } else {
-        row.status = 'detection-error'
-        row.error = result.error
       }
+    } finally {
+      queueRunning = false
     }
   }
 
@@ -102,10 +111,14 @@
 
 <div>
   <div>
-    <button data-testid="import-files-button" onclick={handleImportFiles}>Import Files</button>
-    <button data-testid="import-folder-button" onclick={handleImportFolder}>Import Folder</button>
+    <button data-testid="import-files-button" onclick={handleImportFiles} disabled={queueRunning}>
+      Import Files
+    </button>
+    <button data-testid="import-folder-button" onclick={handleImportFolder} disabled={queueRunning}>
+      Import Folder
+    </button>
     <label>
-      <input type="checkbox" data-testid="auto-run-checkbox" bind:checked={autoRun} />
+      <input type="checkbox" data-testid="auto-run-checkbox" bind:checked={autoRun} disabled={queueRunning} />
       Auto-run beat detection
     </label>
     <button data-testid="stop-button" onclick={handleStop}>Stop</button>

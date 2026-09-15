@@ -439,4 +439,45 @@ describe('ImportScreen auto-run beat detection', () => {
     const detectCalls = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect'))
     expect(detectCalls).toHaveLength(1)
   })
+
+  it('disables the import buttons while a detection queue is running, then re-enables them', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue(['/data/a.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+
+    let resolveDetect: (value: unknown) => void
+    const detectPromise = new Promise((resolve) => {
+      resolveDetect = resolve
+    })
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/files/import')) {
+        return Promise.resolve(
+          importOkResponse([{ path: '/data/a.txt', filename: 'a.txt', size: 100, defaultChannel: 'channel 1' }]),
+        )
+      }
+      if (url.endsWith('/beats/detect')) {
+        return detectPromise
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ImportScreen)
+
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).toBeDisabled()
+    })
+
+    resolveDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).not.toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).not.toBeDisabled()
+    })
+  })
 })
