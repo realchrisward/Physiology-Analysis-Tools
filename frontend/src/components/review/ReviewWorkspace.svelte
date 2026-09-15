@@ -1,5 +1,6 @@
 <script lang="ts">
   import { detectBeats } from '../../lib/api/beats'
+  import EcgGraph from '../graph/EcgGraph.svelte'
 
   interface DetectionSummary {
     status: 'ok' | 'error' | null
@@ -74,7 +75,14 @@
     <div data-testid="detection-summary">detection failed: {detection.error}</div>
   {/if}
 
-  <!-- Task 2/3 mount EcgGraph here, in this same file, bound to `path` /
-       `selectedChannel`. -->
-  <div class="graph-area"></div>
+  <div class="graph-area">
+    <!-- Keyed on `selectedChannel` so EcgGraph remounts (rather than
+         updating its `channel` prop in place) whenever the channel
+         changes — EcgGraph's own fetch/uPlot-construction logic runs once,
+         in onMount, so a remount is the simplest way to get it to re-init
+         for a new channel's data. -->
+    {#key selectedChannel}
+      <EcgGraph {path} channel={selectedChannel} />
+    {/key}
+  </div>
 </div>
