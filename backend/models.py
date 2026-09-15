@@ -164,3 +164,25 @@ class FileStateResult(BaseModel):
     beat_settings: BeatSettingsModel | None = None
     arrhythmia_settings: ArrhythmiaSettingsModel | None = None
     error: str | None = None
+
+
+class ChannelPersistRequest(BaseModel):
+    path: str
+    channel: str
+
+
+class ChannelPersistResult(BaseModel):
+    status: str
+    channel: str | None = None
+    error: str | None = None
+
+
+class PersistBeatsRequest(BaseModel):
+    path: str
+    channel: str
+
+
+class PersistBeatsResult(BaseModel):
+    status: str
+    count: int = 0
+    error: str | None = None
