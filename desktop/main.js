@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const { startBackend } = require('./backend-process')
 
 const DEV_SERVER_URL = 'http://localhost:5173'
-const SUPPORTED_EXTENSIONS = ['adicht', 'txt', 'mat', 'gzip']
+const SUPPORTED_EXTENSIONS = ['adicht', 'txt', 'mat', 'gzip', 'edf']
 
 function findSupportedFiles(dirPath) {
   const entries = fs.readdirSync(dirPath, { recursive: true })
