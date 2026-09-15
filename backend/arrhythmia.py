@@ -38,7 +38,7 @@ def detect_arrhythmias(
     cache_entry = request.app.state.signal_cache.get(payload.path)
     if cache_entry is None:
         return ArrhythmiaDetectionResult(
-            status="error", error="Beat detection has not been run for this file yet"
+            status="error", error="Signal data is not available for this file"
         )
 
     start = time.monotonic()
@@ -57,7 +57,6 @@ def detect_arrhythmias(
         )
 
     elapsed_seconds = time.monotonic() - start
-    request.app.state.beat_cache[payload.path] = df
 
     optional_columns = [
         "bradycardia_absolute",
@@ -66,6 +65,24 @@ def detect_arrhythmias(
         "prem_beat",
         "abn_cluster",
     ]
+    present_optional_columns = [c for c in optional_columns if c in df.columns]
+    if present_optional_columns:
+        # any_arrhythmia is computed internally by call_arrhythmias() as
+        # df[categories].any(axis=1, bool_only=True). If any optional
+        # category column ends up with even one real NaN mixed in with real
+        # booleans (e.g. abn_cluster for a beat too close to the signal's
+        # start/end for ml_tools.beatepocher()'s epoch window), pandas gives
+        # that column dtype=object, and bool_only=True silently drops the
+        # ENTIRE column from the aggregation rather than just the NaN rows.
+        # Recompute defensively, OR'd with the library's own value, so this
+        # can only make any_arrhythmia MORE true, never mask a category the
+        # library already reported via a fully-populated column.
+        df["any_arrhythmia"] = df["any_arrhythmia"] | df[
+            present_optional_columns
+        ].fillna(False).astype(bool).any(axis=1)
+
+    request.app.state.beat_cache[payload.path] = df
+
     beats = []
     for row in df.itertuples():
         kwargs = {
@@ -76,12 +93,10 @@ def detect_arrhythmias(
         for col in optional_columns:
             if col in df.columns:
                 value = getattr(row, col)
-                # abn_cluster in particular can come back NaN: the
-                # unsupervised method's clustering result is joined onto
-                # beat_df by a positional 0..N-1 index that doesn't line up
-                # with beat_cache's DataFrame index (which keeps beatcaller's
-                # original sample-position index), so the join leaves every
-                # row unmatched. Treat NaN as "not evaluated" (None) rather
+                # NaN can still occur for individual boundary-skipped beats
+                # even after the index-reset fix (e.g. a beat too close to
+                # the signal's start/end for the unsupervised method's
+                # epoch window). Treat NaN as "not evaluated" (None) rather
                 # than erroring on a non-boolean value.
                 kwargs[col] = None if pd.isna(value) else bool(value)
         beats.append(ArrhythmiaBeat(**kwargs))

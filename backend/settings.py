@@ -40,4 +40,10 @@ def put_settings(payload: SettingsPayload, request: Request) -> SettingsResult:
     request.app.state.beat_settings = beat_settings
     request.app.state.arrhythmia_settings = arrhythmia_settings
 
-    return SettingsResult(status="ok", settings=payload)
+    return SettingsResult(
+        status="ok",
+        settings=SettingsPayload(
+            beat=BeatSettingsModel(**beat_settings.__dict__),
+            arrhythmia=ArrhythmiaSettingsModel(**arrhythmia_settings.__dict__),
+        ),
+    )
