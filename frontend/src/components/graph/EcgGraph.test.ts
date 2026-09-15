@@ -151,4 +151,36 @@ describe('EcgGraph', () => {
     // (0 and 9 here), which is what a reset re-fetch should request.
     expect(resetCall.searchParams.get('end')).toBe('9')
   })
+
+  it('removes document-level drag listeners on unmount, so a stale mid-drag mouseup fetches nothing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(channelWindowResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { unmount } = withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    expect(over).toBeTruthy()
+
+    // Start a drag but never dispatch a natural mouseup — this is the
+    // in-progress-drag state that leaves `document`-level listeners
+    // attached until `onUp` fires (or, before the fix, forever).
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
+
+    unmount()
+
+    const callsAfterUnmount = fetchMock.mock.calls.length
+
+    // Simulate the drag "completing" via listeners left on `document`, as
+    // would happen from any later unrelated mouseup on the page.
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 100, bubbles: true }))
+
+    // No new fetch: the listeners were actually removed on unmount, not
+    // just orphaned alongside a destroyed chart.
+    expect(fetchMock.mock.calls.length).toBe(callsAfterUnmount)
+  })
 })

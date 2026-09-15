@@ -27,6 +27,13 @@
   // Set on the first `containerWidth` effect run (the binding's own initial
   // read), so later effect runs can tell an actual resize apart from that.
   let previousWidth: number | undefined
+  // Teardown for the currently-active drag's `document`-level listeners, if
+  // any drag is in progress. Reachable from both the drag's own `onUp`
+  // completion path and the component's onMount/onDestroy cleanup, so a
+  // drag can never outlive the component (e.g. if it unmounts mid-drag —
+  // `{#key selectedChannel}` remount, or navigating away — the listeners
+  // get removed instead of lingering on `document` forever).
+  let endActiveDrag: (() => void) | undefined
 
   function resolutionFor(width: number): number {
     return Math.max(1, Math.round(width))
@@ -74,15 +81,21 @@
       u.setScale('x', { min: scaleMin0 - dx, max: scaleMax0 - dx })
     }
 
-    function onUp() {
+    function detach() {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      endActiveDrag = undefined
+    }
+
+    function onUp() {
+      detach()
       const { min, max } = u.scales.x
       if (min != null && max != null) scheduleRefetch(min, max)
     }
 
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
+    endActiveDrag = detach
   }
 
   // Wheel zooms in/out centered on the cursor's x position, then schedules a
@@ -147,6 +160,11 @@
     return () => {
       cancelled = true
       if (debounceTimer !== undefined) clearTimeout(debounceTimer)
+      // A drag in progress attaches its mousemove/mouseup listeners to
+      // `document`, not to uPlot's own root node — `chart.destroy()` below
+      // only removes uPlot's own DOM/listeners, so an active drag must be
+      // torn down separately or it outlives the component.
+      endActiveDrag?.()
       chart?.destroy()
       chart = undefined
     }
