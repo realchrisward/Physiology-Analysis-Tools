@@ -131,3 +131,36 @@ class ChannelWindowResult(BaseModel):
     point_count: int = 0
     downsampled: bool = False
     error: str | None = None
+
+
+class PersistedBeat(BaseModel):
+    ts: float
+    rr: float
+    r_amplitude: float
+    hr: float
+    bradycardia_absolute: bool | None = None
+    tachycardia_absolute: bool | None = None
+    skipped_beat: bool | None = None
+    prem_beat: bool | None = None
+    abn_cluster: bool | None = None
+    any_arrhythmia: bool | None = None
+    other_arrhythmia: bool | None = None
+    review_state: str = "unreviewed"
+    reassigned_category: str | None = None
+
+
+class BadDataMark(BaseModel):
+    id: int
+    start: float
+    stop: float
+
+
+class FileStateResult(BaseModel):
+    status: str
+    found: bool = False
+    channel: str | None = None
+    beats: list[PersistedBeat] = []
+    bad_data_marks: list[BadDataMark] = []
+    beat_settings: BeatSettingsModel | None = None
+    arrhythmia_settings: ArrhythmiaSettingsModel | None = None
+    error: str | None = None
