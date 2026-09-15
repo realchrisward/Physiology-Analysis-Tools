@@ -15,6 +15,14 @@
     meanHr: number | null
   }
 
+  interface ReviewSelection {
+    path: string
+    channels: string[]
+    defaultChannel: string
+  }
+
+  let { onReview }: { onReview?: (selection: ReviewSelection) => void } = $props()
+
   let rows: FileRow[] = $state([])
   let importError: string = $state('')
   let autoRun: boolean = $state(true)
@@ -89,6 +97,11 @@
         row.error = result.error
       }
     }
+  }
+
+  function handleReview(row: FileRow) {
+    if (row.defaultChannel === null) return
+    onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
   }
 
   function handleStop() {
@@ -167,6 +180,9 @@
           <span>detection failed: {row.error}</span>
         {:else}
           <span>{row.error}</span>
+        {/if}
+        {#if row.defaultChannel !== null && row.status !== 'error'}
+          <button data-testid="review-button" onclick={() => handleReview(row)}>Review</button>
         {/if}
       </li>
     {/each}

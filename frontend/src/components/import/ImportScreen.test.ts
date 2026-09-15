@@ -549,3 +549,73 @@ describe('ImportScreen auto-run beat detection', () => {
     })
   })
 })
+
+describe('ImportScreen Review action', () => {
+  it('shows a Review button for a ready row with a channel, and fires onReview with path/channels/defaultChannel', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue(['/data/57.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      importOkResponse([{ path: '/data/57.txt', filename: '57.txt', size: 12345, defaultChannel: 'channel 1' }]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onReview = vi.fn()
+    render(ImportScreen, { props: { onReview } })
+
+    // Scoped to Review-button mechanics, not auto-run detection.
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('review-button')).toBeInTheDocument()
+    })
+
+    await fireEvent.click(screen.getByTestId('review-button'))
+
+    expect(onReview).toHaveBeenCalledWith({
+      path: '/data/57.txt',
+      channels: ['channel 1'],
+      defaultChannel: 'channel 1',
+    })
+  })
+
+  it('shows no Review button for a row that failed to import', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue(['/data/bad.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          {
+            path: '/data/bad.txt',
+            filename: 'bad.txt',
+            status: 'error',
+            channels: [],
+            time_column: null,
+            size: null,
+            modified_time: null,
+            default_channel: null,
+            default_channel_matched_rule: false,
+            error: 'No extractor succeeded',
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ImportScreen, { props: { onReview: vi.fn() } })
+
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('file-row')).toHaveTextContent('bad.txt')
+    })
+
+    expect(screen.queryByTestId('review-button')).not.toBeInTheDocument()
+  })
+})
