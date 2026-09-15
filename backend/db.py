@@ -191,6 +191,32 @@ def update_beat_category(
     return conn.execute("SELECT * FROM beats WHERE id=?", (beat_id,)).fetchone()
 
 
+def add_bad_data_mark(
+    conn: sqlite3.Connection, file_id: int, start: float, stop: float
+) -> sqlite3.Row:
+    """Insert a bad-data mark, auto-sorting so `start <= stop` regardless of
+    which direction the technician drag-selected."""
+    lo, hi = min(start, stop), max(start, stop)
+    cursor = conn.execute(
+        "INSERT INTO bad_data_marks (file_id, start, stop) VALUES (?, ?, ?)",
+        (file_id, lo, hi),
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT * FROM bad_data_marks WHERE id=?", (cursor.lastrowid,)
+    ).fetchone()
+
+
+def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -> bool:
+    """Delete the bad-data mark with `mark_id`, scoped to `file_id` so one
+    file's DELETE can never remove another file's mark."""
+    cursor = conn.execute(
+        "DELETE FROM bad_data_marks WHERE id=? AND file_id=?", (mark_id, file_id)
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def replace_beats(conn: sqlite3.Connection, file_id: int, beat_df) -> None:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 

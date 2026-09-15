@@ -188,6 +188,28 @@ class PersistBeatsResult(BaseModel):
     error: str | None = None
 
 
+class BadDataAddRequest(BaseModel):
+    path: str
+    start: float
+    stop: float
+
+
+class BadDataAddResult(BaseModel):
+    status: str
+    mark: BadDataMark | None = None
+    error: str | None = None
+
+
+class BadDataDeleteRequest(BaseModel):
+    path: str
+    id: int
+
+
+class BadDataDeleteResult(BaseModel):
+    status: str
+    error: str | None = None
+
+
 class CategoryUpdateRequest(BaseModel):
     path: str
     ts: float

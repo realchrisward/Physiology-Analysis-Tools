@@ -5,6 +5,10 @@ from fastapi import APIRouter, Request
 from backend import db
 from backend.models import (
     ArrhythmiaSettingsModel,
+    BadDataAddRequest,
+    BadDataAddResult,
+    BadDataDeleteRequest,
+    BadDataDeleteResult,
     BadDataMark,
     BeatSettingsModel,
     CategoryUpdateRequest,
@@ -220,5 +224,62 @@ def update_beat_category(
         )
     except Exception as e:
         return CategoryUpdateResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/bad-data", response_model=BadDataAddResult)
+def add_bad_data(payload: BadDataAddRequest, request: Request) -> BadDataAddResult:
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return BadDataAddResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_id = db.upsert_file(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        row = db.add_bad_data_mark(conn, file_id, payload.start, payload.stop)
+        return BadDataAddResult(
+            status="ok",
+            mark=BadDataMark(id=row["id"], start=row["start"], stop=row["stop"]),
+        )
+    except Exception as e:
+        return BadDataAddResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.delete("/bad-data", response_model=BadDataDeleteResult)
+def delete_bad_data(
+    payload: BadDataDeleteRequest, request: Request
+) -> BadDataDeleteResult:
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return BadDataDeleteResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is None:
+            return BadDataDeleteResult(
+                status="error", error="No persisted data for this file"
+            )
+
+        deleted = db.delete_bad_data_mark(conn, file_row["id"], payload.id)
+        if not deleted:
+            return BadDataDeleteResult(
+                status="error", error="No bad-data mark with this id"
+            )
+
+        return BadDataDeleteResult(status="ok")
+    except Exception as e:
+        return BadDataDeleteResult(status="error", error=str(e))
     finally:
         conn.close()
