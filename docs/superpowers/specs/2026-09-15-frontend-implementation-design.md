@@ -79,15 +79,21 @@ Mirrors the backend's shape: each milestone is a working, testable slice.
   `EcgGraph` wired to `GET /channels/window` with real pan/zoom,
   beat/arrhythmia markers from `GET /beats/window`, bad-data click-drag
   marking wired to `POST`/`DELETE /files/bad-data`.
-- **F4 — Beat/arrhythmia review.** Per-beat category list (only categories
-  that actually fired), confirm/reject/reassign controls wired to
-  `PATCH /files/beats/category`, arrhythmia re-run controls
-  (heuristic/unsupervised/both) with progress feedback.
+- **F4 — Beat/arrhythmia review.** Click-to-select a beat on the graph,
+  per-beat category list (only categories that actually fired),
+  confirm/reject/reassign controls wired to `PATCH /files/beats/category`,
+  arrhythmia re-run controls (heuristic/unsupervised/both) with progress
+  feedback. **Also calls `POST /files/beats` once, automatically, before a
+  file's first category action this session** — `PATCH .../category`
+  requires a persisted row to exist, so this one persistence call is
+  pulled forward from F5 (a scope correction made while planning F4, not
+  part of the original milestone breakdown above).
 - **F5 — Persistence + settings + export.** Load prior state on reopen via
   `GET /files/state`; autosave (call the M7 mutation endpoints on every
-  action, no separate save button/timer); settings dialog for
-  `GET`/`PUT /settings`; "Generate Report" button (native output-dir
-  picker + `POST /files/report`).
+  action, no separate save button/timer — F4's own pulled-forward
+  `POST /files/beats` call is the one exception already covered);
+  settings dialog for `GET`/`PUT /settings`; "Generate Report" button
+  (native output-dir picker + `POST /files/report`).
 
 Each milestone gets its own implementation plan (`docs/superpowers/plans/`)
 and runs through subagent-driven-development the same way M4-M7 did: Sonnet
