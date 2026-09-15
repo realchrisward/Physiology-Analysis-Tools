@@ -1,8 +1,24 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('node:path')
+const fs = require('node:fs')
 const { startBackend } = require('./backend-process')
 
 const DEV_SERVER_URL = 'http://localhost:5173'
+const SUPPORTED_EXTENSIONS = ['adicht', 'txt', 'mat', 'gzip']
+
+function findSupportedFiles(dirPath) {
+  const entries = fs.readdirSync(dirPath, { recursive: true })
+  const matches = []
+  for (const entry of entries) {
+    const ext = path.extname(entry).slice(1).toLowerCase()
+    if (!SUPPORTED_EXTENSIONS.includes(ext)) continue
+    const fullPath = path.join(dirPath, entry)
+    if (fs.statSync(fullPath).isFile()) {
+      matches.push(fullPath)
+    }
+  }
+  return matches
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -43,6 +59,26 @@ app.whenReady().then(async () => {
     stopBackend = stop
     backendReady = true
     ipcMain.handle('get-backend-port', () => port)
+    ipcMain.handle('pick-files', async () => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openFile', 'multiSelections'],
+        filters: [{ name: 'Supported files', extensions: SUPPORTED_EXTENSIONS }],
+      })
+      return result.canceled ? [] : result.filePaths
+    })
+    ipcMain.handle('pick-folder', async () => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openDirectory'],
+      })
+      if (result.canceled) return []
+      return findSupportedFiles(result.filePaths[0])
+    })
+    ipcMain.handle('pick-output-directory', async () => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openDirectory'],
+      })
+      return result.canceled ? null : result.filePaths[0]
+    })
     createWindow()
   } catch (err) {
     dialog.showErrorBox('Failed to start backend', err.message || String(err))
