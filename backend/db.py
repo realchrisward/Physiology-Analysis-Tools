@@ -131,6 +131,66 @@ def upsert_file(
     return row["id"]
 
 
+CATEGORY_COLUMNS = [
+    "bradycardia_absolute",
+    "tachycardia_absolute",
+    "skipped_beat",
+    "prem_beat",
+    "abn_cluster",
+    "other_arrhythmia",
+]
+
+
+def update_beat_category(
+    conn: sqlite3.Connection,
+    file_id: int,
+    ts: float,
+    action: str,
+    category: str | None = None,
+) -> sqlite3.Row | None:
+    """Apply a review `action` to the beat at (file_id, ts) and return the
+    updated row, or None if no beat exists at that timestamp.
+
+    `"reject"` clears every category column (not just the top-level
+    `any_arrhythmia` flag) so a rejected beat's per-category data doesn't
+    stay stuck showing as if it were still flagged.
+    """
+    row = conn.execute(
+        "SELECT id FROM beats WHERE file_id=? AND ts=?", (file_id, ts)
+    ).fetchone()
+    if row is None:
+        return None
+    beat_id = row["id"]
+
+    if action == "confirm":
+        conn.execute(
+            "UPDATE beats SET review_state='confirmed' WHERE id=?", (beat_id,)
+        )
+    elif action == "reject":
+        conn.execute(
+            "UPDATE beats SET "
+            + ", ".join(f"{col}=0" for col in CATEGORY_COLUMNS)
+            + ", any_arrhythmia=0, review_state='rejected', "
+            "reassigned_category=NULL WHERE id=?",
+            (beat_id,),
+        )
+    elif action == "reassign":
+        set_clauses = [
+            f"{col}=1" if col == category else f"{col}=0"
+            for col in CATEGORY_COLUMNS
+        ]
+        conn.execute(
+            "UPDATE beats SET "
+            + ", ".join(set_clauses)
+            + ", any_arrhythmia=1, review_state='confirmed', "
+            "reassigned_category=? WHERE id=?",
+            (category, beat_id),
+        )
+
+    conn.commit()
+    return conn.execute("SELECT * FROM beats WHERE id=?", (beat_id,)).fetchone()
+
+
 def replace_beats(conn: sqlite3.Connection, file_id: int, beat_df) -> None:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 

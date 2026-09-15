@@ -7,6 +7,8 @@ from backend.models import (
     ArrhythmiaSettingsModel,
     BadDataMark,
     BeatSettingsModel,
+    CategoryUpdateRequest,
+    CategoryUpdateResult,
     ChannelPersistRequest,
     ChannelPersistResult,
     FileStateResult,
@@ -16,6 +18,15 @@ from backend.models import (
 )
 
 router = APIRouter(prefix="/files", tags=["persistence"])
+
+REASSIGNABLE_CATEGORIES = {
+    "bradycardia_absolute",
+    "tachycardia_absolute",
+    "skipped_beat",
+    "prem_beat",
+    "abn_cluster",
+    "other_arrhythmia",
+}
 
 
 @router.get("/state", response_model=FileStateResult)
@@ -151,5 +162,63 @@ def persist_beats(
         return PersistBeatsResult(status="ok", count=len(beat_df))
     except Exception as e:
         return PersistBeatsResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.patch("/beats/category", response_model=CategoryUpdateResult)
+def update_beat_category(
+    payload: CategoryUpdateRequest, request: Request
+) -> CategoryUpdateResult:
+    if payload.action not in {"confirm", "reject", "reassign"}:
+        return CategoryUpdateResult(
+            status="error",
+            error=f"Unknown action: {payload.action!r}",
+        )
+
+    if payload.action == "reassign":
+        if payload.category is None:
+            return CategoryUpdateResult(
+                status="error", error="category is required for a reassign action"
+            )
+        if payload.category not in REASSIGNABLE_CATEGORIES:
+            return CategoryUpdateResult(
+                status="error",
+                error=f"Invalid category: {payload.category!r}",
+            )
+
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return CategoryUpdateResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is None:
+            return CategoryUpdateResult(
+                status="error",
+                error="No persisted data for this file — run POST /files/beats first",
+            )
+
+        updated = db.update_beat_category(
+            conn, file_row["id"], payload.ts, payload.action, payload.category
+        )
+        if updated is None:
+            return CategoryUpdateResult(
+                status="error", error="No beat found at this timestamp"
+            )
+
+        return CategoryUpdateResult(
+            status="ok",
+            ts=updated["ts"],
+            review_state=updated["review_state"],
+            reassigned_category=updated["reassigned_category"],
+        )
+    except Exception as e:
+        return CategoryUpdateResult(status="error", error=str(e))
     finally:
         conn.close()

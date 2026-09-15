@@ -186,3 +186,18 @@ class PersistBeatsResult(BaseModel):
     status: str
     count: int = 0
     error: str | None = None
+
+
+class CategoryUpdateRequest(BaseModel):
+    path: str
+    ts: float
+    action: str
+    category: str | None = None
+
+
+class CategoryUpdateResult(BaseModel):
+    status: str
+    ts: float | None = None
+    review_state: str | None = None
+    reassigned_category: str | None = None
+    error: str | None = None
