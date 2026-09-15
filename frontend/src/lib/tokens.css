@@ -1,0 +1,76 @@
+/*
+ * Design tokens for the Physiology Analysis Tools frontend.
+ *
+ * Shared CSS custom properties used by every screen (Import, Review
+ * workspace, ECG graph, beat review, settings). Establishes the naming
+ * scheme later milestones (F2-F5) build on.
+ *
+ * Palette: a calm slate/blue-gray neutral scale with a single blue accent,
+ * plus semantic status colors for confirmed/rejected/flagged review states.
+ * Values were chosen for WCAG AA contrast against their paired background,
+ * since this tool is used for extended review sessions.
+ */
+
+:root {
+  /* Color: neutrals (slate/blue-gray scale) */
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-border: #d3dae1;
+  --color-text: #1e293b;
+  --color-text-muted: #5b6b7c;
+
+  /* Color: accent (interactive elements) */
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+
+  /* Color: semantic status */
+  --color-success: #15803d;
+  --color-warning: #b45309;
+  --color-danger: #b91c1c;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Type scale */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Consolas, 'Roboto Mono', monospace;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.25rem;
+  --font-size-xl: 1.75rem;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(30, 41, 59, 0.12), 0 1px 2px rgba(30, 41, 59, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Color: neutrals (slate/blue-gray scale) */
+    --color-bg: #0f172a;
+    --color-surface: #1a2436;
+    --color-border: #334155;
+    --color-text: #e2e8f0;
+    --color-text-muted: #94a3b8;
+
+    /* Color: accent (interactive elements) */
+    --color-accent: #60a5fa;
+    --color-accent-hover: #93c5fd;
+
+    /* Color: semantic status */
+    --color-success: #4ade80;
+    --color-warning: #fbbf24;
+    --color-danger: #f87171;
+
+    /* Shadows */
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+}
