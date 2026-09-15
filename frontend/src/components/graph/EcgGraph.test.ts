@@ -351,6 +351,56 @@ describe('EcgGraph', () => {
     expect(fetchMock.mock.calls.length).toBe(callsAfterUnmount)
   })
 
+  it('removes document-level bad-data-drag listeners on unmount, so a stale mid-drag mouseup adds no mark', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { unmount } = withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    screen.getByTestId('bad-data-mode-button').click()
+    await waitFor(() => expect(screen.getByTestId('bad-data-mode-button').getAttribute('aria-pressed')).toBe('true'))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    expect(over).toBeTruthy()
+
+    // Start a bad-data drag but never dispatch a natural mouseup — this is
+    // the in-progress-drag state that leaves `document`-level listeners
+    // attached until `onUp` fires (or, before the fix, forever) — same
+    // shape as the pan-drag unmount test above, but exercising
+    // `handleBadDataDragStart`'s own listeners/teardown instead of
+    // `handleDragStart`'s.
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
+
+    vi.useFakeTimers()
+
+    unmount()
+
+    const callsAfterUnmount = fetchMock.mock.calls.length
+
+    // Simulate the drag "completing" via listeners left on `document`, as
+    // would happen from any later unrelated mousemove/mouseup on the page.
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 100, bubbles: true }))
+
+    // addBadData (unlike the pan path's scheduleRefetch) is called directly
+    // from onUp, not via a debounce timer — but advance timers anyway so
+    // this stays robust to that changing, and so any microtask queued by a
+    // (non-existent, if the fix holds) fetch call has a chance to settle.
+    await vi.advanceTimersByTimeAsync(200)
+
+    // No new fetch calls at all: the listeners were actually removed on
+    // unmount, so the stale document-level mouseup never reached `onUp`
+    // and never called `addBadData` (which would show up as a new
+    // `/files/bad-data` POST in the fetch mock).
+    expect(fetchMock.mock.calls.length).toBe(callsAfterUnmount)
+    const calledPaths = fetchMock.mock.calls.map(([url]) => new URL(url as string).pathname)
+    expect(calledPaths).not.toContain('/files/bad-data')
+  })
+
   it('does not add a bad-data mark on a plain drag when bad-data mode is off (the default)', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)

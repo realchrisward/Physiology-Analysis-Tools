@@ -83,13 +83,36 @@
     const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
     return value || fallback
   }
+  // Converts a `#rgb`/`#rrggbb` hex color to an `rgba(...)` string so an
+  // alpha channel can be applied to it — canvas fillStyle needs a literal
+  // RGB(A) triplet, not a bare hex string with alpha bolted on. tokens.css's
+  // `--color-text-muted` is always hex in both its light and dark values,
+  // so that's the only shape this needs to handle; anything else (e.g. a
+  // future non-hex token value) is returned unchanged rather than mangled.
+  function hexToRgba(hex: string, alpha: number): string {
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex)
+    if (!match) return hex
+    let value = match[1]
+    if (value.length === 3) {
+      value = value
+        .split('')
+        .map((c) => c + c)
+        .join('')
+    }
+    const r = parseInt(value.slice(0, 2), 16)
+    const g = parseInt(value.slice(2, 4), 16)
+    const b = parseInt(value.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  }
   const ARRHYTHMIA_BEAT_COLOR = cssVar('--color-danger', '#b91c1c')
   const NORMAL_BEAT_COLOR = cssVar('--color-accent', '#2563eb')
-  // "Not yet evaluated" (any_arrhythmia: null) gets a dimmed treatment.
-  // Approximates tokens.css's --color-text-muted (#5b6b7c) at reduced
-  // opacity; hardcoded rather than derived because canvas fillStyle needs
-  // an RGB triplet to apply alpha to a resolved hex/named color.
-  const UNEVALUATED_BEAT_COLOR = 'rgba(91, 107, 124, 0.45)'
+  // "Not yet evaluated" (any_arrhythmia: null) gets a dimmed treatment:
+  // whatever `--color-text-muted` actually resolves to for the active
+  // theme (light or dark), at reduced opacity — resolved the same
+  // `cssVar`-at-mount way as the other two marker colors above, rather than
+  // hardcoding the light-mode hex, so this doesn't render wrong from the
+  // very first paint on a machine already in dark mode.
+  const UNEVALUATED_BEAT_COLOR = hexToRgba(cssVar('--color-text-muted', '#5b6b7c'), 0.45)
 
   function markerSeriesConfig(color: string): uPlot.Series {
     return {
