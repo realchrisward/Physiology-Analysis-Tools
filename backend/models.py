@@ -223,3 +223,14 @@ class CategoryUpdateResult(BaseModel):
     review_state: str | None = None
     reassigned_category: str | None = None
     error: str | None = None
+
+
+class ReportRequest(BaseModel):
+    path: str
+    output_dir: str
+
+
+class ReportResult(BaseModel):
+    status: str
+    output_path: str | None = None
+    error: str | None = None

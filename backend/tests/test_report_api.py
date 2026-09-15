@@ -1,0 +1,111 @@
+import os
+
+import pandas as pd
+from fastapi.testclient import TestClient
+
+from backend.app import create_app
+
+
+def test_generate_report_writes_xlsx_with_three_sheets(tmp_path, real_beats_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    client.post(
+        "/beats/detect",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+    client.post(
+        "/arrhythmia/detect",
+        json={
+            "path": real_beats_txt_file,
+            "channel": "channel 1",
+            "method": "heuristic",
+        },
+    )
+    client.post(
+        "/files/beats",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+    client.post(
+        "/files/bad-data",
+        json={"path": real_beats_txt_file, "start": 0.3, "stop": 0.8},
+    )
+
+    output_dir = tmp_path / "reports"
+    os.makedirs(output_dir)
+
+    response = client.post(
+        "/files/report",
+        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ok"
+    assert result["output_path"].endswith("57.xlsx")
+    assert os.path.exists(result["output_path"])
+
+    sheets = pd.read_excel(result["output_path"], sheet_name=None)
+
+    beats_df = sheets["beats"]
+    assert len(beats_df) == 15
+    assert "review_state" in beats_df.columns
+    assert (beats_df["review_state"] == "unreviewed").all()
+
+    bad_data_df = sheets["bad_data_marks"]
+    assert len(bad_data_df) == 1
+    assert bad_data_df.iloc[0]["start"] == 0.3
+    assert bad_data_df.iloc[0]["stop"] == 0.8
+
+    settings_df = sheets["settings"]
+    assert len(settings_df) == 1
+    assert settings_df.iloc[0]["heartbeat_version"] == "0.0.4"
+    assert settings_df.iloc[0]["arrhythmia_version"] == "0.0.9"
+    assert settings_df.iloc[0]["ml_version"] == "0.0.1"
+
+
+def test_generate_report_without_persisted_data_is_an_error(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+
+    output_dir = tmp_path / "reports"
+    os.makedirs(output_dir)
+
+    response = client.post(
+        "/files/report",
+        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert result["error"]
+
+
+def test_generate_report_with_nonexistent_output_dir_is_an_error(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    client.post(
+        "/beats/detect",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+    client.post(
+        "/files/beats",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+
+    response = client.post(
+        "/files/report",
+        json={
+            "path": real_beats_txt_file,
+            "output_dir": str(tmp_path / "does_not_exist"),
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert result["error"]

@@ -1,6 +1,13 @@
 import json
+import os
 
+import pandas as pd
 from fastapi import APIRouter, Request
+from physiology_analysis_tools.modules import (
+    arrhythmia_detection,
+    heartbeat_detection,
+    ml_tools,
+)
 
 from backend import db
 from backend.models import (
@@ -19,6 +26,8 @@ from backend.models import (
     PersistBeatsRequest,
     PersistBeatsResult,
     PersistedBeat,
+    ReportRequest,
+    ReportResult,
 )
 
 router = APIRouter(prefix="/files", tags=["persistence"])
@@ -281,5 +290,75 @@ def delete_bad_data(
         return BadDataDeleteResult(status="ok")
     except Exception as e:
         return BadDataDeleteResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/report", response_model=ReportResult)
+def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return ReportResult(status="error", error=f"File not imported: {payload.path}")
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is None:
+            return ReportResult(
+                status="error",
+                error="No persisted data for this file — run POST /files/beats first",
+            )
+
+        if not os.path.isdir(payload.output_dir):
+            return ReportResult(
+                status="error",
+                error=f"Output directory does not exist: {payload.output_dir}",
+            )
+
+        beats_df = pd.read_sql_query(
+            "SELECT * FROM beats WHERE file_id=? ORDER BY ts",
+            conn,
+            params=(file_row["id"],),
+        ).drop(columns=["id", "file_id"])
+
+        mark_rows = conn.execute(
+            "SELECT start, stop FROM bad_data_marks WHERE file_id=? ORDER BY id",
+            (file_row["id"],),
+        ).fetchall()
+        bad_data_df = pd.DataFrame(
+            [(row["start"], row["stop"]) for row in mark_rows],
+            columns=["start", "stop"],
+        )
+
+        settings_df = pd.DataFrame(
+            {
+                **json.loads(file_row["beat_settings_json"]),
+                **json.loads(file_row["arrhythmia_settings_json"]),
+                "heartbeat_version": heartbeat_detection.__version__,
+                "arrhythmia_version": arrhythmia_detection.__version__,
+                "ml_version": ml_tools.__version__,
+            },
+            index=[0],
+        )
+
+        output_path = os.path.join(
+            payload.output_dir,
+            os.path.splitext(os.path.basename(payload.path))[0] + ".xlsx",
+        )
+
+        try:
+            writer = pd.ExcelWriter(output_path, engine="xlsxwriter")
+            beats_df.to_excel(writer, sheet_name="beats", index=False)
+            bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
+            settings_df.to_excel(writer, sheet_name="settings", index=False)
+            writer.close()
+        except Exception as e:
+            return ReportResult(status="error", error=str(e))
+
+        return ReportResult(status="ok", output_path=output_path)
+    except Exception as e:
+        return ReportResult(status="error", error=str(e))
     finally:
         conn.close()
