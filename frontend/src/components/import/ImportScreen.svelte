@@ -1,18 +1,24 @@
 <script lang="ts">
+  import { detectBeats } from '../../lib/api/beats'
   import { importFiles } from '../../lib/api/files'
+  import { estimate, recordSample } from '../../lib/stores/eta'
 
   interface FileRow {
     path: string
     filename: string
-    status: 'ready' | 'error'
+    status: 'ready' | 'error' | 'detecting' | 'detected' | 'detection-error'
     channels: string[]
     defaultChannel: string | null
     size: number | null
     error: string | null
+    beatCount: number | null
+    meanHr: number | null
   }
 
   let rows: FileRow[] = $state([])
   let importError: string = $state('')
+  let autoRun: boolean = $state(true)
+  let stopped: boolean = $state(false)
 
   async function importPaths(paths: string[]) {
     if (paths.length === 0) return
@@ -25,6 +31,7 @@
       return
     }
 
+    const newRows: FileRow[] = []
     for (const fileResult of result.results) {
       rows.push({
         path: fileResult.path,
@@ -34,8 +41,52 @@
         defaultChannel: fileResult.default_channel,
         size: fileResult.size,
         error: fileResult.error,
+        beatCount: null,
+        meanHr: null,
       })
+      // Capture the reference back out of the reactive `rows` array (rather
+      // than holding onto the plain object literal above) so mutations made
+      // later in the detection queue are tracked by Svelte's state proxy.
+      newRows.push(rows[rows.length - 1])
     }
+
+    if (autoRun) {
+      await runDetectionQueue(newRows)
+    }
+  }
+
+  async function runDetectionQueue(queue: FileRow[]) {
+    stopped = false
+    for (const row of queue) {
+      if (stopped) break
+      if (row.status !== 'ready' || row.defaultChannel === null) continue
+
+      row.status = 'detecting'
+      const result = await detectBeats(row.path, row.defaultChannel)
+
+      if (result.status === 'ok' && !result.error) {
+        if (row.size !== null) {
+          recordSample(row.size, result.elapsed_seconds)
+        }
+        row.status = 'detected'
+        row.beatCount = result.count
+        row.meanHr = result.mean_hr
+      } else {
+        row.status = 'detection-error'
+        row.error = result.error
+      }
+    }
+  }
+
+  function handleStop() {
+    stopped = true
+  }
+
+  function formatEta(size: number | null): string {
+    if (size === null) return 'Calculating…'
+    const seconds = estimate(size)
+    if (seconds === null) return 'Calculating…'
+    return `~${Math.max(1, Math.round(seconds))}s`
   }
 
   async function handleImportFiles() {
@@ -53,6 +104,11 @@
   <div>
     <button data-testid="import-files-button" onclick={handleImportFiles}>Import Files</button>
     <button data-testid="import-folder-button" onclick={handleImportFolder}>Import Folder</button>
+    <label>
+      <input type="checkbox" data-testid="auto-run-checkbox" bind:checked={autoRun} />
+      Auto-run beat detection
+    </label>
+    <button data-testid="stop-button" onclick={handleStop}>Stop</button>
   </div>
 
   {#if importError}
@@ -65,6 +121,13 @@
         <span>{row.filename}</span>
         {#if row.status === 'ready'}
           <span>ready</span>
+        {:else if row.status === 'detecting'}
+          <span>detecting…</span>
+          <span data-testid="eta-badge">{formatEta(row.size)}</span>
+        {:else if row.status === 'detected'}
+          <span>{row.beatCount} beats detected{row.meanHr !== null ? `, mean HR ${row.meanHr}` : ''}</span>
+        {:else if row.status === 'detection-error'}
+          <span>detection failed: {row.error}</span>
         {:else}
           <span>{row.error}</span>
         {/if}
