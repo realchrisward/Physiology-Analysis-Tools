@@ -1,68 +1,219 @@
 # Backend Overview
 
-Living doc for the new FastAPI backend (`backend/`) built as Milestone 1 of
-the UI redesign (`web-ui-redesign` branch). Update this as later milestones
-land. Full context: `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md`
-(architecture) and `docs/superpowers/specs/2026-09-14-ui-workflow-features-design.md`
-(workflow/features), `docs/superpowers/plans/2026-09-14-backend-api-foundation.md`
-(this milestone's plan).
+The complete FastAPI backend (`backend/`) for the Physiology Analysis Tools UI
+redesign (`web-ui-redesign` branch) — a full rewrite of the old PySide6 desktop
+app's analysis logic behind a local HTTP API, consumed by an Electron+Svelte
+frontend. All four backend-completion milestones (M4-M7), plus the original
+three foundation milestones (M1-M3), are complete: **69 tests passing, 1
+correctly skipped**. This doc consolidates everything from the individual
+milestone plans/specs into one reference — those documents (listed at the
+bottom) remain as historical/audit record but this file is the fast path to
+understanding current backend state.
+
+## Architecture
+
+- **Electron main process** spawns a Python/`uvicorn` subprocess on a
+  dynamically-chosen free port, health-polled, torn down on quit.
+- **FastAPI backend**, `create_app()` factory + `app.state` (not module
+  globals) — isolated state per test/instance.
+- **Sync `def` endpoints, not `async def`** everywhere — FastAPI runs sync
+  handlers in a threadpool automatically, so a slow pandas/numpy call never
+  blocks the event loop. Deliberate choice to avoid the old app's
+  QThread-freeze problem, and avoids needing WebSocket/background-task
+  infrastructure for anything in this backend.
+- **Every failure path returns HTTP 200 with `status: "error"`**, never a
+  500 (the one exception: genuine Pydantic type-validation failures on a
+  request body itself, e.g. sending a string where a float is expected).
+- **The existing analysis library (`physiology_analysis_tools.modules.*`) is
+  called unmodified** everywhere — `heartbeat_detection.beatcaller()`,
+  `arrhythmia_detection.call_arrhythmias()` — the backend wraps it, never
+  forks its logic. Two library files needed a lazy-import fix (tkinter
+  crashes without Tcl/Tk); see Known risks.
+
+## Features (by milestone)
+
+- **M1 — Foundation.** File import (multi-path batch, per-file error
+  isolation), channel detection/selection via a filename-pattern config,
+  file listing.
+- **M4 — Beat detection.** Run `heartbeat_detection.beatcaller()` against an
+  imported file's chosen channel; returns per-beat rows plus a summary
+  (count, mean HR, duration).
+- **M5 — Arrhythmia detection + settings.** Run heuristic and/or
+  unsupervised (PCA/DBSCAN) arrhythmia detection against detected beats;
+  mutable beat/arrhythmia detection settings with cross-field validation.
+- **M6 — Data windowing (the graph).** Downsampled, deterministic signal
+  data for any time range/resolution — fixes the old app's "graph reshapes
+  on every zoom" bug via memoization. Range-filtered beat/arrhythmia
+  markers, so the frontend never holds/filters a full beat list.
+- **M7 — Persistence, review, export.** SQLite-backed save/reload of a
+  file's channel choice, beat/arrhythmia results, and bad-data marks.
+  Confirm/reject/reassign a beat's classification (fixes the old app's
+  unreliable "Confirm Arrhythmia" button and a real reject-cascade bug).
+  Bad-data range marking. Excel report export matching the old app's shape.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `backend/app.py` | `create_app()` factory — builds the FastAPI app, owns `app.state.imported_files` (in-memory file registry), registers routers. `GET /health`. |
-| `backend/channel_selection.py` | Pure function `select_default_channel(filename, available_channels)`. Filename-pattern → exact channel-name rules (`CHANNEL_RULES`), confirmed against real sample files. `NON_SIGNAL_CHANNELS` = `{ts, time, comment}` — the single source of truth for what's never a signal channel. |
-| `backend/extractors.py` | `extract_dataframe(filepath)` — tries each extension-matching extractor from the existing `physiology_analysis_tools.modules.signal_converters.*` in order (`EXTRACTOR_SPECS`), returns the first success. `NoExtractorSucceededError` on total failure. `EXTRACTOR_LOAD_ERRORS` records why an extractor (e.g. EDF) failed to even load. |
-| `backend/models.py` | Pydantic request/response models: `ImportRequest`, `FileImportResult` (path, filename, status, channels, time_column, size, modified_time, default_channel, error), `ImportResponse`. |
-| `backend/files.py` | `POST /files/import`, `GET /files`. Wires `extractors.py` + `channel_selection.py` together; per-file error isolation (one bad file doesn't fail the batch). |
-| `backend/beats.py` | `POST /beats/detect` — wraps the existing `heartbeat_detection.beatcaller()`. Reads the parsed DataFrame from `app.state.signal_cache` (set by `/files/import`), runs beat detection with `app.state.beat_settings`, caches the resulting beats DataFrame into `app.state.beat_cache` with `.reset_index(drop=True)` applied (required for M5's arrhythmia join to align correctly). |
-| `backend/settings.py` | `GET /settings`, `PUT /settings` — reads/writes `app.state.beat_settings` and `app.state.arrhythmia_settings`. `PUT` validates `bradycardia_absolute_hr < tachycardia_absolute_hr` before any mutation (reject whole request, no partial-apply, on failure); response reflects the actually-constructed `Settings()` instances, not the raw input. |
-| `backend/arrhythmia.py` | `POST /arrhythmia/detect` — wraps the existing `arrhythmia_detection.call_arrhythmias()`. Reads `beat_cache[path]` + `signal_cache[path]`, runs detection with `app.state.arrhythmia_settings` and the requested method (`heuristic`/`unsupervised`/`both`, mapped to the library's exact capitalized strings), defensively recomputes `any_arrhythmia` (see Design decisions) before caching the merged result back into `beat_cache`. |
-| `backend/windowing.py` | `GET /channels/window` — downsampled signal data for the graph. Ported unchanged from `main.py`'s `min_max_downsample`/`gather_data` (min-max-per-bin, chronological order preserved). Slices `signal_cache[path]`'s DataFrame to `[start, end]`, downsamples if `len > resolution*4`, memoizes by `(path, channel, start, end, resolution)` in `app.state.window_cache` — the determinism fix for the old app's "graph reshapes on zoom" bug. |
-| `backend/beats_window.py` | `GET /beats/window` — range-filters `beat_cache[path]` by `ts` so the frontend never holds/filters a full beat list client-side. Arrhythmia category fields (including `any_arrhythmia`/`other_arrhythmia`) are all optional — a file may only have had beat detection, not arrhythmia detection, run yet. |
-| `backend/categories.py` | Single source of truth for arrhythmia category column names: `BASE_CATEGORIES` (5, the library's independent flags), `REASSIGNABLE_CATEGORIES` (+`other_arrhythmia`, 6 — valid `PATCH /files/beats/category` reassignment targets), `ALL_OPTIONAL_COLUMNS` (+`any_arrhythmia`, 7 — every column that may or may not be present on a beat row). Consumed by `arrhythmia.py`, `beats_window.py`, `db.py`, `db_routes.py` — previously 5 independently-maintained copies across those 4 files, consolidated in M7's final review. |
-| `backend/db.py` | SQLite persistence layer (M7). `connect(db_path)` (idempotent schema creation, `sqlite3.Row` factory), `default_db_path()`, `get_file_row`, `upsert_file` (partial-update via an `_UNSET` sentinel — never clobbers columns the caller didn't pass; optional `commit=False` for multi-statement transactions), `replace_beats` (delete-then-reinsert, same `commit=False` support), `update_beat_category` (confirm/reject/reassign — see Design decisions), `add_bad_data_mark`/`delete_bad_data_mark`. Schema: `files`/`beats`/`bad_data_marks`, keyed by `(path, size, mtime)`. |
-| `backend/db_routes.py` | `APIRouter(prefix="/files")`, 7 endpoints (M7): `GET /state` (load a prior record or clean "not found"), `PUT /channel`, `POST /beats` (persist a fresh detect(+arrhythmia) result wholesale, atomically with the channel/settings update), `PATCH /beats/category` (confirm/reject/reassign — the "Confirm Arrhythmia" fix), `POST`/`DELETE /bad-data`, `POST /report` (Excel export, mirrors `main.py`'s legacy 3-sheet shape via `xlsxwriter`). Every endpoint wraps its DB body in `try/except Exception` — never a 500. |
-| `backend/requirements.txt` | fastapi, uvicorn, httpx, pytest, openpyxl (test-only — `pandas.read_excel` verification; `xlsxwriter`, the production write engine, needs no counterpart to read back) — not yet split into runtime vs. dev deps (noted below). |
-| `backend/tests/` | `conftest.py` (shared fixtures: `example_txt_file`, `real_beats_txt_file`, `long_txt_file`, `adicht_examples_dir`), one test file per module above, plus `test_adicht_extraction.py` (self-skips unless `adi-reader` is functional). |
+| `backend/app.py` | `create_app()` factory — builds the app, owns all `app.state` (`imported_files`, `signal_cache`, `beat_cache`, `beat_settings`, `arrhythmia_settings`, `window_cache`, `db_path`), registers every router. `GET /health`. CORS for the Electron dev/packaged origins. |
+| `backend/channel_selection.py` | `select_default_channel(filename, available_channels)`. Filename-pattern → exact channel-name rules, confirmed against real sample files. `NON_SIGNAL_CHANNELS = {ts, time, comment}` — single source of truth for what's never a signal channel. |
+| `backend/extractors.py` | `extract_dataframe(filepath)` — tries each extension-matching extractor from `physiology_analysis_tools.modules.signal_converters.*` in order, returns the first success. |
+| `backend/files.py` | `POST /files/import`, `GET /files`. Populates `signal_cache[path]`; invalidates any stale `window_cache` entries for a re-imported path. |
+| `backend/beats.py` | `POST /beats/detect` — wraps `heartbeat_detection.beatcaller()`. Caches into `beat_cache[path]` with `.reset_index(drop=True)` (required for M5's join to align). |
+| `backend/settings.py` | `GET`/`PUT /settings` — reads/writes `beat_settings`/`arrhythmia_settings`. `PUT` validates before mutating (reject whole request on failure, no partial-apply). |
+| `backend/arrhythmia.py` | `POST /arrhythmia/detect` — wraps `arrhythmia_detection.call_arrhythmias()`. Defensively recomputes `any_arrhythmia` (see Design decisions) before caching the merged result back into `beat_cache`. |
+| `backend/windowing.py` | `GET /channels/window` — downsampled signal data. Unchanged port of the old app's min-max-per-bin algorithm. Memoized by `(path, channel, start, end, resolution)` in `window_cache`. |
+| `backend/beats_window.py` | `GET /beats/window` — range-filters `beat_cache[path]` by `ts`. Arrhythmia category fields all optional (a file may only have had beat detection run). |
+| `backend/categories.py` | Single source of truth for arrhythmia category column names: `BASE_CATEGORIES` (5), `REASSIGNABLE_CATEGORIES` (+`other_arrhythmia`, 6), `ALL_OPTIONAL_COLUMNS` (+`any_arrhythmia`, 7). Consumed by `arrhythmia.py`, `beats_window.py`, `db.py`, `db_routes.py`. |
+| `backend/db.py` | SQLite persistence layer. `connect()`, `default_db_path()`, `get_file_row`, `upsert_file` (partial-update via an `_UNSET` sentinel, optional `commit=False` for transactions), `replace_beats`, `update_beat_category` (confirm/reject/reassign), `add_bad_data_mark`/`delete_bad_data_mark`. Schema below. |
+| `backend/db_routes.py` | `APIRouter(prefix="/files")`, 7 persistence endpoints — see API Reference. Every endpoint wraps its DB body in `try/except Exception`. |
+| `backend/models.py` | Every Pydantic request/response model — see API Reference for exact shapes. |
+| `backend/requirements.txt` | fastapi, uvicorn, httpx, pytest, openpyxl (test-only, see Known risks) — not yet split into runtime vs. dev deps. |
+| `backend/tests/` | `conftest.py` (shared fixtures: `example_txt_file`=10.txt, `real_beats_txt_file`=57.txt, `long_txt_file`="9 long.txt", `adicht_examples_dir`), one test file per module above, plus `test_adicht_extraction.py` (self-skips unless `adi-reader` is functional). |
+
+## API Reference
+
+`path` is always a query parameter on `GET` requests and a JSON body field
+on `PUT`/`POST`/`PATCH`/`DELETE` — real file paths (Windows drive letters,
+spaces, colons) don't round-trip safely as a raw URL segment.
+
+| Method & Route | Request | Response | Notes |
+|---|---|---|---|
+| `GET /health` | — | `{"status": "ok"}` | |
+| `POST /files/import` | `{paths: [str]}` | `{results: [FileImportResult]}` | Per-file error isolation. |
+| `GET /files` | — | `[FileImportResult]` | |
+| `POST /beats/detect` | `{path, channel}` | `BeatDetectionResult` | `beats`, `count`, `mean_hr`, `duration`, `elapsed_seconds`, `file_size_bytes`. |
+| `GET /settings` | — | `SettingsPayload` (`{beat, arrhythmia}`) | |
+| `PUT /settings` | `SettingsPayload` | `SettingsResult` | Rejects if `bradycardia_absolute_hr >= tachycardia_absolute_hr`. |
+| `POST /arrhythmia/detect` | `{path, channel, method}` (`method`: `"heuristic"\|"unsupervised"\|"both"`) | `ArrhythmiaDetectionResult` | `beats` (each with the 5 optional category flags + `any_arrhythmia`/`other_arrhythmia`), `any_arrhythmia_count`. |
+| `GET /channels/window` | query: `path, channel, start, end, resolution` | `ChannelWindowResult` | `x`, `y`, `point_count`, `downsampled`. Memoized. |
+| `GET /beats/window` | query: `path, start, end` | `BeatWindowResult` | `beats: [WindowBeat]` (all category fields optional). |
+| `GET /files/state` | query: `path` | `FileStateResult` | `found`, `channel`, `beats: [PersistedBeat]`, `bad_data_marks`, `beat_settings`, `arrhythmia_settings`. |
+| `PUT /files/channel` | `{path, channel}` | `ChannelPersistResult` | |
+| `POST /files/beats` | `{path, channel}` | `PersistBeatsResult` | Wholesale delete-then-reinsert from `beat_cache[path]`, atomic with the channel/settings-snapshot update. |
+| `PATCH /files/beats/category` | `{path, ts, action, category?}` (`action`: `"confirm"\|"reject"\|"reassign"`) | `CategoryUpdateResult` | `reject` clears all 6 category columns + `any_arrhythmia`. `reassign` needs `category` in `REASSIGNABLE_CATEGORIES`. |
+| `POST /files/bad-data` | `{path, start, stop}` | `BadDataAddResult` | Always auto-sorted (`min`/`max`), regardless of input order. |
+| `DELETE /files/bad-data` | `{path, id}` | `BadDataDeleteResult` | Scoped to `(id, file_id)`. |
+| `POST /files/report` | `{path, output_dir}` | `ReportResult` | Writes `<output_dir>/<basename>.xlsx`, 3 sheets (`beats`, `bad_data_marks`, `settings`), via `xlsxwriter`. |
+
+**SQLite schema** (`backend/db.py`, one file at `default_db_path()` —
+`~/.physiology_analysis_tools/state.db` — or a test-supplied path via
+`create_app(db_path=...)`):
+
+```sql
+files (id, path, size, mtime, channel, beat_settings_json,
+       arrhythmia_settings_json, updated_at, UNIQUE(path, size, mtime))
+beats (id, file_id, ts, rr, r_amplitude, hr, <7 category columns>,
+       review_state DEFAULT 'unreviewed', reassigned_category,
+       UNIQUE(file_id, ts))
+bad_data_marks (id, file_id, start, stop)
+```
 
 ## Design decisions
 
-- **Sync `def` endpoints, not `async def`** — FastAPI runs sync handlers in a threadpool, so a slow pandas parse doesn't block the event loop. Deliberate choice to avoid the old app's QThread-freeze problem.
-- **`create_app()` factory + `app.state`**, not a module singleton — isolated state per test/instance; the in-memory `imported_files` dict is a placeholder for the SQLite-backed store a future milestone adds (spec §1).
-- **Channel/time-column split**: `channels` (selectable) never includes `ts`/`time`/`comment`; `time_column` surfaces whichever of `ts`/`time` the file actually has, separately, as metadata. One shared constant (`channel_selection.NON_SIGNAL_CHANNELS`) drives both — do not reintroduce a second copy of this set (a final-review finding caught exactly that drift once already).
-- **Default-channel matching is exact name, case-insensitive** — not substring. Falls back to the first non-excluded channel, `matched_rule=False`, if no filename rule fires.
-- **Per-file error isolation**: `POST /files/import` never fails the whole request for one bad path; each result is `status: "ok"|"error"` independently.
-- **`/files/import` now caches the parsed DataFrame** instead of discarding it after channel detection: `app.state.signal_cache[path] -> {df, time_column}`, so `/beats/detect` (and future analysis endpoints) can reuse it without re-parsing. `app.state.beat_settings`/`app.state.arrhythmia_settings` hold the current settings, mutable via `GET`/`PUT /settings`.
-- **`beatcaller()`'s output must have its index reset before caching** (`backend/beats.py`) — `beatcaller()` preserves the original sample-position index (e.g. 2883, 4430, ...) rather than a fresh 0-based range. `ml_tools.beatepocher()` (used by the unsupervised arrhythmia method) keys its per-beat clustering output by positional `enumerate()` index, and the downstream `.join()` aligns by index *label* — without the reset, every row goes unmatched and `abn_cluster` comes back all-NaN. Any future code that re-caches or rebuilds `beat_cache` entries must preserve this reset.
-- **`any_arrhythmia` is defensively recomputed in `backend/arrhythmia.py`**, not trusted as returned by `call_arrhythmias()`. The library computes it internally as `df[categories].any(axis=1, bool_only=True)`, which silently drops an entire category column (not just its NaN rows) once that column has mixed True/False/NaN values — reachable whenever `ml_tools.beatepocher()` boundary-skips a beat too close to the signal's start/end for its epoch window. The recompute ORs the library's value with a NaN-safe `.any()` over the present optional columns, so it can only become more true, never mask a fully-populated category. Covered by `test_any_arrhythmia_survives_mixed_nan_abn_cluster_column`.
-- **`window_cache` entries are invalidated by path whenever `POST /files/import` re-imports that same path** — `backend/files.py` deletes every `window_cache` key whose first tuple element matches the re-imported path, right after `signal_cache[path]` is overwritten. Without this, a repeated `/channels/window` query with the same key after a re-import would silently serve stale downsampled data (`status: "ok"`, no error) — the same "graph doesn't match reality" bug class M6 exists to fix, just relocated from pixel width to file content. Any future cache keyed by `path` needs the same treatment on re-import.
-- **`path` is always a query parameter, never a URL path segment**, across every endpoint including M6's — real file paths (Windows drive letters, spaces, colons) don't round-trip safely as a raw URL segment. `windowing.py`/`beats_window.py` deliberately deviate from the M6 spec's literal `GET /channels/{path}/window` route shape for this reason, matching the convention every earlier endpoint already established.
-- **`(size, mtime)` for every M7 persistence operation comes from `app.state.imported_files[path]`** (already `os.stat()`'d at import), never a fresh `os.stat()` — same "don't re-stat what's cached" convention as M4's `file_size_bytes`. Every persistence endpoint therefore requires the file to have been imported this session first.
-- **`POST /files/beats` is one atomic transaction**, not two independent commits: `db.upsert_file`/`db.replace_beats` both take an optional `commit=False`, and the route commits once after both succeed (rolling back on either's failure) — so a mid-write failure can never leave `files.channel` updated while `beats` still holds a stale detection result. Every OTHER caller of these two functions (`PUT /channel`, `POST /bad-data`) still gets the default immediate-commit behavior; only `POST /files/beats` opts into the transactional form.
-- **Reject cascades in `PATCH /files/beats/category`**: rejecting a beat clears every category column (`bradycardia_absolute` … `other_arrhythmia`) plus `any_arrhythmia`, not just a single top-level flag — this is the fix for the old app's `action_reject_arrhythmia` bug (`main.py:1132-1148`, which only ever touched `annot_any_arrhythmia`). `reassign` sets exactly one target category and clears the rest; `confirm` touches no category column. Each action is one atomic, complete-overwrite `UPDATE`.
-- **Every `db_routes.py` endpoint wraps its DB-operation body in `try/except Exception`** — including `GET /files/state`, which was left without this guard through M7's Task 1-4 (a deliberate "fix going forward, close the gap at the final review" decision) and was closed in M7's own final-review fix wave, not carried forward as a parked risk.
+- **`create_app()` factory + `app.state`**, not a module singleton —
+  isolated state per test/instance. `create_app(db_path: str | None = None)`:
+  tests always pass an isolated `tmp_path`-backed DB, never the real
+  per-user default.
+- **Channel/time-column split**: `channels` never includes `ts`/`time`/
+  `comment`; `time_column` surfaces separately as metadata. One shared
+  constant (`channel_selection.NON_SIGNAL_CHANNELS`) drives both.
+- **Default-channel matching is exact name, case-insensitive** — not
+  substring. Falls back to the first non-excluded channel if no rule fires.
+- **`beatcaller()`'s output must have its index reset before caching**
+  (`backend/beats.py`) — it preserves the original sample-position index;
+  `ml_tools.beatepocher()` (unsupervised method) keys by positional index,
+  and the downstream join aligns by label — without the reset, every row
+  goes unmatched and `abn_cluster` comes back all-NaN.
+- **`any_arrhythmia` is defensively recomputed in `backend/arrhythmia.py`**,
+  not trusted as returned by `call_arrhythmias()`. The library's own
+  `df[categories].any(axis=1, bool_only=True)` silently drops an entire
+  category column (not just its NaN rows) once that column has mixed
+  True/False/NaN values — reachable whenever `beatepocher()` boundary-skips
+  a beat. The recompute ORs in the present optional columns, NaN-safe.
+- **`window_cache` entries are invalidated by path on re-import**
+  (`backend/files.py`) — without this, a repeated `/channels/window` query
+  after a re-import would silently serve stale downsampled data.
+- **`path` is always a query parameter, never a URL path segment** —
+  across every endpoint. Windows drive letters/spaces/colons don't
+  round-trip safely as a raw URL segment; this is a deliberate deviation
+  from the M6/M7 specs' literal `{path}`-in-URL route shapes.
+- **`(size, mtime)` for every M7 persistence operation comes from
+  `app.state.imported_files[path]`** (already stat'd at import), never a
+  fresh `os.stat()`.
+- **`POST /files/beats` is one atomic transaction** — `upsert_file`/
+  `replace_beats` both take an optional `commit=False`; the route commits
+  once after both succeed, rolling back on either's failure. Every OTHER
+  caller of these two functions still gets immediate-commit behavior.
+- **Reject cascades in `PATCH /files/beats/category`**: rejecting a beat
+  clears every category column plus `any_arrhythmia`, not just a top-level
+  flag — the fix for the old app's `action_reject_arrhythmia` bug (it only
+  ever touched `annot_any_arrhythmia`). `reassign` sets exactly one target
+  category and clears the rest; `confirm` touches no category column.
+- **Every `db_routes.py` endpoint wraps its DB body in `try/except
+  Exception`** — including `GET /files/state`, closed in M7's final-review
+  fix wave after being deliberately left open through Tasks 1-4.
 
 ## Known cross-effects / risks
 
-- **Two library files were modified outside `backend/`**: `src/physiology_analysis_tools/modules/signal_converters/{labchart_text_extract,pcc_extract,adi_extract,edf_extract,dsi_fp_matlab_extract}.py` — all five had a module-level `tkinter` import (used only by unused legacy GUI-picker functions) that crashes on any Python build without Tcl/Tk. All five now import tkinter lazily inside those functions only. `SASSI_extract()` behavior is unchanged. This affects the *pip-installed library too*, not just the backend — worth knowing if anything else imports these modules.
-- **`.adicht` extraction is untested in this environment** — `adi-reader`'s native extension doesn't build on macOS; `test_adicht_extraction.py` self-skips here and needs a real run on Windows to confirm the channel rules against real `.adicht` files.
-- **No auth/network hardening yet** — `/files/import` accepts and echoes arbitrary local file paths. Fine today (no port is bound), but must be addressed before the Electron/uvicorn milestone binds one (parked finding, not forgotten).
-- **Error responses are a free-form string** (`error: str | None`), not the structured `{code, message}` the architecture spec describes — parked until more endpoints exist to design the full error taxonomy at once instead of one-off.
-- **`backend/requirements.txt` mixes runtime and dev/test deps** (now including `openpyxl`, added in M7 purely for `pandas.read_excel` test verification — production code only ever uses `xlsxwriter` to write) — needs splitting before the PyInstaller/Nuitka sidecar build reads it for packaging.
-- **Quitting Electron during backend startup (the ~1-8s health-check window) can orphan the spawned backend process** — `before-quit` only calls `event.preventDefault()` once `stopBackend` is assigned, so a quit requested before `startBackend()` resolves isn't guaranteed to be delayed long enough for cleanup to run. Narrow window, self-limiting (the orphan doesn't block the next launch, which spawns its own backend on a new port), not fixed after a deep review + one fix round — parked rather than risking a 3rd round of changes to this file. `desktop/main.js`'s `before-quit`/`whenReady` handlers.
-- **Test coverage gap**: `desktop/backend-process.test.js`'s "fails fast when already exited" test exercises `waitForHealth()` directly with a hand-built state object, not `startBackend()`'s actual spawn→exit-listener wiring — a regression in that wiring specifically wouldn't be caught by the current suite.
-- **Unsupervised arrhythmia detection's `abn_cluster` result quality is unvalidated**: on the one real multi-beat file tested (`9 long.txt`), DBSCAN cluster label 0 comes back `True` (flagged abnormal) for all 163 beats — `ml_tools.py`'s clustering doesn't guarantee label 0 means "normal," so this may be a labeling-convention mismatch rather than a genuine finding of universal abnormality. Outside `backend/`'s files (lives in the unmodified library); needs real-world validation with a lab technician before the unsupervised method is trusted, not a code-level fix. Parked, M5 final review.
-- **`window_cache` has no eviction policy, and its growth risk is NOT the same as `signal_cache`'s accepted "no eviction" tradeoff.** `signal_cache`'s cardinality is bounded by distinct files opened in a session (small, human-paced, each path's entry overwritten not accumulated). `window_cache`'s cardinality is bounded by distinct `(path, channel, start, end, resolution)` query tuples ever requested — once the frontend wires this endpoint to continuous pan/zoom, that could grow into the thousands within one long session, retained forever. No eviction policy was in M6's scope and there's no frontend yet to characterize real query volume. Fast-follow once real usage is observable (e.g. a simple LRU cap) — parked, M6 final review, deliberately not waved through under `signal_cache`'s rationale.
-- **`beat_cache`/persistence trust the caller's `channel` string rather than verifying it against what the cached `beat_df` was actually detected against.** `beat_cache` (M4) is keyed by `path` alone, not `(path, channel)` — `PUT /files/channel` and `POST /files/beats` both accept a `channel` argument that's stored/exported as fact without cross-checking it matches the channel `POST /beats/detect` actually ran with. Pre-existing limitation from M4, but M7 is the first place this value becomes durable, exported data rather than a transient response field — worth tightening if a mismatch ever surfaces in practice. Parked, M7 final review.
-- **The Excel report represents arrhythmia category flags as `0`/`1` integers, not `TRUE`/`FALSE` booleans**, a cosmetic difference from the old desktop app (which fed real bool/NaN-dtype columns into `to_excel`). Data is correct; only the cell formatting differs. Worth a product check with a lab technician on whether this matters before shipping the report feature. Parked, M7 final review.
-- **`PersistedBeat` (M7) and `WindowBeat` (M6) are near-duplicate Pydantic models** (same fields, `PersistedBeat` adds `review_state`/`reassigned_category`) — a shared base model would remove the duplication if a category field is ever added or renamed. Cosmetic, parked, M7 final review.
+- **Two library files were modified outside `backend/`**:
+  `src/physiology_analysis_tools/modules/signal_converters/*.py` — a
+  module-level `tkinter` import (unused GUI-picker functions) crashed on
+  any Python build without Tcl/Tk. Now lazy-imported inside those functions
+  only. Affects the pip-installed library too, not just the backend.
+- **`.adicht` extraction is untested in this environment** —
+  `adi-reader`'s native extension doesn't build on macOS; needs a real run
+  on Windows against real `.adicht` files (explicitly deferred by the user
+  to that later testing phase).
+- **No auth/network hardening** — endpoints accept/echo arbitrary local
+  file paths and write reports to arbitrary local directories. Acceptable
+  for a trusted, offline, single-user desktop app with no bound external
+  port; revisit only if that threat model ever changes.
+- **Error responses are a free-form string** (`error: str | None`), not a
+  structured `{code, message}` — parked, no frontend need identified yet.
+- **`backend/requirements.txt` mixes runtime and dev/test deps** (now
+  including `openpyxl`, added purely for `pandas.read_excel` test
+  verification — production code only ever writes via `xlsxwriter`) —
+  needs splitting before a PyInstaller/Nuitka sidecar build reads it.
+- **Quitting Electron during backend startup can orphan the spawned
+  process** — narrow window, self-limiting, parked (`desktop/main.js`).
+- **Test coverage gap**: `desktop/backend-process.test.js`'s "fails fast"
+  test doesn't exercise `startBackend()`'s actual spawn→exit wiring.
+- **Unsupervised arrhythmia detection's `abn_cluster` quality is
+  unvalidated** — on the one real file tested, DBSCAN label 0 comes back
+  `True` for all 163 beats; may be a labeling-convention mismatch in the
+  unmodified library, not a genuine universal finding. Needs real-world
+  validation with a lab technician.
+- **`window_cache` has no eviction policy** — cardinality is bounded by
+  distinct query tuples, not distinct files, so continuous frontend
+  pan/zoom could grow it unboundedly within one session. Fast-follow once
+  real usage is observable (e.g. a simple LRU cap).
+- **`beat_cache`/persistence trust the caller's `channel` string** rather
+  than verifying it against what the cached `beat_df` was actually
+  detected against — `beat_cache` is keyed by `path` alone, not
+  `(path, channel)`.
+- **The Excel report represents category flags as `0`/`1`**, not
+  `TRUE`/`FALSE` — cosmetic difference from the old app's real-bool
+  columns. Worth a product check with a lab technician.
+- **`PersistedBeat` (M7) and `WindowBeat` (M6) are near-duplicate models**
+  — a shared base model would remove the duplication.
 
 ## Progress
 
-- **Done**: Milestone 1 — backend scaffold, channel-selection logic, extractor wrapper, file import/list API. Milestone 4 — beat-detection endpoint (`POST /beats/detect`, wraps `heartbeat_detection.beatcaller()`, backed by `signal_cache`/`beat_cache`/`beat_settings`). Milestone 5 — `GET`/`PUT /settings`, arrhythmia-detection endpoint (`POST /arrhythmia/detect`, wraps `arrhythmia_detection.call_arrhythmias()`, backed by `arrhythmia_settings`). Milestone 6 — data windowing (`GET /channels/window`, downsampled+memoized signal data; `GET /beats/window`, range-filtered beat/arrhythmia markers). Milestone 7 — SQLite persistence (`GET /files/state`, `PUT /files/channel`, `POST /files/beats`), review mutations (`PATCH /files/beats/category` — the Confirm Arrhythmia + reject-cascade fix), bad-data marks, Excel report export. **All four backend milestones (M4-M7) are now complete.** 69 tests passing, 1 correctly skipped (up from 44/1 at M6's close). Every milestone reviewed (per-task + whole-branch, Sonnet), fix waves applied and re-reviewed clean. One consolidated Opus review across all of M4-M7 is the next step, per the user's explicit instruction, before frontend work begins.
-- **Not started**: Svelte frontend (Import/channel-select/review-workspace screens), Electron packaging, old-UI (`main.py`/PySide6) removal, auto-run/ETA/stop UX for beat detection (frontend-side, no backend change needed — see `docs/superpowers/specs/2026-09-28-backend-completion-design.md` §M4's ETA note).
+- **Done**: all backend work. M1 (scaffold, channel selection, extractor
+  wrapper, import/list). M4 (beat detection). M5 (settings, arrhythmia
+  detection). M6 (data windowing/LOD, deterministic downsampling). M7
+  (SQLite persistence, review mutations, Excel export). **69 tests
+  passing, 1 correctly skipped.** Every milestone reviewed per-task and
+  whole-branch (Sonnet); every final review's findings fix-waved and
+  re-reviewed clean.
+- **Skipped by explicit user instruction**: the one consolidated
+  cross-milestone Opus review (hit a session rate limit mid-run; user
+  chose to proceed to frontend work rather than retry it).
+- **Not started**: Electron packaging, old-UI (`main.py`/PySide6) removal.
+- **In progress**: Svelte frontend with full backend integration (started
+  after this doc's consolidation) — Windows/real-`.adicht`-file testing
+  deferred to later, per explicit user instruction.
 - **Branch**: `web-ui-redesign`, not merged to `main`.
 
 ## Frontend/Electron dev setup
@@ -72,3 +223,11 @@ places: repo root, `frontend/`, and `desktop/`. Then run `npm run dev` from
 repo root to launch Vite + Electron together. Electron spawns the backend
 automatically on a dynamically-chosen free port and passes it to the renderer
 over IPC — no manual `uvicorn` start needed.
+
+## Historical documents (superseded by this file as the primary reference)
+
+- `docs/superpowers/specs/2026-09-07-web-ui-redesign-design.md` — original architecture (Electron+FastAPI+Svelte)
+- `docs/superpowers/specs/2026-09-14-ui-workflow-features-design.md` — workflow/feature decisions (still the authority for frontend UX behavior)
+- `docs/superpowers/specs/2026-09-28-backend-completion-design.md` — M4-M7 design
+- `docs/superpowers/plans/2026-09-14-backend-api-foundation.md` — M1 plan
+- `docs/superpowers/plans/2026-09-28-m4-beat-detection.md`, `m5-arrhythmia-settings.md`, `m6-data-windowing.md`, `m7-persistence-review-export.md` — M4-M7 plans, each with full TDD steps and exact grounded test values
