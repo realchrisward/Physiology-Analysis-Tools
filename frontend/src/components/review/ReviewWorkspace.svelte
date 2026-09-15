@@ -1,6 +1,7 @@
 <script lang="ts">
   import { detectBeats } from '../../lib/api/beats'
   import EcgGraph from '../graph/EcgGraph.svelte'
+  import type { WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
     status: 'pending' | 'ok' | 'error' | null
@@ -58,6 +59,16 @@
   // only the response matching the most recently issued request is allowed
   // to update `detection`/advance `activeChannel`.
   let detectionRequestId = 0
+
+  // The beat most recently selected via a click on EcgGraph's marker (see
+  // `onBeatSelect` below). Task 2 (BeatCategoryPanel) replaces the plain-text
+  // rendering below with real category-review controls driven by this same
+  // state — kept here as a genuinely functional stepping stone (it proves
+  // the click → select → display wiring actually works end to end) rather
+  // than an inert placeholder, per this project's "leave a real slot, don't
+  // build a placeholder" discipline (see F3 Task 1's ImportScreen for the
+  // precedent).
+  let selectedBeat: WindowBeat | null = $state(null)
 
   async function handleChannelChange() {
     const channel = selectedChannel
@@ -124,7 +135,18 @@
          is the simplest way to get it to re-init for a new channel's
          data. -->
     {#key activeChannel}
-      <EcgGraph {path} channel={activeChannel} />
+      <EcgGraph {path} channel={activeChannel} onBeatSelect={(beat) => (selectedBeat = beat)} />
     {/key}
+  </div>
+
+  <!-- Stepping-stone for Task 2's BeatCategoryPanel — see `selectedBeat`'s
+       declaration above for why this is a real (if minimal) rendering
+       rather than an inert placeholder. -->
+  <div data-testid="selected-beat-panel">
+    {#if selectedBeat}
+      <p data-testid="selected-beat-summary">Selected beat: t={selectedBeat.ts}s, HR {selectedBeat.hr}</p>
+    {:else}
+      <p data-testid="selected-beat-summary">No beat selected</p>
+    {/if}
   </div>
 </div>

@@ -66,11 +66,29 @@
   import { addBadData, deleteBadData } from '../../lib/api/persistence'
   import type { BadDataMark } from '../../lib/api/types'
 
-  let { path, channel }: { path: string; channel: string } = $props()
+  let {
+    path,
+    channel,
+    onBeatSelect,
+  }: { path: string; channel: string; onBeatSelect?: (beat: WindowBeat) => void } = $props()
 
   const DEBOUNCE_MS = 150
   const HEIGHT = 320
   const ZOOM_FACTOR = 0.75
+  // A `mousedown`→`mouseup` pair whose largest single-axis pixel
+  // displacement stays under this is treated as a click rather than a pan
+  // drag (see `handleDragStart`'s `onMove`/`onUp`) — 5px comfortably
+  // absorbs incidental hand tremor/trackpad jitter on an intended click
+  // without meaningfully delaying real pan gestures (which routinely move
+  // tens/hundreds of pixels).
+  const CLICK_DRAG_THRESHOLD_PX = 5
+  // How close (in screen pixels, converted to data-space via the same
+  // `unitsPerPx` uPlot conversion the pan drag already uses) a click needs
+  // to land to a beat's `ts` to select it. Deliberately x-only — beat
+  // markers are dense along x but sparse in y relative to the waveform, so
+  // nearest-by-x-distance is enough to disambiguate without also comparing
+  // the click's y/`r_amplitude` distance.
+  const BEAT_HIT_TOLERANCE_PX = 8
 
   // Marker series colors. Read from tokens.css's semantic custom properties
   // where possible (falling back to their light-mode values — jsdom in
@@ -157,6 +175,15 @@
   // `{#key selectedChannel}` remount, or navigating away — the listeners
   // get removed instead of lingering on `document` forever).
   let endActiveDrag: (() => void) | undefined
+  // The raw `WindowBeat[]` from the most recent successful `getBeatsWindow`
+  // call (set in `loadBeats` below), kept alongside — not instead of —
+  // `buildBeatAlignedData`'s merged series: the merged series only carries
+  // `ts`/`r_amplitude` (the two fields uPlot needs to render markers), but a
+  // click-to-select hit-test needs the beat's full record (arrhythmia
+  // flags, `hr`, etc.) to hand to `onBeatSelect`. Not `$state` — like
+  // `chart`/`fullExtent` above, it's only ever read from an event handler,
+  // never from the template.
+  let lastBeats: WindowBeat[] = []
 
   function resolutionFor(width: number): number {
     return Math.max(1, Math.round(width))
@@ -180,7 +207,11 @@
   // doesn't set `error` the way a channel-window failure does.
   async function loadBeats(start: number, end: number): Promise<WindowBeat[]> {
     const result = await getBeatsWindow(path, start, end)
-    if (result.status !== 'ok' || result.error || !Array.isArray(result.beats)) return []
+    if (result.status !== 'ok' || result.error || !Array.isArray(result.beats)) {
+      lastBeats = []
+      return []
+    }
+    lastBeats = result.beats
     return result.beats
   }
 
@@ -266,9 +297,53 @@
     endActiveDrag = detach
   }
 
+  // Finds the beat in the retained `lastBeats` (see its declaration above)
+  // whose `ts` is closest to `xVal`, within `toleranceVal` data-units —
+  // both already converted from screen pixels by the caller. Returns
+  // `undefined` if no beat falls within tolerance.
+  function findNearestBeat(xVal: number, toleranceVal: number): WindowBeat | undefined {
+    let nearest: WindowBeat | undefined
+    let nearestDist = Infinity
+    for (const candidate of lastBeats) {
+      const dist = Math.abs(candidate.ts - xVal)
+      if (dist <= toleranceVal && dist < nearestDist) {
+        nearest = candidate
+        nearestDist = dist
+      }
+    }
+    return nearest
+  }
+
+  // Called from `handleDragStart`'s `onUp` once a `mousedown`→`mouseup`
+  // pair has been classified as a click (see `CLICK_DRAG_THRESHOLD_PX`),
+  // never for an actual pan drag or while bad-data mode is active (bad-data
+  // mode's own drag handling in `handleBadDataDragStart` is untouched by
+  // this feature — see that function's own comment). Converts the click's
+  // pixel position to data-space via `u.posToVal`, the same
+  // coordinate-conversion API the pan/zoom/bad-data-mark code above already
+  // uses, then hit-tests it against the retained beats.
+  function handleBeatClick(u: uPlot, upEvent: MouseEvent) {
+    if (!onBeatSelect) return
+    const rect = u.over.getBoundingClientRect()
+    const xVal = u.posToVal(upEvent.clientX - rect.left, 'x')
+    const unitsPerPx = u.posToVal(1, 'x') - u.posToVal(0, 'x')
+    const toleranceVal = Math.abs(unitsPerPx) * BEAT_HIT_TOLERANCE_PX
+    const beat = findNearestBeat(xVal, toleranceVal)
+    if (beat) onBeatSelect(beat)
+  }
+
   // Left-drag (no modifier) pans: mutates the x-scale directly on every
   // mousemove for immediate visual feedback, then schedules one debounced
-  // re-fetch once the drag ends.
+  // re-fetch once the drag ends. A THIRD outcome shares this same
+  // mousedown/mousemove/mouseup sequence (rather than a second, parallel
+  // listener setup): if the total movement between mousedown and mouseup
+  // never reaches `CLICK_DRAG_THRESHOLD_PX`, nothing pans (the x-scale is
+  // never mutated at all — see `onMove` below, which only starts calling
+  // `setScale` once the threshold is actually crossed) and the gesture is
+  // instead treated as a click-to-select via `handleBeatClick`. This mirrors
+  // `handleBadDataDragStart`'s existing mutual exclusion with this branch
+  // (gated by `badDataMode` below) rather than introducing a fourth,
+  // independent code path.
   function handleDragStart(u: uPlot, downEvent: MouseEvent) {
     if (downEvent.button !== 0) return
     downEvent.preventDefault()
@@ -279,11 +354,27 @@
     }
 
     const startX = downEvent.clientX
+    const startY = downEvent.clientY
     const scaleMin0 = u.scales.x.min ?? 0
     const scaleMax0 = u.scales.x.max ?? 0
     const unitsPerPx = u.posToVal(1, 'x') - u.posToVal(0, 'x')
+    // Largest single-axis pixel displacement seen so far this gesture —
+    // compared against `CLICK_DRAG_THRESHOLD_PX` in `onMove`/`onUp` to tell
+    // "the user panned" from "the user clicked without (meaningfully)
+    // moving the mouse".
+    let maxMovementPx = 0
 
     function onMove(moveEvent: MouseEvent) {
+      maxMovementPx = Math.max(
+        maxMovementPx,
+        Math.abs(moveEvent.clientX - startX),
+        Math.abs(moveEvent.clientY - startY),
+      )
+      // Below the threshold, don't touch the scale at all — so a gesture
+      // that ends up classified as a click (in onUp) never leaves behind an
+      // imperceptible-but-real pan that the click branch's "don't refetch"
+      // path would otherwise leave desynced from the displayed data.
+      if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) return
       const dx = unitsPerPx * (moveEvent.clientX - startX)
       u.setScale('x', { min: scaleMin0 - dx, max: scaleMax0 - dx })
     }
@@ -294,8 +385,12 @@
       endActiveDrag = undefined
     }
 
-    function onUp() {
+    function onUp(upEvent: MouseEvent) {
       detach()
+      if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) {
+        handleBeatClick(u, upEvent)
+        return
+      }
       const { min, max } = u.scales.x
       if (min != null && max != null) scheduleRefetch(min, max)
     }

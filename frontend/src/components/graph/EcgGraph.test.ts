@@ -473,6 +473,117 @@ describe('EcgGraph', () => {
     // contract is limited to "a drag while in bad-data mode adds a mark".
   })
 
+  // uPlot fixes its default axis size (left/bottom gutters) at exactly 50
+  // CSS px regardless of any text measurement (jsdom stubs `getContext('2d')`
+  // with no `measureText` at all — see test-setup.ts — so relying on real
+  // font metrics isn't an option here), and sets `.u-over`'s inline
+  // `style.width` to the resulting plot-area width on every render. Reading
+  // that back gives the exact pixel width uPlot is using to map screen
+  // positions to data values for *this* render, without hand-deriving the
+  // axis-gutter math — so a click's `clientX` can be computed to land on an
+  // exact data value (e.g. a beat's `ts`) deterministically, rather than by
+  // guessing at a plausible-looking pixel offset.
+  function plotWidthPx(over: HTMLDivElement): number {
+    return parseFloat(over.style.width)
+  }
+
+  // The full-mount x-domain uPlot auto-ranges to is exactly [xs[0], xs[last]]
+  // of the merged (channel ∪ beat-ts) x-array with no padding, whenever that
+  // array has more than one distinct value (see uPlot's `autoScaleX`) — so
+  // for a beat whose `ts` already lands inside the channel's own x-range,
+  // the domain is just the channel x fixture's own [min, max].
+  function clientXForVal(over: HTMLDivElement, val: number, domainMin: number, domainMax: number): number {
+    return plotWidthPx(over) * ((val - domainMin) / (domainMax - domainMin))
+  }
+
+  it('fires onBeatSelect with the full beat record on a plain click (no movement) on its marker position', async () => {
+    const targetBeat = beat({
+      ts: 5,
+      r_amplitude: 6,
+      rr: 0.9,
+      hr: 66,
+      bradycardia_absolute: true,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: true,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    })
+    const fetchMock = routedFetch({ beats: () => beatsWindowResponse({ beats: [targetBeat], count: 1 }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onBeatSelect = vi.fn()
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', onBeatSelect } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    const clickX = clientXForVal(over, 5, 0, 9)
+
+    over.dispatchEvent(
+      new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }),
+    )
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+
+    expect(onBeatSelect).toHaveBeenCalledTimes(1)
+    expect(onBeatSelect).toHaveBeenCalledWith(targetBeat)
+  })
+
+  it('does not fire onBeatSelect on a drag beyond the click threshold, and still pans/re-fetches as before', async () => {
+    const targetBeat = beat({ ts: 5, r_amplitude: 6, any_arrhythmia: true })
+    const fetchMock = routedFetch({ beats: () => beatsWindowResponse({ beats: [targetBeat], count: 1 }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onBeatSelect = vi.fn()
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', onBeatSelect } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+
+    vi.useFakeTimers()
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 300, clientY: 100, bubbles: true }))
+
+    await vi.advanceTimersByTimeAsync(150)
+
+    expect(onBeatSelect).not.toHaveBeenCalled()
+    // Reusing the existing pan test's assertion shape: the debounced
+    // re-fetch (channel + beats) still fires for the shifted range.
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('does not fire onBeatSelect on a click far from any beat marker', async () => {
+    const targetBeat = beat({ ts: 5, r_amplitude: 6, any_arrhythmia: true })
+    const fetchMock = routedFetch({ beats: () => beatsWindowResponse({ beats: [targetBeat], count: 1 }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onBeatSelect = vi.fn()
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', onBeatSelect } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    // val=0 is 5 data-units away from the beat at ts=5 — far outside the
+    // small pixel hit-tolerance at this plot width.
+    const clickX = clientXForVal(over, 0, 0, 9)
+
+    over.dispatchEvent(
+      new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }),
+    )
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+
+    expect(onBeatSelect).not.toHaveBeenCalled()
+  })
+
   it('removes a bad-data mark via deleteBadData when the mark is clicked', async () => {
     const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
     const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })

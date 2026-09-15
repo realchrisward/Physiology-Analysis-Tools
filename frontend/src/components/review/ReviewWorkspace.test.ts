@@ -7,6 +7,24 @@ afterEach(() => {
   delete (window as any).api
 })
 
+// jsdom performs no layout, so every element's real `clientWidth` is 0
+// unless overridden — same technique as EcgGraph.test.ts's own helper of the
+// same name (needed here too, for the click-to-select test below, since a
+// zero-width chart has no meaningful pixel-to-data mapping to click into).
+function withMockedClientWidth<T>(width: number, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: width })
+  try {
+    return fn()
+  } finally {
+    if (original) {
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
+    } else {
+      delete (HTMLElement.prototype as any).clientWidth
+    }
+  }
+}
+
 function beatsOkResponse(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     ok: true,
@@ -233,5 +251,66 @@ describe('ReviewWorkspace', () => {
     // for channel 2 should have fired.
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
     expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 1)
+  })
+
+  // Confirms EcgGraph's `onBeatSelect` prop is actually wired to
+  // `selectedBeat` here (Task 1's contract), not just declared. See
+  // EcgGraph.test.ts for thorough click-vs-drag/hit-testing coverage of the
+  // click gesture itself — this only needs to prove ReviewWorkspace reacts
+  // to a call, so it drives the click through the same real gesture rather
+  // than reaching into EcgGraph's internals.
+  it('shows the selected beat after a click on its marker, via the wired onBeatSelect prop', async () => {
+    const targetBeat = {
+      // channelWindowOkResponse's x fixture is [0, 1, 2] — placing the beat
+      // at the domain midpoint keeps the click math simple (see below).
+      ts: 1,
+      rr: 0.8,
+      r_amplitude: 6,
+      hr: 75,
+      bradycardia_absolute: false,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: false,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    }
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/beats/window')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+        })
+      }
+      return Promise.resolve(beatsOkResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+    })
+
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+    expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    // uPlot auto-ranges the x-domain to exactly the merged data's [min, max]
+    // with no padding (see EcgGraph.test.ts's `plotWidthPx`/`clientXForVal`
+    // comment for the full reasoning) — here that's exactly [0, 2], matching
+    // channelWindowOkResponse's x fixture, so this maps a click precisely
+    // onto the target beat's ts=1 (the domain midpoint).
+    const plotWidthPx = parseFloat(over.style.width)
+    const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('t=1s, HR 75')
+    })
   })
 })
