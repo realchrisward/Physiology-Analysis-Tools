@@ -17,7 +17,9 @@ OPTIONAL_COLUMNS = [
 
 
 @router.get("/window", response_model=BeatWindowResult)
-def get_beat_window(path: str, start: float, end: float, request: Request) -> BeatWindowResult:
+def get_beat_window(
+    path: str, start: float, end: float, request: Request
+) -> BeatWindowResult:
     df = request.app.state.beat_cache.get(path)
     if df is None:
         return BeatWindowResult(
