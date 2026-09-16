@@ -70,7 +70,22 @@
     path,
     channel,
     onBeatSelect,
-  }: { path: string; channel: string; onBeatSelect?: (beat: WindowBeat) => void } = $props()
+    beatsRefreshToken = 0,
+  }: {
+    path: string
+    channel: string
+    onBeatSelect?: (beat: WindowBeat) => void
+    // Bumped by a parent (ReviewWorkspace, after a successful arrhythmia
+    // re-run) to request a beats-ONLY re-fetch at the currently visible
+    // range — no channel-window re-fetch, no viewport change. See the
+    // `$effect` below (mirrors the `containerWidth`/`previousWidth`
+    // skip-the-initial-run pattern already used in this file) and
+    // `refreshBeatsOnly`. Plain increment rather than a boolean/event so a
+    // rapid second re-run request while the graph is still applying the
+    // first one is never silently swallowed — each distinct value the
+    // effect observes triggers its own re-fetch.
+    beatsRefreshToken?: number
+  } = $props()
 
   const DEBOUNCE_MS = 150
   const HEIGHT = 320
@@ -184,6 +199,20 @@
   // `chart`/`fullExtent` above, it's only ever read from an event handler,
   // never from the template.
   let lastBeats: WindowBeat[] = []
+  // The raw channel {x, y} from the most recent successful `loadWindow` call
+  // (set in `fetchMergedWindow` below), retained for the same reason as
+  // `lastBeats` above but for `refreshBeatsOnly`'s benefit: a beats-only
+  // re-fetch (triggered by `beatsRefreshToken`, see its `$effect` below)
+  // must re-merge fresh beats against the waveform data currently on
+  // screen without re-fetching `/channels/window` at all — this is exactly
+  // that waveform data, always in sync with what's rendered since it's only
+  // ever updated alongside the `chart.setData`/construction calls that
+  // display it.
+  let lastChannelWindow: { x: number[]; y: number[] } | undefined
+  // Set once the first `beatsRefreshToken` effect run has captured its
+  // starting value — see that `$effect` for why the first run must be a
+  // no-op (same discipline as `previousWidth` above).
+  let previousBeatsRefreshToken: number | undefined
 
   function resolutionFor(width: number): number {
     return Math.max(1, Math.round(width))
@@ -222,8 +251,26 @@
   ): Promise<{ channel: { x: number[]; y: number[] }; merged: BeatSeriesData } | null> {
     const channelData = await loadWindow(start, end, width)
     if (!channelData) return null
+    lastChannelWindow = channelData
     const beats = await loadBeats(start, end)
     return { channel: channelData, merged: buildBeatAlignedData(channelData.x, channelData.y, beats) }
+  }
+
+  // Re-fetches ONLY `/beats/window` for the currently visible x-scale range
+  // and re-merges it against `lastChannelWindow` (the waveform data already
+  // on screen) — deliberately not `fetchMergedWindow`/`refetch`, which also
+  // re-fetch `/channels/window` and are used by the pan/zoom/reset-view
+  // paths. Triggered by `beatsRefreshToken` (see its `$effect` below) after
+  // e.g. a successful arrhythmia re-run, where only the beats' arrhythmia
+  // flags have changed, not the waveform or the technician's current
+  // pan/zoom position.
+  async function refreshBeatsOnly() {
+    if (!chart || !lastChannelWindow) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    const beats = await loadBeats(min, max)
+    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats)
+    chart.setData([merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY], false)
   }
 
   async function refetch(min: number, max: number) {
@@ -497,6 +544,24 @@
     chart.setSize({ width, height: HEIGHT })
     const { min, max } = chart.scales.x
     if (min != null && max != null) scheduleRefetch(min, max)
+  })
+
+  // Mirrors the `containerWidth`/`previousWidth` effect above: the binding
+  // this reads (`beatsRefreshToken`, a prop) fires once synchronously on
+  // mount with its starting value — recorded via `previousBeatsRefreshToken`
+  // but not treated as a refresh request, since the initial chart
+  // construction in `onMount` already fetched beats for that value. Only a
+  // later, *different* value (the parent incrementing it) triggers
+  // `refreshBeatsOnly`.
+  $effect(() => {
+    const token = beatsRefreshToken
+    if (previousBeatsRefreshToken === undefined) {
+      previousBeatsRefreshToken = token
+      return
+    }
+    if (token === previousBeatsRefreshToken) return
+    previousBeatsRefreshToken = token
+    void refreshBeatsOnly()
   })
 
   function handleResetView() {

@@ -2,6 +2,7 @@
   import { detectBeats } from '../../lib/api/beats'
   import { persistBeats } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
+  import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
@@ -110,6 +111,23 @@
   // `persistPending`/`persistError`.
   let persistRequestId = 0
 
+  // Bumped on every successful arrhythmia re-run (see `ArrhythmiaControls`'s
+  // `onComplete` below) and passed straight through as EcgGraph's own
+  // `beatsRefreshToken` prop. EcgGraph watches it via an `$effect` (mirroring
+  // the same "record the previous value, skip the first/no-op run" shape as
+  // its own `containerWidth` effect) and, on any actual change, re-fetches
+  // ONLY `/beats/window` for its current visible range and re-merges it
+  // against the waveform data already on screen — no channel-data re-fetch,
+  // no viewport reset. A plain incrementing counter (rather than a boolean
+  // or a one-shot callback prop) is used so EcgGraph's effect can tell "the
+  // parent is asking again" apart from "nothing changed" without needing any
+  // acknowledgement back from EcgGraph.
+  let beatsRefreshToken = $state(0)
+
+  function refreshGraphBeats() {
+    beatsRefreshToken += 1
+  }
+
   // Whenever `activeChannel` actually advances (see its declaration above),
   // any selection/persist state from the previous channel is stale and must
   // be cleared — `selected-beat-panel` is a SIBLING of the `{#key
@@ -203,6 +221,8 @@
     {/each}
   </select>
 
+  <ArrhythmiaControls path={path} channel={activeChannel} onComplete={refreshGraphBeats} />
+
   {#if detection.status === 'pending'}
     <div data-testid="detection-summary">detecting beats for {selectedChannel}…</div>
   {:else if detection.status === 'ok'}
@@ -225,7 +245,7 @@
          is the simplest way to get it to re-init for a new channel's
          data. -->
     {#key activeChannel}
-      <EcgGraph {path} channel={activeChannel} onBeatSelect={handleBeatSelect} />
+      <EcgGraph {path} channel={activeChannel} onBeatSelect={handleBeatSelect} {beatsRefreshToken} />
     {/key}
   </div>
 

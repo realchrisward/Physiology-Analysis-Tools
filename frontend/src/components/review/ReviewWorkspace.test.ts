@@ -815,4 +815,73 @@ describe('ReviewWorkspace', () => {
       }
     })
   })
+
+  // Task 3: arrhythmia re-run controls. ArrhythmiaControls' own behavior
+  // (method buttons, progress feedback, success/failure handling) is covered
+  // in ArrhythmiaControls.test.ts — this only proves the two things that are
+  // ReviewWorkspace's own responsibility: it's mounted against the current
+  // `activeChannel`, and a successful run triggers EcgGraph's beats-ONLY
+  // refresh (a fresh `/beats/window` call) without re-fetching
+  // `/channels/window` or resetting the viewport.
+  describe('arrhythmia re-run wiring', () => {
+    function mockFetchForArrhythmiaRerun() {
+      return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [], count: 0, error: null }),
+          })
+        }
+        if (url.includes('/arrhythmia/detect')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              status: 'ok',
+              beats: [],
+              count: 5,
+              any_arrhythmia_count: 1,
+              elapsed_seconds: 0.2,
+              error: null,
+            }),
+          })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+    }
+
+    it('mounts ArrhythmiaControls against the active channel and, on a successful run, refreshes only the graph beat markers', async () => {
+      const fetchMock = mockFetchForArrhythmiaRerun()
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      // Initial mount: /channels/window + /beats/window.
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+      await fireEvent.click(screen.getByTestId('run-heuristic-button'))
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/arrhythmia/detect',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1', method: 'heuristic' }),
+          }),
+        )
+      })
+
+      // The successful run's onComplete bumps EcgGraph's `beatsRefreshToken`
+      // prop, which re-fetches ONLY `/beats/window` at the current visible
+      // range — no second `/channels/window` call (that would mean the
+      // waveform/viewport was needlessly reset).
+      await waitFor(() => {
+        const calledPaths = fetchMock.mock.calls.map((call) => new URL(String(call[0])).pathname)
+        expect(calledPaths.filter((p) => p === '/beats/window')).toHaveLength(2)
+        expect(calledPaths.filter((p) => p === '/channels/window')).toHaveLength(1)
+      })
+    })
+  })
 })
