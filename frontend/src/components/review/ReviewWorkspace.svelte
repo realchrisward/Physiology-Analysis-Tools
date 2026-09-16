@@ -84,15 +84,37 @@
   // `BeatCategoryPanel`'s own mount condition) achieves that structurally,
   // with no need for `BeatCategoryPanel` to know this gate exists.
   //
-  // Tracked per-channel (not just a single flag) because a technician can
-  // switch channels mid-session via the select above, and `persistBeats`
-  // only covers whichever channel it was called for.
-  let persistedChannels: Set<string> = $state(new Set())
+  // Tracked as a SINGLE last-persisted channel, not a per-channel set:
+  // `POST /files/beats` → the backend's `db.replace_beats()` does a
+  // `DELETE FROM beats WHERE file_id=?` (scoped only to the file — there is
+  // no `channel` column on the `beats` table at all) and then reinserts, for
+  // ONE channel at a time. So persisting channel B after channel A wipes
+  // out channel A's persisted rows; the backend can only ever have ONE
+  // channel's beats persisted at once. `null` means nothing has been
+  // persisted yet this session.
+  let lastPersistedChannel: string | null = $state(null)
   let persistPending: boolean = $state(false)
   let persistError: string | null = $state(null)
 
+  // Whenever `activeChannel` actually advances (see its declaration above),
+  // any selection/persist state from the previous channel is stale and must
+  // be cleared — `selected-beat-panel` is a SIBLING of the `{#key
+  // activeChannel}`-keyed <EcgGraph>, not nested inside it, so switching
+  // channels does not otherwise remount/reset it. Without this, switching
+  // channels via the <select> (with no new beat click yet) would leave
+  // `BeatCategoryPanel` mounted showing the previous channel's beat as if it
+  // belonged to the new one. `lastPersistedChannel` is deliberately NOT
+  // reset here — it tracks backend truth (which channel, if any, is
+  // actually persisted), independent of what's currently selected in the UI.
+  $effect(() => {
+    activeChannel
+    selectedBeat = null
+    persistPending = false
+    persistError = null
+  })
+
   async function ensureChannelPersisted(channel: string) {
-    if (persistedChannels.has(channel)) return
+    if (lastPersistedChannel === channel) return
 
     persistPending = true
     persistError = null
@@ -100,7 +122,7 @@
     persistPending = false
 
     if (result.status === 'ok' && !result.error) {
-      persistedChannels = new Set(persistedChannels).add(channel)
+      lastPersistedChannel = channel
     } else {
       persistError = result.error ?? 'Failed to prepare review data'
     }
@@ -108,7 +130,7 @@
 
   function handleBeatSelect(beat: WindowBeat) {
     selectedBeat = beat
-    if (!persistedChannels.has(activeChannel)) {
+    if (lastPersistedChannel !== activeChannel) {
       void ensureChannelPersisted(activeChannel)
     }
   }
@@ -195,7 +217,7 @@
       <p data-testid="selected-beat-summary">No beat selected</p>
     {:else if persistPending}
       <p data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
-    {:else if persistError && !persistedChannels.has(activeChannel)}
+    {:else if persistError && lastPersistedChannel !== activeChannel}
       <div data-testid="persist-error">
         <p>Could not prepare review data: {persistError}</p>
         <button data-testid="persist-retry-button" onclick={() => ensureChannelPersisted(activeChannel)}>

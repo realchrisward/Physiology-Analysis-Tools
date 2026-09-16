@@ -439,4 +439,203 @@ describe('ReviewWorkspace', () => {
       expect(screen.queryByTestId('persist-error')).not.toBeInTheDocument()
     })
   })
+
+  // Regression coverage for two compounding bugs found in review of Task 2
+  // (commit 15648ed): (1) `selected-beat-panel` is a SIBLING of the
+  // `{#key activeChannel}`-keyed <EcgGraph>, not nested inside it, so a
+  // channel switch alone didn't clear `selectedBeat`/`persistPending`/
+  // `persistError` — the category panel kept showing the previous channel's
+  // beat as if it belonged to the new one. (2) `POST /files/beats` →
+  // `db.replace_beats()` deletes ALL of a file's persisted beat rows (no
+  // `channel` column exists) before reinserting for one channel — so the
+  // backend can only ever have ONE channel's beats persisted at a time, and
+  // a per-channel `Set` tracking "ever persisted" was wrong: switching back
+  // to an earlier channel must trigger a fresh persist, not skip it.
+  describe('channel-switch resets stale selection and re-persist tracking', () => {
+    const beatOnChannel1 = {
+      ts: 1,
+      rr: 0.8,
+      r_amplitude: 6,
+      hr: 75,
+      bradycardia_absolute: false,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: false,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    }
+    const beatOnChannel2 = { ...beatOnChannel1, hr: 90 }
+
+    // Clicks the beat marker placed at the domain midpoint by
+    // channelWindowOkResponse's [0, 1, 2] x fixture — same math as the
+    // click-to-select tests above. Unlike the single-mount tests elsewhere
+    // in this file, this describe block's tests remount EcgGraph (via
+    // channel switches) and click again afterwards — `data-channel` on the
+    // outer wrapper updates from the `channel` prop immediately, but the
+    // uPlot chart (and its `.u-over` hit-testing layer) is only constructed
+    // once EcgGraph's onMount fetches resolve, slightly later — so this
+    // waits for `.u-over` to actually exist rather than assuming it does.
+    async function clickBeatMarker() {
+      const over = await waitFor(() => {
+        const el = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement | null
+        if (!el || !el.style.width) throw new Error('chart not ready yet')
+        return el
+      })
+      const plotWidthPx = parseFloat(over.style.width)
+      const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+      over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+      document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+    }
+
+    // `/beats/window` (GET) carries no `channel` — `getBeatsWindow` only
+    // takes path/start/end (see `lib/api/windowing.ts`); the backend's
+    // `beat_cache[path]` is keyed only by path, holding whichever channel's
+    // `/beats/detect` last completed. So this mock tracks that server-side
+    // fact itself: `/beats/detect`'s request body tells us which channel was
+    // just (re-)detected, and `/beats/window` replies with that channel's
+    // beat — mirroring the real backend, not the frontend's request shape.
+    function mockFetchForChannelSwitch() {
+      let lastDetectedChannel = 'channel 1'
+      return vi.fn().mockImplementation((url: string, init?: { body?: string }) => {
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/detect')) {
+          const channel = init?.body ? JSON.parse(init.body).channel : undefined
+          if (channel) lastDetectedChannel = channel
+          return Promise.resolve(beatsOkResponse())
+        }
+        if (url.includes('/beats/window')) {
+          const beat = lastDetectedChannel === 'channel 2' ? beatOnChannel2 : beatOnChannel1
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [beat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+    }
+
+    it('clears the stale selected beat/category panel when the channel changes with no new click', async () => {
+      const fetchMock = mockFetchForChannelSwitch()
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+      await clickBeatMarker()
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/files/beats',
+          expect.objectContaining({
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+          }),
+        )
+      })
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      await fireEvent.change(select, { target: { value: 'channel 2' } })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      })
+
+      // The stale channel-1 beat/category panel must be gone — back to the
+      // "no beat selected" state — not still showing channel 1's beat.
+      expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
+      expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
+    })
+
+    it('re-persists a channel that was already persisted earlier, once a different channel has been persisted since', async () => {
+      const fetchMock = mockFetchForChannelSwitch()
+      vi.stubGlobal('fetch', fetchMock)
+
+      // This test clicks the beat marker across THREE separate EcgGraph
+      // mounts (channel 1, then channel 2, then channel 1 again) — unlike
+      // the single-mount tests elsewhere in this file, `withMockedClientWidth`
+      // scoped to just the initial `render()` call isn't enough, since each
+      // channel switch remounts EcgGraph (and bakes in jsdom's real,
+      // unmocked `clientWidth` of 0) asynchronously, well after that
+      // synchronous scope has already restored the original descriptor. So
+      // the override is held for this test's entire body instead.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+        // Select on channel 1 — persists for channel 1.
+        await clickBeatMarker()
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }) }),
+          )
+        })
+        await waitFor(() => expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument())
+
+        // Switch to channel 2, select — persists for channel 2 (destroying
+        // channel 1's persisted rows on the real backend).
+        const select = screen.getByTestId('channel-select') as HTMLSelectElement
+        await fireEvent.change(select, { target: { value: 'channel 2' } })
+        await waitFor(() => {
+          expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+        })
+
+        await clickBeatMarker()
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }) }),
+          )
+        })
+        await waitFor(() => expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument())
+
+        // Switch BACK to channel 1 and select again — must persist AGAIN for
+        // channel 1, proving the stale "already persisted" assumption is gone.
+        await fireEvent.change(select, { target: { value: 'channel 1' } })
+        await waitFor(() => {
+          expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+        })
+
+        const persistCallsBeforeReselect = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/files/beats'),
+        ).length
+
+        await clickBeatMarker()
+        await waitFor(() => {
+          const persistCallsAfterReselect = fetchMock.mock.calls.filter((call) =>
+            String(call[0]).includes('/files/beats'),
+          ).length
+          expect(persistCallsAfterReselect).toBe(persistCallsBeforeReselect + 1)
+        })
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }) }),
+          )
+        })
+        await waitFor(() => expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument())
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
+    })
+  })
 })
