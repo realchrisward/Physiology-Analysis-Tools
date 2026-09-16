@@ -9,6 +9,11 @@
  * plus semantic status colors for confirmed/rejected/flagged review states.
  * Values were chosen for WCAG AA contrast against their paired background,
  * since this tool is used for extended review sessions.
+ *
+ * Theming: `:root` below is the light palette. `prefers-color-scheme: dark`
+ * applies the dark palette automatically UNLESS an explicit `data-theme`
+ * (light/dark/bw — see lib/stores/theme.svelte.ts) is set on <html>, in
+ * which case that explicit choice always wins over the OS preference.
  */
 
 :root {
@@ -27,6 +32,10 @@
   --color-success: #15803d;
   --color-warning: #b45309;
   --color-danger: #b91c1c;
+
+  /* Color: ECG graph */
+  --color-waveform: #15803d;
+  --color-graph-grid: rgba(211, 218, 225, 0.6);
 
   /* Spacing scale */
   --space-1: 4px;
@@ -47,30 +56,114 @@
   /* Radii */
   --radius-sm: 4px;
   --radius-md: 8px;
+  --radius-lg: 12px;
 
   /* Shadows */
   --shadow-sm: 0 1px 3px rgba(30, 41, 59, 0.12), 0 1px 2px rgba(30, 41, 59, 0.08);
+  --shadow-md: 0 4px 12px rgba(30, 41, 59, 0.14), 0 2px 4px rgba(30, 41, 59, 0.08);
+  --shadow-lg: 0 16px 40px rgba(30, 41, 59, 0.22), 0 4px 12px rgba(30, 41, 59, 0.1);
+
+  /* Layout */
+  --sidebar-width: 240px;
+  --sidebar-width-collapsed: 56px;
+  --topbar-height: 56px;
+  --transition-fast: 150ms ease;
+
+  /* Color: raised surfaces / overlays */
+  --color-surface-raised: #ffffff;
+  --color-surface-hover: #eef1f5;
+  --color-accent-soft: rgba(37, 99, 235, 0.1);
+  --color-overlay: rgba(15, 23, 42, 0.5);
 }
 
+/* Dark palette: applied automatically by OS preference, unless an explicit
+   'light' or 'bw' data-theme overrides it (see the :not() guards below). */
 @media (prefers-color-scheme: dark) {
-  :root {
-    /* Color: neutrals (slate/blue-gray scale) */
+  :root:not([data-theme='light']):not([data-theme='bw']) {
     --color-bg: #0f172a;
     --color-surface: #1a2436;
     --color-border: #334155;
     --color-text: #e2e8f0;
     --color-text-muted: #94a3b8;
 
-    /* Color: accent (interactive elements) */
     --color-accent: #60a5fa;
     --color-accent-hover: #93c5fd;
 
-    /* Color: semantic status */
     --color-success: #4ade80;
     --color-warning: #fbbf24;
     --color-danger: #f87171;
 
-    /* Shadows */
+    --color-waveform: #4ade80;
+    --color-graph-grid: rgba(51, 65, 85, 0.7);
+
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+
+    --color-surface-raised: #202b40;
+    --color-surface-hover: #26324a;
+    --color-accent-soft: rgba(96, 165, 250, 0.16);
+    --color-overlay: rgba(2, 6, 16, 0.65);
   }
+}
+
+/* Explicit 'dark' choice — wins over the OS preference either way. Same
+   values as the media-query block above. */
+:root[data-theme='dark'] {
+  --color-bg: #0f172a;
+  --color-surface: #1a2436;
+  --color-border: #334155;
+  --color-text: #e2e8f0;
+  --color-text-muted: #94a3b8;
+
+  --color-accent: #60a5fa;
+  --color-accent-hover: #93c5fd;
+
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+
+  --color-waveform: #4ade80;
+  --color-graph-grid: rgba(51, 65, 85, 0.7);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+
+  --color-surface-raised: #202b40;
+  --color-surface-hover: #26324a;
+  --color-accent-soft: rgba(96, 165, 250, 0.16);
+  --color-overlay: rgba(2, 6, 16, 0.65);
+}
+
+/* Explicit high-contrast black & white mode — wins over both light and dark,
+   and over the OS preference. Status/marker colors collapse to distinct
+   grayscale lightness levels (rather than a single flat black) so they stay
+   distinguishable from each other without relying on hue at all; every
+   state is also still labeled in text, never color-only. */
+:root[data-theme='bw'] {
+  --color-bg: #ffffff;
+  --color-surface: #ffffff;
+  --color-border: #000000;
+  --color-text: #000000;
+  --color-text-muted: #4d4d4d;
+
+  --color-accent: #000000;
+  --color-accent-hover: #333333;
+
+  --color-success: #000000;
+  --color-warning: #4d4d4d;
+  --color-danger: #000000;
+
+  --color-waveform: #262626;
+  --color-graph-grid: rgba(0, 0, 0, 0.25);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.35);
+
+  --color-surface-raised: #ffffff;
+  --color-surface-hover: #e5e5e5;
+  --color-accent-soft: #e5e5e5;
+  --color-overlay: rgba(0, 0, 0, 0.6);
 }

@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { resetForTesting as resetTheme } from '../../lib/stores/theme.svelte'
 import SettingsDialog from './SettingsDialog.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
+  resetTheme()
 })
 
 // Real, already-verified defaults from BACKEND_OVERVIEW.md — used so this
@@ -153,5 +155,65 @@ describe('SettingsDialog', () => {
     await waitFor(() => {
       expect(onClose).toHaveBeenCalled()
     })
+  })
+
+  it('dismisses via the close (×) button', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    const onClose = vi.fn()
+
+    render(SettingsDialog, { props: { onClose } })
+
+    await waitFor(() => {
+      expect((screen.getByTestId('beat-min-rr-input') as HTMLInputElement).value).toBe('60')
+    })
+
+    await fireEvent.click(screen.getByTestId('close-settings-button'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('dismisses when the backdrop itself is clicked, but not when the card is clicked', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    const onClose = vi.fn()
+
+    render(SettingsDialog, { props: { onClose } })
+
+    await waitFor(() => {
+      expect((screen.getByTestId('beat-min-rr-input') as HTMLInputElement).value).toBe('60')
+    })
+
+    await fireEvent.click(screen.getByTestId('settings-dialog'))
+    expect(onClose).not.toHaveBeenCalled()
+
+    await fireEvent.click(screen.getByTestId('settings-backdrop'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the Appearance theme options and applies a selection immediately', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    const { themeState } = await import('../../lib/stores/theme.svelte')
+
+    render(SettingsDialog, { props: { onClose: vi.fn() } })
+
+    expect(screen.getByTestId('theme-system-button').getAttribute('aria-pressed')).toBe('true')
+
+    await fireEvent.click(screen.getByTestId('theme-bw-button'))
+
+    expect(themeState.mode).toBe('bw')
+    expect(screen.getByTestId('theme-bw-button').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('theme-system-button').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('dismisses on Escape', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    const onClose = vi.fn()
+
+    render(SettingsDialog, { props: { onClose } })
+
+    await waitFor(() => {
+      expect((screen.getByTestId('beat-min-rr-input') as HTMLInputElement).value).toBe('60')
+    })
+
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

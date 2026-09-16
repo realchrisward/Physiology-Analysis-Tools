@@ -62,8 +62,11 @@
   }
 </script>
 
-<div data-testid="arrhythmia-controls">
+<div class="arrhythmia-controls" data-testid="arrhythmia-controls">
+  <span class="arrhythmia-label text-muted">Arrhythmia detection</span>
   <button
+    type="button"
+    class="btn btn-sm"
     data-testid="run-heuristic-button"
     disabled={runState === 'running' || disabled}
     onclick={() => run('heuristic')}
@@ -71,6 +74,8 @@
     Run heuristic
   </button>
   <button
+    type="button"
+    class="btn btn-sm"
     data-testid="run-unsupervised-button"
     disabled={runState === 'running' || disabled}
     onclick={() => run('unsupervised')}
@@ -78,6 +83,8 @@
     Run unsupervised
   </button>
   <button
+    type="button"
+    class="btn btn-sm"
     data-testid="run-both-button"
     disabled={runState === 'running' || disabled}
     onclick={() => run('both')}
@@ -86,10 +93,27 @@
   </button>
 
   {#if runState === 'running'}
-    <span data-testid="arrhythmia-running">Running arrhythmia detection…</span>
+    <span class="text-muted" data-testid="arrhythmia-running">Running arrhythmia detection…</span>
   {/if}
 
   {#if error}
-    <p data-testid="arrhythmia-error">Arrhythmia detection failed: {error}</p>
+    <p class="text-danger" data-testid="arrhythmia-error">Arrhythmia detection failed: {error}</p>
   {/if}
 </div>
+
+<style>
+  .arrhythmia-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .arrhythmia-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: var(--space-1);
+  }
+</style>

@@ -64,6 +64,8 @@
   import 'uplot/dist/uPlot.min.css'
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
   import { addBadData, deleteBadData } from '../../lib/api/persistence'
+  import { themeState } from '../../lib/stores/theme.svelte'
+  import Icon from '../shared/Icon.svelte'
   import type { BadDataMark } from '../../lib/api/types'
 
   let {
@@ -100,7 +102,26 @@
 
   const DEBOUNCE_MS = 150
   const HEIGHT = 320
+  const EXPANDED_HEIGHT = 600
   const ZOOM_FACTOR = 0.75
+  // A pan/zoom re-fetch loads a window PAD_FACTOR times wider on EACH side
+  // than what's actually visible (so 1 = 3x the visible width total), at a
+  // matching higher point resolution. Most everyday panning then requires
+  // no fetch at all — the data is already loaded, just outside the
+  // currently-visible slice of the x-scale, and simply comes into view as
+  // uPlot's own scale window moves; only a pan/zoom that reaches past this
+  // buffer (or zooms in deep enough that the buffer's point density is now
+  // too coarse) triggers a real fetch. See `needsRefetch`/`maybeBufferAhead`.
+  const PAD_FACTOR = 1
+  // Refetch once the visible range gets within this fraction of the loaded
+  // buffer's edge, rather than waiting until it's exactly exceeded — a
+  // small safety margin so the buffer extends slightly before the
+  // technician can actually see its edge.
+  const BUFFER_MARGIN_RATIO = 0.1
+  // Refetch (for resolution, not coverage) once the visible range has
+  // shrunk to less than this fraction of the width that was requested when
+  // the current buffer was loaded — i.e. "zoomed in more than 3x since".
+  const MIN_ZOOM_RATIO_BEFORE_REFETCH = 3
   // A `mousedown`→`mouseup` pair whose largest single-axis pixel
   // displacement stays under this is treated as a click rather than a pan
   // drag (see `handleDragStart`'s `onMove`/`onUp`) — 5px comfortably
@@ -116,13 +137,21 @@
   // the click's y/`r_amplitude` distance.
   const BEAT_HIT_TOLERANCE_PX = 8
 
-  // Marker series colors. Read from tokens.css's semantic custom properties
-  // where possible (falling back to their light-mode values — jsdom in
-  // tests never resolves custom properties via getComputedStyle, and this
-  // component doesn't attempt dark-mode-aware canvas colors, only DOM/CSS
-  // ones get that via the cascade). Canvas fillStyle needs a literal
-  // color, not a `var(...)` reference, hence resolving it up front here
-  // rather than passing a CSS variable string into uPlot's series config.
+  // Marker/axis/grid colors. Read from tokens.css's semantic custom
+  // properties (falling back to their light-mode values — jsdom in tests
+  // never resolves custom properties via getComputedStyle). Canvas
+  // fillStyle needs a literal color, not a `var(...)` reference, hence
+  // resolving via `cssVar` rather than passing a CSS variable string into
+  // uPlot's series config.
+  //
+  // Each color is wrapped in a zero-arg function rather than resolved once
+  // to a plain string constant — uPlot accepts a function for series
+  // stroke/fill and axis stroke/grid/ticks (re-evaluated on every redraw),
+  // so these stay live across a runtime theme change (light/dark/black &
+  // white — see lib/stores/theme.svelte.ts) instead of freezing whatever
+  // the OS/attribute happened to be at chart-construction time. The
+  // `$effect` below calls `chart.redraw()` whenever the theme changes so
+  // that re-evaluation actually happens.
   function cssVar(name: string, fallback: string): string {
     const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
     return value || fallback
@@ -130,9 +159,9 @@
   // Converts a `#rgb`/`#rrggbb` hex color to an `rgba(...)` string so an
   // alpha channel can be applied to it — canvas fillStyle needs a literal
   // RGB(A) triplet, not a bare hex string with alpha bolted on. tokens.css's
-  // `--color-text-muted` is always hex in both its light and dark values,
-  // so that's the only shape this needs to handle; anything else (e.g. a
-  // future non-hex token value) is returned unchanged rather than mangled.
+  // `--color-text-muted` is always hex in every theme, so that's the only
+  // shape this needs to handle; anything else is returned unchanged rather
+  // than mangled.
   function hexToRgba(hex: string, alpha: number): string {
     const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex)
     if (!match) return hex
@@ -148,22 +177,32 @@
     const b = parseInt(value.slice(4, 6), 16)
     return `rgba(${r}, ${g}, ${b}, ${alpha})`
   }
-  const ARRHYTHMIA_BEAT_COLOR = cssVar('--color-danger', '#b91c1c')
-  const NORMAL_BEAT_COLOR = cssVar('--color-accent', '#2563eb')
+  const waveformColor = () => cssVar('--color-waveform', '#15803d')
+  const arrhythmiaBeatColor = () => cssVar('--color-danger', '#b91c1c')
+  const normalBeatColor = () => cssVar('--color-accent', '#2563eb')
   // "Not yet evaluated" (any_arrhythmia: null) gets a dimmed treatment:
-  // whatever `--color-text-muted` actually resolves to for the active
-  // theme (light or dark), at reduced opacity — resolved the same
-  // `cssVar`-at-mount way as the other two marker colors above, rather than
-  // hardcoding the light-mode hex, so this doesn't render wrong from the
-  // very first paint on a machine already in dark mode.
-  const UNEVALUATED_BEAT_COLOR = hexToRgba(cssVar('--color-text-muted', '#5b6b7c'), 0.45)
+  // whatever `--color-text-muted` resolves to for the active theme, at
+  // reduced opacity.
+  const unevaluatedBeatColor = () => hexToRgba(cssVar('--color-text-muted', '#5b6b7c'), 0.45)
+  const axisColor = () => cssVar('--color-text-muted', '#5b6b7c')
+  const gridColor = () => cssVar('--color-graph-grid', 'rgba(211, 218, 225, 0.6)')
 
-  function markerSeriesConfig(color: string): uPlot.Series {
+  function markerSeriesConfig(colorFn: () => string): uPlot.Series {
     return {
       paths: () => null,
-      points: { show: true, size: 8, width: 1, stroke: color, fill: color },
+      points: { show: true, size: 8, width: 1, stroke: () => colorFn(), fill: () => colorFn() },
     }
   }
+
+  // True whenever the visible x-range differs from `fullExtent` (a pan,
+  // zoom, or Reset click having happened) — drives the Reset view button's
+  // highlighted state below, so it's obvious at a glance that the view has
+  // moved from the default and a reset is available.
+  let viewChanged: boolean = $state(false)
+  // Toggled by the maximize/minimize button in the toolbar; taller chart
+  // height for a closer look at dense waveforms. See the `$effect` below
+  // that applies it to the live chart.
+  let expanded: boolean = $state(false)
 
   let containerEl: HTMLDivElement | undefined = $state()
   // Tracked via `bind:clientWidth` below. Read directly off `containerEl`
@@ -230,6 +269,31 @@
   // no-op (same discipline as `previousWidth` above).
   let previousBeatsRefreshToken: number | undefined
 
+  // The x-range actually LOADED into the chart right now (normally wider
+  // than what's visible — see PAD_FACTOR below), and the visible-range
+  // width that was requested when it was fetched (used to detect "zoomed
+  // in enough since then that this buffer's point density is now too
+  // coarse"). `undefined` until the first fetch (mount) completes.
+  let loadedRange: { start: number; end: number; requestedWidth: number } | undefined
+  // Guards `maybeBufferAhead` against firing overlapping fetches for
+  // (approximately) the same range on consecutive mousemove ticks during a
+  // single fast drag — a request-frequency throttle, independent of
+  // `refetchRequestId` below (which guards response *correctness*, not
+  // frequency).
+  let bufferFetchInFlight = false
+  // Bumped at the start of every `refetch` call (pan/zoom/reset alike) and
+  // captured locally by each call; a resolution only applies itself if its
+  // captured id still matches the live counter. Without this, a
+  // pan/zoom's already-in-flight fetch (past its debounce, awaiting the
+  // network) that is still outstanding when Reset View is clicked would —
+  // having no way to be cancelled — resolve *after* the reset and clobber
+  // the just-reset chart with the stale pre-reset window's data, leaving
+  // the scale pinned to the full extent but the actual waveform occupying
+  // only the old, much narrower range within it (the reported "reset
+  // zooms out way too much" bug — fixed by a second click only because, by
+  // then, no older in-flight fetch remained to race it).
+  let refetchRequestId = 0
+
   function resolutionFor(width: number): number {
     return Math.max(1, Math.round(width))
   }
@@ -289,11 +353,44 @@
     chart.setData([merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY], false)
   }
 
-  async function refetch(min: number, max: number) {
-    const result = await fetchMergedWindow(min, max, containerWidth)
+  // True once the visible [min, max] range has moved close enough to (or
+  // past) the loaded buffer's edge, or has been zoomed in deep enough
+  // relative to the buffer's own resolution, that a real fetch is needed.
+  // `false` means the chart already has everything it needs to show this
+  // range correctly — no fetch, no loading delay.
+  function needsRefetch(min: number, max: number): boolean {
+    if (!loadedRange) return true
+    const visibleWidth = max - min
+    const margin = visibleWidth * BUFFER_MARGIN_RATIO
+    const withinBounds = min >= loadedRange.start + margin && max <= loadedRange.end - margin
+    if (!withinBounds) return true
+    return visibleWidth * MIN_ZOOM_RATIO_BEFORE_REFETCH < loadedRange.requestedWidth
+  }
+
+  // `pad: false` (used only by Reset View) fetches exactly [min, max] with
+  // no buffer — Reset already targets the maximal legitimate range, so
+  // padding it further would just over-request with no benefit. Every
+  // other caller pads (see PAD_FACTOR).
+  async function refetch(min: number, max: number, options: { pad?: boolean } = {}) {
+    const requestId = ++refetchRequestId
+    const usePad = options.pad ?? true
+    const requestedWidth = max - min
+    const pad = usePad ? requestedWidth * PAD_FACTOR : 0
+    const fetchStart = min - pad
+    const fetchEnd = max + pad
+    const fetchWidth = usePad ? containerWidth * (1 + 2 * PAD_FACTOR) : containerWidth
+
+    const result = await fetchMergedWindow(fetchStart, fetchEnd, fetchWidth)
+    // Superseded by a newer refetch (a later pan/zoom, or a Reset) dispatched
+    // while this one was in flight — see `refetchRequestId`'s own comment
+    // above for why applying a stale response here would be a real bug
+    // (the "reset zooms out too much until a second click" report).
+    if (requestId !== refetchRequestId) return
+
     if (result && chart) {
       const { merged } = result
       chart.setData([merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY], false)
+      loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth }
     }
   }
 
@@ -301,8 +398,29 @@
     if (debounceTimer !== undefined) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
       debounceTimer = undefined
+      if (!needsRefetch(min, max)) return // buffer already covers this range at an adequate resolution
       void refetch(min, max)
     }, DEBOUNCE_MS)
+  }
+
+  // Immediate (non-debounced) buffer-ahead fetch, called on every live-pan
+  // mousemove tick (and every wheel/button zoom step) in addition to the
+  // debounced `scheduleRefetch` above. Without this, a single long,
+  // continuous drag would show blank chart past the edge of whatever was
+  // loaded before the drag started, filling in only once the drag pauses
+  // or ends — `scheduleRefetch`'s 150ms debounce keeps getting reset by
+  // mousemove events that fire every ~16ms during continuous motion, so it
+  // alone never gets a chance to fire mid-drag. This fires the moment the
+  // buffer is actually exceeded, so the newly-visible area is (mostly)
+  // already loaded well before the technician can see its edge — throttled
+  // by `bufferFetchInFlight` so a fast drag doesn't fire overlapping
+  // requests for approximately the same range.
+  function maybeBufferAhead(min: number, max: number) {
+    if (bufferFetchInFlight || !needsRefetch(min, max)) return
+    bufferFetchInFlight = true
+    void refetch(min, max).finally(() => {
+      bufferFetchInFlight = false
+    })
   }
 
   async function submitBadDataMark(start: number, stop: number) {
@@ -439,7 +557,10 @@
       // path would otherwise leave desynced from the displayed data.
       if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) return
       const dx = unitsPerPx * (moveEvent.clientX - startX)
-      u.setScale('x', { min: scaleMin0 - dx, max: scaleMax0 - dx })
+      const newMin = scaleMin0 - dx
+      const newMax = scaleMax0 - dx
+      u.setScale('x', { min: newMin, max: newMax })
+      maybeBufferAhead(newMin, newMax)
     }
 
     function detach() {
@@ -454,6 +575,7 @@
         handleBeatClick(u, upEvent)
         return
       }
+      viewChanged = true
       const { min, max } = u.scales.x
       if (min != null && max != null) scheduleRefetch(min, max)
     }
@@ -484,8 +606,47 @@
     const newMin = xVal - leftPct * newRange
     const newMax = newMin + newRange
 
+    // Wheel/trackpad zoom deliberately stays on the debounced path only
+    // (no `maybeBufferAhead`) — a pinch/scroll gesture can fire many wheel
+    // events per second, and firing an immediate, non-debounced fetch on
+    // every one of them would spam the backend; `scheduleRefetch`'s 150ms
+    // debounce already coalesces a rapid burst into one request, which is
+    // imperceptible for a single zoom gesture.
+    viewChanged = true
     u.setScale('x', { min: newMin, max: newMax })
     scheduleRefetch(newMin, newMax)
+  }
+
+  // Zoom in/out buttons: same `ZOOM_FACTOR` step as the wheel handler
+  // above, centered on the current view's midpoint instead of a cursor
+  // position (there's no pointer position to center on for a button click).
+  // Same debounced-only reasoning as `handleWheel` above (no
+  // `maybeBufferAhead`) — a discrete click doesn't need it, and it would
+  // spam repeated clicks the same way a wheel burst would.
+  function zoomBy(factor: number) {
+    if (!chart) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    const mid = (min + max) / 2
+    const newRange = (max - min) * factor
+    const newMin = mid - newRange / 2
+    const newMax = mid + newRange / 2
+
+    viewChanged = true
+    chart.setScale('x', { min: newMin, max: newMax })
+    scheduleRefetch(newMin, newMax)
+  }
+
+  function handleZoomIn() {
+    zoomBy(ZOOM_FACTOR)
+  }
+
+  function handleZoomOut() {
+    zoomBy(1 / ZOOM_FACTOR)
+  }
+
+  function toggleExpanded() {
+    expanded = !expanded
   }
 
   function panZoomPlugin(): uPlot.Plugin {
@@ -509,18 +670,41 @@
       const { channel: data, merged } = result
 
       fullExtent = { start: data.x[0] ?? 0, end: data.x[data.x.length - 1] ?? 0 }
+      // The initial mount fetch already loads the whole file's extent (see
+      // the `0, Number.MAX_SAFE_INTEGER` call above) — seeding `loadedRange`
+      // from it means a subsequent zoom-in is immediately recognized as
+      // needing a real fetch (via `needsRefetch`'s resolution check) with
+      // no separate null-case special-casing needed.
+      loadedRange = { start: fullExtent.start, end: fullExtent.end, requestedWidth: fullExtent.end - fullExtent.start }
 
       chart = new uPlot(
         {
           width,
-          height: HEIGHT,
+          height: expanded ? EXPANDED_HEIGHT : HEIGHT,
           scales: { x: { time: false } },
+          // uPlot's own default cursor behavior is a click-drag rubber-band
+          // select that zooms into the selected x-range on mouseup
+          // (`cursor.drag` defaults to `{ setScale: true, x: true, dist: 0
+          // }`) — left enabled, it fires *in addition to* our own manual
+          // pan/click/bad-data-drag handlers below (attached directly to
+          // `u.over` in `panZoomPlugin`), competing with them: a plain pan
+          // drag would visibly pan live via our `setScale` calls, then get
+          // stomped by uPlot's own built-in zoom-to-selection on release,
+          // and Reset View's `setScale` could likewise be fought by
+          // leftover cursor/select state from a prior drag. Disabled
+          // entirely (`x`/`y`/`setScale` all false) since our own listeners
+          // are the sole intended source of scale changes.
+          cursor: { drag: { x: false, y: false, setScale: false } },
+          axes: [
+            { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
+            { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
+          ],
           series: [
             {},
-            { stroke: '#1a7f37', spanGaps: true },
-            markerSeriesConfig(ARRHYTHMIA_BEAT_COLOR),
-            markerSeriesConfig(NORMAL_BEAT_COLOR),
-            markerSeriesConfig(UNEVALUATED_BEAT_COLOR),
+            { stroke: () => waveformColor(), width: 1.5, spanGaps: true },
+            markerSeriesConfig(arrhythmiaBeatColor),
+            markerSeriesConfig(normalBeatColor),
+            markerSeriesConfig(unevaluatedBeatColor),
           ],
           plugins: [panZoomPlugin()],
         },
@@ -557,9 +741,30 @@
     previousWidth = width
 
     if (!chart) return
-    chart.setSize({ width, height: HEIGHT })
+    chart.setSize({ width, height: expanded ? EXPANDED_HEIGHT : HEIGHT })
     const { min, max } = chart.scales.x
     if (min != null && max != null) scheduleRefetch(min, max)
+  })
+
+  // Applies the maximize/minimize toggle to the live chart. Guarded on
+  // `chart` existing (it may still be mid-construction on the very first
+  // run, before `expanded` could plausibly have changed from its initial
+  // `false`) rather than needing to coordinate with the async onMount setup.
+  $effect(() => {
+    const isExpanded = expanded
+    if (!chart) return
+    chart.setSize({ width: containerWidth, height: isExpanded ? EXPANDED_HEIGHT : HEIGHT })
+  })
+
+  // Colors above are resolved via zero-arg functions specifically so this
+  // effect can make them live: a runtime theme change (see
+  // lib/stores/theme.svelte.ts) doesn't itself touch the chart, so without
+  // an explicit redraw the canvas would keep showing whatever colors were
+  // last resolved. `redraw(true, true)` forces uPlot to re-run every
+  // series/axis stroke/fill/grid function against the new computed styles.
+  $effect(() => {
+    themeState.mode
+    chart?.redraw(true, true)
   })
 
   // Mirrors the `containerWidth`/`previousWidth` effect above: the binding
@@ -586,8 +791,9 @@
       clearTimeout(debounceTimer)
       debounceTimer = undefined
     }
+    viewChanged = false
     chart.setScale('x', { min: fullExtent.start, max: fullExtent.end })
-    void refetch(fullExtent.start, fullExtent.end)
+    void refetch(fullExtent.start, fullExtent.end, { pad: false })
   }
 
   // Positions a bad-data mark within the marks bar as a percentage of the
@@ -615,22 +821,52 @@
   }
 </script>
 
-<div data-testid="ecg-graph" data-channel={channel}>
-  <button data-testid="reset-view-button" onclick={handleResetView}>Reset view</button>
-  <button
-    type="button"
-    data-testid="bad-data-mode-button"
-    aria-pressed={badDataMode}
-    onclick={toggleBadDataMode}
-  >
-    {badDataMode ? 'Exit bad data mode' : 'Mark bad data'}
-  </button>
+<div class="ecg-graph" data-testid="ecg-graph" data-channel={channel}>
+  <div class="ecg-graph-toolbar">
+    <button type="button" class="btn btn-sm" data-testid="zoom-in-button" title="Zoom in" onclick={handleZoomIn}>
+      <Icon name="zoom-in" size={14} />
+    </button>
+    <button type="button" class="btn btn-sm" data-testid="zoom-out-button" title="Zoom out" onclick={handleZoomOut}>
+      <Icon name="zoom-out" size={14} />
+    </button>
+    <button
+      type="button"
+      class="btn btn-sm"
+      class:btn-active={viewChanged}
+      data-testid="reset-view-button"
+      title="Reset view"
+      onclick={handleResetView}
+    >
+      <Icon name="refresh-cw" size={14} /> Reset view
+    </button>
+    <button
+      type="button"
+      class="btn btn-sm"
+      class:btn-active={badDataMode}
+      data-testid="bad-data-mode-button"
+      aria-pressed={badDataMode}
+      onclick={toggleBadDataMode}
+    >
+      <Icon name="crop" size={14} />
+      {badDataMode ? 'Exit bad data mode' : 'Mark bad data'}
+    </button>
+    <button
+      type="button"
+      class="btn btn-sm"
+      data-testid="expand-graph-button"
+      title={expanded ? 'Restore graph size' : 'Enlarge graph'}
+      aria-pressed={expanded}
+      onclick={toggleExpanded}
+    >
+      <Icon name={expanded ? 'minimize' : 'maximize'} size={14} />
+    </button>
+  </div>
 
   {#if error}
-    <div data-testid="ecg-graph-error">{error}</div>
+    <div class="banner banner-error" data-testid="ecg-graph-error">{error}</div>
   {/if}
 
-  <div data-testid="ecg-graph-container" bind:this={containerEl} bind:clientWidth={containerWidth}></div>
+  <div class="ecg-graph-container" data-testid="ecg-graph-container" bind:this={containerEl} bind:clientWidth={containerWidth}></div>
 
   <div data-testid="bad-data-marks-bar" class="bad-data-marks-bar">
     {#each badDataMarks as mark (mark.id)}
@@ -648,6 +884,28 @@
 </div>
 
 <style>
+  .ecg-graph {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .ecg-graph-toolbar {
+    display: flex;
+    gap: var(--space-2);
+    align-self: flex-end;
+  }
+
+  .btn-active {
+    background: var(--color-accent-soft, #eef1f5);
+    border-color: var(--color-accent, #2563eb);
+    color: var(--color-accent, #2563eb);
+  }
+
+  .ecg-graph-container {
+    width: 100%;
+  }
+
   .bad-data-marks-bar {
     position: relative;
     height: var(--space-3, 12px);

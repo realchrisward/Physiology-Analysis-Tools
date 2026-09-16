@@ -1,12 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { resetForTesting } from '../../lib/stores/eta'
+import { fileRegistry, resetForTesting as resetFileRegistry } from '../../lib/stores/fileRegistry.svelte'
+import { resetForTesting as resetImportQueue } from '../../lib/stores/importQueue.svelte'
+import { recentFiles, resetForTesting as resetRecentFiles } from '../../lib/stores/recentFiles.svelte'
+import { resetForTesting as resetEta } from '../../lib/stores/eta'
 import ImportScreen from './ImportScreen.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
-  resetForTesting()
+  resetEta()
+  resetFileRegistry()
+  resetImportQueue()
+  resetRecentFiles()
 })
 
 function importOkResponse(files: Array<{ path: string; filename: string; size: number; defaultChannel: string }>) {
@@ -46,31 +52,20 @@ function beatsOkResponse(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
+// The imported-file LIST rendering (file-row/review-button/eta-badge) moved
+// to Sidebar.svelte — see Sidebar.test.ts. These tests cover what
+// ImportScreen itself still owns: the hero, the import/detect trigger
+// mechanics (now living in lib/stores/importQueue.svelte.ts), and the
+// shared `fileRegistry`/`recentFiles` stores it populates.
 describe('ImportScreen', () => {
-  it('imports files via the file picker and shows a ready row', async () => {
+  it('imports files via the file picker and populates the shared file registry', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue(['/data/57.txt']),
       pickFolder: vi.fn().mockResolvedValue([]),
     }
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        results: [
-          {
-            path: '/data/57.txt',
-            filename: '57.txt',
-            status: 'ok',
-            channels: ['channel 1'],
-            time_column: 'ts',
-            size: 12345,
-            modified_time: 1.0,
-            default_channel: 'channel 1',
-            default_channel_matched_rule: true,
-            error: null,
-          },
-        ],
-      }),
-    })
+    const fetchMock = vi.fn().mockResolvedValue(
+      importOkResponse([{ path: '/data/57.txt', filename: '57.txt', size: 12345, defaultChannel: 'channel 1' }]),
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     render(ImportScreen)
@@ -81,10 +76,9 @@ describe('ImportScreen', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows).toHaveLength(1)
-      expect(rows[0]).toHaveTextContent('57.txt')
-      expect(rows[0]).toHaveTextContent('ready')
+      expect(fileRegistry).toHaveLength(1)
+      expect(fileRegistry[0].filename).toBe('57.txt')
+      expect(fileRegistry[0].status).toBe('ready')
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -94,62 +88,37 @@ describe('ImportScreen', () => {
         body: JSON.stringify({ paths: ['/data/57.txt'] }),
       }),
     )
+    // A successfully imported file is also recorded as a recent file.
+    expect(recentFiles).toHaveLength(1)
+    expect(recentFiles[0].path).toBe('/data/57.txt')
   })
 
-  it('imports files via the folder picker and shows a row per file', async () => {
+  it('imports files via the folder picker and populates a row per file', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue([]),
       pickFolder: vi.fn().mockResolvedValue(['/data/a.txt', '/data/b.txt']),
     }
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        results: [
-          {
-            path: '/data/a.txt',
-            filename: 'a.txt',
-            status: 'ok',
-            channels: ['channel 1'],
-            time_column: 'ts',
-            size: 100,
-            modified_time: 1.0,
-            default_channel: 'channel 1',
-            default_channel_matched_rule: true,
-            error: null,
-          },
-          {
-            path: '/data/b.txt',
-            filename: 'b.txt',
-            status: 'ok',
-            channels: ['channel 1'],
-            time_column: 'ts',
-            size: 200,
-            modified_time: 1.0,
-            default_channel: 'channel 1',
-            default_channel_matched_rule: true,
-            error: null,
-          },
-        ],
-      }),
-    })
+    const fetchMock = vi.fn().mockResolvedValue(
+      importOkResponse([
+        { path: '/data/a.txt', filename: 'a.txt', size: 100, defaultChannel: 'channel 1' },
+        { path: '/data/b.txt', filename: 'b.txt', size: 200, defaultChannel: 'channel 1' },
+      ]),
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     render(ImportScreen)
 
-    // This test is scoped to import mechanics, not beat detection; auto-run
-    // is covered separately below.
     await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
     await fireEvent.click(screen.getByTestId('import-folder-button'))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows).toHaveLength(2)
-      expect(rows[0]).toHaveTextContent('a.txt')
-      expect(rows[1]).toHaveTextContent('b.txt')
+      expect(fileRegistry).toHaveLength(2)
+      expect(fileRegistry[0].filename).toBe('a.txt')
+      expect(fileRegistry[1].filename).toBe('b.txt')
     })
   })
 
-  it('isolates per-file errors: one row ready, the other shows its error', async () => {
+  it('isolates per-file errors: one row ready, the other carries its error', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue(['/data/57.txt', '/data/bad.txt']),
       pickFolder: vi.fn().mockResolvedValue([]),
@@ -189,19 +158,14 @@ describe('ImportScreen', () => {
 
     render(ImportScreen)
 
-    // This test is scoped to import mechanics, not beat detection; auto-run
-    // is covered separately below.
     await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows).toHaveLength(2)
-      expect(rows[0]).toHaveTextContent('57.txt')
-      expect(rows[0]).toHaveTextContent('ready')
-      expect(rows[0]).not.toHaveTextContent('No extractor succeeded')
-      expect(rows[1]).toHaveTextContent('bad.txt')
-      expect(rows[1]).toHaveTextContent('No extractor succeeded')
+      expect(fileRegistry).toHaveLength(2)
+      expect(fileRegistry[0].status).toBe('ready')
+      expect(fileRegistry[1].status).toBe('error')
+      expect(fileRegistry[1].error).toBe('No extractor succeeded')
     })
   })
 
@@ -218,7 +182,7 @@ describe('ImportScreen', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(screen.queryAllByTestId('file-row')).toHaveLength(0)
+    expect(fileRegistry).toHaveLength(0)
   })
 
   it('shows a clean error banner when the import request fails at the network level', async () => {
@@ -235,7 +199,7 @@ describe('ImportScreen', () => {
     await waitFor(() => {
       expect(screen.getByTestId('import-error')).toHaveTextContent('network error')
     })
-    expect(screen.queryAllByTestId('file-row')).toHaveLength(0)
+    expect(fileRegistry).toHaveLength(0)
   })
 })
 
@@ -277,9 +241,8 @@ describe('ImportScreen auto-run beat detection', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows[0]).toHaveTextContent('15')
-      expect(rows[1]).toHaveTextContent('30')
+      expect(fileRegistry[0].beatCount).toBe(15)
+      expect(fileRegistry[1].beatCount).toBe(30)
     })
 
     const detectCalls = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect'))
@@ -298,56 +261,6 @@ describe('ImportScreen auto-run beat detection', () => {
         body: JSON.stringify({ path: '/data/b.txt', channel: 'channel 1' }),
       }),
     ])
-  })
-
-  it('shows "Calculating..." ETA for the first file, then a real ETA for the second', async () => {
-    ;(window as any).api = {
-      pickFiles: vi.fn().mockResolvedValue(['/data/a.txt', '/data/b.txt']),
-      pickFolder: vi.fn().mockResolvedValue([]),
-    }
-
-    let resolveFirstDetect: (value: unknown) => void
-    const firstDetectPromise = new Promise((resolve) => {
-      resolveFirstDetect = resolve
-    })
-
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (url.endsWith('/files/import')) {
-        return Promise.resolve(
-          importOkResponse([
-            { path: '/data/a.txt', filename: 'a.txt', size: 100, defaultChannel: 'channel 1' },
-            { path: '/data/b.txt', filename: 'b.txt', size: 200, defaultChannel: 'channel 1' },
-          ]),
-        )
-      }
-      if (url.endsWith('/beats/detect')) {
-        const call = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect')).length
-        if (call === 1) return firstDetectPromise
-        return Promise.resolve(beatsOkResponse({ count: 30, mean_hr: 70 }))
-      }
-      throw new Error(`unexpected fetch: ${url}`)
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    render(ImportScreen)
-
-    await fireEvent.click(screen.getByTestId('import-files-button'))
-
-    await waitFor(() => {
-      expect(screen.getByTestId('eta-badge')).toHaveTextContent('Calculating')
-    })
-
-    resolveFirstDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
-
-    await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows[0]).toHaveTextContent('15')
-    })
-
-    await waitFor(() => {
-      const badge = screen.getByTestId('eta-badge')
-      expect(badge).not.toHaveTextContent('Calculating')
-    })
   })
 
   it('skips detection entirely when auto-run is unchecked', async () => {
@@ -371,9 +284,8 @@ describe('ImportScreen auto-run beat detection', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows).toHaveLength(1)
-      expect(rows[0]).toHaveTextContent('ready')
+      expect(fileRegistry).toHaveLength(1)
+      expect(fileRegistry[0].status).toBe('ready')
     })
 
     const detectCalls = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect'))
@@ -422,19 +334,21 @@ describe('ImportScreen auto-run beat detection', () => {
     resolveFirstDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
 
     await waitFor(() => {
-      const rows = screen.getAllByTestId('file-row')
-      expect(rows[0]).toHaveTextContent('15')
+      expect(fileRegistry[0].beatCount).toBe(15)
     })
 
-    const rows = screen.getAllByTestId('file-row')
-    expect(rows[1]).toHaveTextContent('ready')
-    expect(rows[2]).toHaveTextContent('ready')
+    expect(fileRegistry[1].status).toBe('ready')
+    expect(fileRegistry[2].status).toBe('ready')
 
     const detectCalls = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect'))
     expect(detectCalls).toHaveLength(1)
   })
 
-  it('disables the import buttons while a detection queue is running, then re-enables them', async () => {
+  // A technician must be able to import more files at any moment, even
+  // while an earlier batch's auto-run detection is still churning in the
+  // background — see lib/stores/importQueue.svelte.ts. The Import buttons
+  // are only briefly disabled for the picker + `/files/import` round trip.
+  it('keeps the import buttons enabled while a detection queue runs in the background, and shows Stop', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue(['/data/a.txt']),
       pickFolder: vi.fn().mockResolvedValue([]),
@@ -462,17 +376,70 @@ describe('ImportScreen auto-run beat detection', () => {
 
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
+    // Detection is now running in the background (Stop appears) but the
+    // Import buttons are NOT disabled by it.
     await waitFor(() => {
-      expect(screen.getByTestId('import-files-button')).toBeDisabled()
-      expect(screen.getByTestId('import-folder-button')).toBeDisabled()
+      expect(screen.getByTestId('stop-button')).toBeInTheDocument()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('import-files-button')).not.toBeDisabled()
+      expect(screen.getByTestId('import-folder-button')).not.toBeDisabled()
     })
 
     resolveDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
 
     await waitFor(() => {
-      expect(screen.getByTestId('import-files-button')).not.toBeDisabled()
-      expect(screen.getByTestId('import-folder-button')).not.toBeDisabled()
+      expect(screen.queryByTestId('stop-button')).not.toBeInTheDocument()
     })
+  })
+
+  it('lets a second import proceed immediately while an earlier detection queue is still running', async () => {
+    ;(window as any).api = {
+      pickFiles: vi
+        .fn()
+        .mockResolvedValueOnce(['/data/a.txt'])
+        .mockResolvedValueOnce(['/data/b.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+
+    let resolveFirstDetect: (value: unknown) => void
+    const firstDetectPromise = new Promise((resolve) => {
+      resolveFirstDetect = resolve
+    })
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/files/import')) {
+        const call = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/files/import')).length
+        return Promise.resolve(
+          call === 1
+            ? importOkResponse([{ path: '/data/a.txt', filename: 'a.txt', size: 100, defaultChannel: 'channel 1' }])
+            : importOkResponse([{ path: '/data/b.txt', filename: 'b.txt', size: 100, defaultChannel: 'channel 1' }]),
+        )
+      }
+      if (url.endsWith('/beats/detect')) {
+        const call = fetchMock.mock.calls.filter((c: any) => c[0].endsWith('/beats/detect')).length
+        return call === 1 ? firstDetectPromise : Promise.resolve(beatsOkResponse({ count: 8, mean_hr: 60 }))
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ImportScreen)
+
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+    await waitFor(() => expect(fileRegistry).toHaveLength(1))
+
+    // A second import, triggered while the first file's detection is still
+    // in flight, must not be blocked by it.
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+    await waitFor(() => expect(fileRegistry).toHaveLength(2))
+    expect(fileRegistry[1].filename).toBe('b.txt')
+
+    resolveFirstDetect!(beatsOkResponse({ count: 15, mean_hr: 65 }))
+
+    // The second file's detection is enqueued behind the first and still
+    // runs (rather than being dropped) once the first finishes.
+    await waitFor(() => expect(fileRegistry[1].beatCount).toBe(8))
   })
 
   it('disables the import buttons as soon as the picker is invoked, before it resolves', async () => {
@@ -550,8 +517,13 @@ describe('ImportScreen auto-run beat detection', () => {
   })
 })
 
-describe('ImportScreen Review action', () => {
-  it('shows a Review button for a ready row with a channel, and fires onReview with path/channels/defaultChannel', async () => {
+describe('ImportScreen recent files', () => {
+  it('shows no recent files section until at least one file has been imported', () => {
+    render(ImportScreen)
+    expect(screen.queryByTestId('recent-file-card')).not.toBeInTheDocument()
+  })
+
+  it('re-imports a recent file (skipping the picker) when its card is clicked', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue(['/data/57.txt']),
       pickFolder: vi.fn().mockResolvedValue([]),
@@ -561,61 +533,25 @@ describe('ImportScreen Review action', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const onReview = vi.fn()
-    render(ImportScreen, { props: { onReview } })
-
-    // Scoped to Review-button mechanics, not auto-run detection.
-    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
-    await fireEvent.click(screen.getByTestId('import-files-button'))
-
-    await waitFor(() => {
-      expect(screen.getByTestId('review-button')).toBeInTheDocument()
-    })
-
-    await fireEvent.click(screen.getByTestId('review-button'))
-
-    expect(onReview).toHaveBeenCalledWith({
-      path: '/data/57.txt',
-      channels: ['channel 1'],
-      defaultChannel: 'channel 1',
-    })
-  })
-
-  it('shows no Review button for a row that failed to import', async () => {
-    ;(window as any).api = {
-      pickFiles: vi.fn().mockResolvedValue(['/data/bad.txt']),
-      pickFolder: vi.fn().mockResolvedValue([]),
-    }
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        results: [
-          {
-            path: '/data/bad.txt',
-            filename: 'bad.txt',
-            status: 'error',
-            channels: [],
-            time_column: null,
-            size: null,
-            modified_time: null,
-            default_channel: null,
-            default_channel_matched_rule: false,
-            error: 'No extractor succeeded',
-          },
-        ],
-      }),
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    render(ImportScreen, { props: { onReview: vi.fn() } })
+    render(ImportScreen)
 
     await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      expect(screen.getByTestId('file-row')).toHaveTextContent('bad.txt')
+      expect(screen.getByTestId('recent-file-card')).toHaveTextContent('57.txt')
     })
 
-    expect(screen.queryByTestId('review-button')).not.toBeInTheDocument()
+    fetchMock.mockClear()
+    await fireEvent.click(screen.getByTestId('recent-file-card'))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/files/import',
+        expect.objectContaining({ body: JSON.stringify({ paths: ['/data/57.txt'] }) }),
+      )
+    })
+    // The picker was never invoked for the re-import.
+    expect((window as any).api.pickFiles).toHaveBeenCalledTimes(1)
   })
 })

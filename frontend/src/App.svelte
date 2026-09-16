@@ -2,6 +2,9 @@
   import ImportScreen from './components/import/ImportScreen.svelte'
   import ReviewWorkspace from './components/review/ReviewWorkspace.svelte'
   import SettingsDialog from './components/settings/SettingsDialog.svelte'
+  import Sidebar from './components/shell/Sidebar.svelte'
+  import Icon from './components/shared/Icon.svelte'
+  import { themeState } from './lib/stores/theme.svelte'
 
   interface ReviewSelection {
     path: string
@@ -9,9 +12,27 @@
     defaultChannel: string
   }
 
+  const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
+  const MIN_SIDEBAR_WIDTH = 180
+  const MAX_SIDEBAR_WIDTH = 420
+  const DEFAULT_SIDEBAR_WIDTH = 240
+
+  function loadSidebarWidth(): number {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY)
+      const parsed = raw ? Number(raw) : NaN
+      if (!Number.isNaN(parsed) && parsed >= MIN_SIDEBAR_WIDTH && parsed <= MAX_SIDEBAR_WIDTH) return parsed
+    } catch {
+      // ignore
+    }
+    return DEFAULT_SIDEBAR_WIDTH
+  }
+
   let view: 'import' | 'review' = $state('import')
   let selectedFile: ReviewSelection | null = $state(null)
   let settingsOpen: boolean = $state(false)
+  let sidebarCollapsed: boolean = $state(false)
+  let sidebarWidth: number = $state(loadSidebarWidth())
 
   function handleReview(row: ReviewSelection) {
     selectedFile = row
@@ -21,22 +42,100 @@
   function handleBack() {
     view = 'import'
   }
+
+  function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed
+  }
+
+  function handleSidebarResize(width: number) {
+    sidebarWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)))
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
+    } catch {
+      // ignore
+    }
+  }
+
+  function fileNameOf(path: string): string {
+    return path.split(/[\\/]/).pop() ?? path
+  }
+
+  // Reflects the appearance preference onto <html data-theme="...">, which
+  // tokens.css keys its light/dark/bw palettes off. 'system' removes the
+  // attribute entirely so the existing prefers-color-scheme media query
+  // takes over, matching this store's own contract.
+  $effect(() => {
+    const mode = themeState.mode
+    if (mode === 'system') {
+      document.documentElement.removeAttribute('data-theme')
+    } else {
+      document.documentElement.setAttribute('data-theme', mode)
+    }
+  })
 </script>
 
-<main>
-  <h1>Physiology Analysis Tools</h1>
-  <button data-testid="settings-button" onclick={() => (settingsOpen = true)}>Settings</button>
+<div
+  class="app-shell"
+  class:sidebar-collapsed={sidebarCollapsed}
+  style={`--sidebar-width: ${sidebarWidth}px`}
+>
+  <header class="topbar">
+    <button
+      type="button"
+      class="icon-btn"
+      data-testid="sidebar-toggle-button"
+      onclick={toggleSidebar}
+      aria-label="Toggle sidebar"
+      aria-pressed={sidebarCollapsed}
+    >
+      <Icon name="menu" />
+    </button>
+    <span class="app-name">Physiology Analysis Tools</span>
+
+    {#if view === 'review' && selectedFile}
+      <nav class="breadcrumb">
+        <button type="button" class="breadcrumb-back" data-testid="back-to-import-button" onclick={handleBack}>
+          <Icon name="chevron-left" size={16} />
+          Import
+        </button>
+        <span class="breadcrumb-sep">/</span>
+        <span class="breadcrumb-current">{fileNameOf(selectedFile.path)}</span>
+      </nav>
+    {/if}
+
+    <span class="topbar-spacer"></span>
+
+    <button
+      type="button"
+      class="icon-btn"
+      data-testid="settings-button"
+      onclick={() => (settingsOpen = true)}
+      aria-label="Settings"
+    >
+      <Icon name="settings" />
+    </button>
+  </header>
+
+  <Sidebar
+    collapsed={sidebarCollapsed}
+    activePath={selectedFile?.path ?? null}
+    onReview={handleReview}
+    onResize={handleSidebarResize}
+  />
+
+  <main class="main-content">
+    {#if view === 'import'}
+      <ImportScreen />
+    {:else if view === 'review' && selectedFile}
+      <ReviewWorkspace
+        path={selectedFile.path}
+        channels={selectedFile.channels}
+        defaultChannel={selectedFile.defaultChannel}
+      />
+    {/if}
+  </main>
+
   {#if settingsOpen}
     <SettingsDialog onClose={() => (settingsOpen = false)} />
   {/if}
-  {#if view === 'import'}
-    <ImportScreen onReview={handleReview} />
-  {:else if view === 'review' && selectedFile}
-    <button data-testid="back-to-import-button" onclick={handleBack}>Back to Import</button>
-    <ReviewWorkspace
-      path={selectedFile.path}
-      channels={selectedFile.channels}
-      defaultChannel={selectedFile.defaultChannel}
-    />
-  {/if}
-</main>
+</div>

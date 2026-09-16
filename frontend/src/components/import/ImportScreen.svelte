@@ -1,190 +1,194 @@
 <script lang="ts">
-  import { detectBeats } from '../../lib/api/beats'
-  import { importFiles } from '../../lib/api/files'
-  import { estimate, recordSample } from '../../lib/stores/eta'
+  import { handleImportFiles, handleImportFolder, handleStop, importQueue, reimportPath } from '../../lib/stores/importQueue.svelte'
+  import { recentFiles } from '../../lib/stores/recentFiles.svelte'
+  import Icon from '../shared/Icon.svelte'
 
-  interface FileRow {
-    path: string
-    filename: string
-    status: 'ready' | 'error' | 'detecting' | 'detected' | 'detection-error'
-    channels: string[]
-    defaultChannel: string | null
-    size: number | null
-    error: string | null
-    beatCount: number | null
-    meanHr: number | null
-  }
-
-  interface ReviewSelection {
-    path: string
-    channels: string[]
-    defaultChannel: string
-  }
-
-  let { onReview }: { onReview?: (selection: ReviewSelection) => void } = $props()
-
-  let rows: FileRow[] = $state([])
-  let importError: string = $state('')
-  let autoRun: boolean = $state(true)
-
-  // Single source of truth for the whole import+detect lifecycle, covering
-  // the picker dialog window, the import network round trip, and the
-  // detection queue as one continuous guarded phase — so it is structurally
-  // impossible for two import attempts to run concurrently (see
-  // handleImportFiles/handleImportFolder, which set 'busy' synchronously
-  // before awaiting anything).
-  //   'idle'     - nothing in flight; Import Files/Import Folder enabled.
-  //   'busy'     - picker open, import in flight, or detection queue
-  //                running; Import Files/Import Folder disabled.
-  //   'stopping' - Stop was clicked mid-queue; the in-flight file finishes,
-  //                remaining files are skipped, then this resolves to
-  //                'idle' via the same finally as the 'busy' path.
-  type QueueState = 'idle' | 'busy' | 'stopping'
-  let queueState: QueueState = $state('idle')
-
-  async function importPaths(paths: string[]) {
-    if (paths.length === 0) return
-
-    importError = ''
-    const result = await importFiles(paths)
-
-    if ('error' in result) {
-      importError = result.error
-      return
-    }
-
-    const newRows: FileRow[] = []
-    for (const fileResult of result.results) {
-      rows.push({
-        path: fileResult.path,
-        filename: fileResult.filename,
-        status: fileResult.status === 'ok' ? 'ready' : 'error',
-        channels: fileResult.channels,
-        defaultChannel: fileResult.default_channel,
-        size: fileResult.size,
-        error: fileResult.error,
-        beatCount: null,
-        meanHr: null,
-      })
-      // Capture the reference back out of the reactive `rows` array (rather
-      // than holding onto the plain object literal above) so mutations made
-      // later in the detection queue are tracked by Svelte's state proxy.
-      newRows.push(rows[rows.length - 1])
-    }
-
-    if (autoRun) {
-      await runDetectionQueue(newRows)
-    }
-  }
-
-  async function runDetectionQueue(queue: FileRow[]) {
-    for (const row of queue) {
-      if (queueState === 'stopping') break
-      if (row.status !== 'ready' || row.defaultChannel === null) continue
-
-      row.status = 'detecting'
-      const result = await detectBeats(row.path, row.defaultChannel)
-
-      if (result.status === 'ok' && !result.error) {
-        if (row.size !== null) {
-          recordSample(row.size, result.elapsed_seconds)
-        }
-        row.status = 'detected'
-        row.beatCount = result.count
-        row.meanHr = result.mean_hr
-      } else {
-        row.status = 'detection-error'
-        row.error = result.error
-      }
-    }
-  }
-
-  function handleReview(row: FileRow) {
-    if (row.defaultChannel === null) return
-    onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
-  }
-
-  function handleStop() {
-    if (queueState === 'busy') {
-      queueState = 'stopping'
-    }
-  }
-
-  function formatEta(size: number | null): string {
-    if (size === null) return 'Calculating…'
-    const seconds = estimate(size)
-    if (seconds === null) return 'Calculating…'
-    return `~${Math.max(1, Math.round(seconds))}s`
-  }
-
-  async function handleImportFiles() {
-    // Set synchronously, before awaiting the picker, so the buttons are
-    // disabled from the very first click — covering the picker-open
-    // window, not just the later import/detection windows.
-    queueState = 'busy'
-    try {
-      const paths = (await window.api?.pickFiles()) ?? []
-      await importPaths(paths)
-    } finally {
-      queueState = 'idle'
-    }
-  }
-
-  async function handleImportFolder() {
-    queueState = 'busy'
-    try {
-      const paths = (await window.api?.pickFolder()) ?? []
-      await importPaths(paths)
-    } finally {
-      queueState = 'idle'
-    }
+  function formatRelativeTime(ts: number): string {
+    const diffMs = Date.now() - ts
+    const minutes = Math.round(diffMs / 60000)
+    if (minutes < 1) return 'just now'
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.round(minutes / 60)
+    if (hours < 24) return `${hours}h ago`
+    const days = Math.round(hours / 24)
+    if (days <= 1) return 'Yesterday'
+    return `${days}d ago`
   }
 </script>
 
-<div>
-  <div>
-    <button data-testid="import-files-button" onclick={handleImportFiles} disabled={queueState !== 'idle'}>
-      Import Files
-    </button>
-    <button data-testid="import-folder-button" onclick={handleImportFolder} disabled={queueState !== 'idle'}>
-      Import Folder
-    </button>
-    <label>
-      <input
-        type="checkbox"
-        data-testid="auto-run-checkbox"
-        bind:checked={autoRun}
-        disabled={queueState !== 'idle'}
-      />
-      Auto-run beat detection
-    </label>
-    <button data-testid="stop-button" onclick={handleStop}>Stop</button>
+<div class="welcome">
+  <div class="welcome-hero">
+    <div class="welcome-mark"><Icon name="activity" size={32} /></div>
+    <h1 class="welcome-title">Welcome to Physiology Analysis Tools</h1>
+    <p class="welcome-subtitle">Import ECG recordings to detect beats and review arrhythmias.</p>
+
+    <div class="welcome-controls">
+      <button
+        type="button"
+        class="btn btn-primary"
+        data-testid="import-files-button"
+        onclick={handleImportFiles}
+        disabled={importQueue.importing}
+      >
+        <Icon name="file-plus" size={16} /> Import Files
+      </button>
+      <button
+        type="button"
+        class="btn"
+        data-testid="import-folder-button"
+        onclick={handleImportFolder}
+        disabled={importQueue.importing}
+      >
+        <Icon name="folder" size={16} /> Import Folder
+      </button>
+      <label class="field field-inline">
+        <input
+          type="checkbox"
+          data-testid="auto-run-checkbox"
+          bind:checked={importQueue.autoRun}
+          disabled={importQueue.importing}
+        />
+        Auto-run beat detection
+      </label>
+      {#if importQueue.detecting}
+        <button type="button" class="btn btn-ghost btn-danger-text" data-testid="stop-button" onclick={handleStop}>
+          Stop
+        </button>
+      {/if}
+    </div>
+
+    {#if importQueue.error}
+      <p class="banner banner-error" data-testid="import-error">Import failed: {importQueue.error}</p>
+    {/if}
   </div>
 
-  {#if importError}
-    <p data-testid="import-error">Import failed: {importError}</p>
+  {#if recentFiles.length > 0}
+    <div class="recent-files">
+      <h2 class="recent-files-title">Recent files</h2>
+      <div class="recent-files-grid">
+        {#each recentFiles as file (file.path)}
+          <button
+            type="button"
+            class="recent-file-card"
+            data-testid="recent-file-card"
+            onclick={() => reimportPath(file.path)}
+            disabled={importQueue.importing}
+          >
+            <Icon name="file-text" size={18} />
+            <span class="recent-file-name">{file.filename}</span>
+            <span class="recent-file-time text-muted">{formatRelativeTime(file.openedAt)}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
   {/if}
-
-  <ul>
-    {#each rows as row (row.path)}
-      <li data-testid="file-row">
-        <span>{row.filename}</span>
-        {#if row.status === 'ready'}
-          <span>ready</span>
-        {:else if row.status === 'detecting'}
-          <span>detecting…</span>
-          <span data-testid="eta-badge">{formatEta(row.size)}</span>
-        {:else if row.status === 'detected'}
-          <span>{row.beatCount} beats detected{row.meanHr !== null ? `, mean HR ${row.meanHr}` : ''}</span>
-        {:else if row.status === 'detection-error'}
-          <span>detection failed: {row.error}</span>
-        {:else}
-          <span>{row.error}</span>
-        {/if}
-        {#if row.defaultChannel !== null && row.status !== 'error'}
-          <button data-testid="review-button" onclick={() => handleReview(row)}>Review</button>
-        {/if}
-      </li>
-    {/each}
-  </ul>
 </div>
+
+<style>
+  .welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: var(--space-6) var(--space-4);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .welcome-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-3);
+    padding-top: var(--space-6);
+  }
+
+  .welcome-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: var(--radius-lg);
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+    margin-bottom: var(--space-2);
+  }
+
+  .welcome-title {
+    font-size: var(--font-size-xl);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .welcome-subtitle {
+    color: var(--color-text-muted);
+    max-width: 440px;
+  }
+
+  .welcome-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+
+  .banner-error {
+    margin-top: var(--space-4);
+    max-width: 480px;
+  }
+
+  .recent-files {
+    width: 100%;
+    margin-top: var(--space-6);
+  }
+
+  .recent-files-title {
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: var(--space-3);
+  }
+
+  .recent-files-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-3);
+  }
+
+  .recent-file-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text);
+    text-align: left;
+    transition: box-shadow var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .recent-file-card:hover:not(:disabled) {
+    box-shadow: var(--shadow-sm);
+    border-color: var(--color-accent);
+  }
+
+  .recent-file-name {
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  .recent-file-time {
+    font-size: 0.75rem;
+  }
+</style>

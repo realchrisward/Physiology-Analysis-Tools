@@ -404,109 +404,210 @@
   }
 </script>
 
-<div data-testid="review-workspace">
-  <select
-    data-testid="channel-select"
-    bind:value={selectedChannel}
-    onchange={handleChannelChange}
-    disabled={!hydrationChecked}
-  >
-    {#each channels as channel}
-      <option value={channel}>{channel}</option>
-    {/each}
-  </select>
+<div class="review-workspace" data-testid="review-workspace">
+  <div class="review-toolbar">
+    <select
+      class="channel-select"
+      data-testid="channel-select"
+      bind:value={selectedChannel}
+      onchange={handleChannelChange}
+      disabled={!hydrationChecked}
+    >
+      {#each channels as channel}
+        <option value={channel}>{channel}</option>
+      {/each}
+    </select>
 
-  <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
-       own `disabled` above: `activeChannel` still holds `defaultChannel`
-       until the mount-time `getFileState` hydration resolves, so a rerun
-       triggered before that settles would run arrhythmia detection against
-       the wrong (pre-hydration) channel on reopen. Uses a `disabled` prop
-       ANDed with ArrhythmiaControls' own `runState`-based button-disabling
-       (see that component) rather than wrapping this in `{#if
-       hydrationChecked}` — that would work too, but a prop keeps this
-       component mounted (and its `channel` prop live-updating) across the
-       hydration boundary exactly like the `<select>` above, instead of an
-       unmount/remount that briefly hides these controls entirely. -->
-  <ArrhythmiaControls
-    path={path}
-    channel={activeChannel}
-    onComplete={handleArrhythmiaComplete}
-    disabled={!hydrationChecked}
-  />
+    {#if detection.status === 'pending'}
+      <div class="detection-summary text-muted" data-testid="detection-summary">
+        detecting beats for {selectedChannel}…
+      </div>
+    {:else if detection.status === 'ok'}
+      <div class="detection-summary text-muted" data-testid="detection-summary">
+        {detection.count} beats detected{detection.meanHr !== null ? `, mean HR ${detection.meanHr}` : ''}{detection.duration !==
+        null
+          ? `, duration ${detection.duration}s`
+          : ''}
+      </div>
+    {:else if detection.status === 'error'}
+      <div class="detection-summary text-danger" data-testid="detection-summary">
+        detection failed: {detection.error}
+      </div>
+    {/if}
 
-  <button
-    data-testid="generate-report-button"
-    disabled={report.status === 'generating'}
-    onclick={handleGenerateReport}
-  >
-    Generate Report
-  </button>
+    <span class="toolbar-spacer"></span>
+
+    <button
+      type="button"
+      class="btn btn-primary"
+      data-testid="generate-report-button"
+      disabled={report.status === 'generating'}
+      onclick={handleGenerateReport}
+    >
+      Generate Report
+    </button>
+  </div>
 
   {#if report.status === 'generating'}
-    <span data-testid="report-generating">Generating report…</span>
+    <span class="report-status text-muted" data-testid="report-generating">Generating report…</span>
   {:else if report.status === 'ok'}
-    <p data-testid="report-success">Report saved to {report.outputPath}</p>
+    <p class="report-status text-success" data-testid="report-success">Report saved to {report.outputPath}</p>
   {:else if report.status === 'error'}
-    <p data-testid="report-error">Report generation failed: {report.error}</p>
+    <p class="report-status text-danger" data-testid="report-error">Report generation failed: {report.error}</p>
   {/if}
 
-  {#if detection.status === 'pending'}
-    <div data-testid="detection-summary">detecting beats for {selectedChannel}…</div>
-  {:else if detection.status === 'ok'}
-    <div data-testid="detection-summary">
-      {detection.count} beats detected{detection.meanHr !== null ? `, mean HR ${detection.meanHr}` : ''}{detection.duration !==
-      null
-        ? `, duration ${detection.duration}s`
-        : ''}
-    </div>
-  {:else if detection.status === 'error'}
-    <div data-testid="detection-summary">detection failed: {detection.error}</div>
-  {/if}
-
-  <div class="graph-area">
-    <!-- Gated on `hydrationChecked` — see its own declaration above. Nothing
-         renders here at all until the mount-time `getFileState` hydration
-         has settled, so the one and only mount of EcgGraph below is always
-         already configured with the final, correct `activeChannel`/
-         `initialBadDataMarks` — no transient fetch against `defaultChannel`,
-         and no reliance on a later remount to pick up hydrated marks.
-
-         Keyed on `activeChannel`, NOT `selectedChannel` — see the
-         `activeChannel` declaration above for why the two are split.
-         EcgGraph remounts (rather than updating its `channel` prop in
-         place) whenever the active channel changes after this — EcgGraph's
-         own fetch/uPlot-construction logic runs once, in onMount, so a
-         remount is the simplest way to get it to re-init for a new
-         channel's data. -->
-    {#if hydrationChecked}
-      {#key activeChannel}
-        <EcgGraph
-          {path}
-          channel={activeChannel}
-          onBeatSelect={handleBeatSelect}
-          {beatsRefreshToken}
-          {initialBadDataMarks}
-        />
-      {/key}
-    {/if}
+  <div class="arrhythmia-toolbar">
+    <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
+         own `disabled` above: `activeChannel` still holds `defaultChannel`
+         until the mount-time `getFileState` hydration resolves, so a rerun
+         triggered before that settles would run arrhythmia detection against
+         the wrong (pre-hydration) channel on reopen. Uses a `disabled` prop
+         ANDed with ArrhythmiaControls' own `runState`-based button-disabling
+         (see that component) rather than wrapping this in `{#if
+         hydrationChecked}` — that would work too, but a prop keeps this
+         component mounted (and its `channel` prop live-updating) across the
+         hydration boundary exactly like the `<select>` above, instead of an
+         unmount/remount that briefly hides these controls entirely. -->
+    <ArrhythmiaControls
+      path={path}
+      channel={activeChannel}
+      onComplete={handleArrhythmiaComplete}
+      disabled={!hydrationChecked}
+    />
   </div>
 
-  <div data-testid="selected-beat-panel">
-    {#if selectedBeat === null}
-      <p data-testid="selected-beat-summary">No beat selected</p>
-    {:else if persistPending}
-      <p data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
-    {:else if persistError && lastPersistedChannel !== activeChannel}
-      <div data-testid="persist-error">
-        <p>Could not prepare review data: {persistError}</p>
-        <button data-testid="persist-retry-button" onclick={() => ensureChannelPersisted(activeChannel)}>
-          Retry
-        </button>
-      </div>
-    {:else}
-      {#key selectedBeat.ts}
-        <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
-      {/key}
-    {/if}
+  <div class="review-main">
+    <div class="graph-area">
+      <!-- Gated on `hydrationChecked` — see its own declaration above. Nothing
+           renders here at all until the mount-time `getFileState` hydration
+           has settled, so the one and only mount of EcgGraph below is always
+           already configured with the final, correct `activeChannel`/
+           `initialBadDataMarks` — no transient fetch against `defaultChannel`,
+           and no reliance on a later remount to pick up hydrated marks.
+
+           Keyed on `activeChannel`, NOT `selectedChannel` — see the
+           `activeChannel` declaration above for why the two are split.
+           EcgGraph remounts (rather than updating its `channel` prop in
+           place) whenever the active channel changes after this — EcgGraph's
+           own fetch/uPlot-construction logic runs once, in onMount, so a
+           remount is the simplest way to get it to re-init for a new
+           channel's data. -->
+      {#if hydrationChecked}
+        {#key activeChannel}
+          <EcgGraph
+            {path}
+            channel={activeChannel}
+            onBeatSelect={handleBeatSelect}
+            {beatsRefreshToken}
+            {initialBadDataMarks}
+          />
+        {/key}
+      {/if}
+    </div>
+
+    <div class="beat-panel" data-testid="selected-beat-panel">
+      {#if selectedBeat === null}
+        <p class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">No beat selected</p>
+      {:else if persistPending}
+        <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
+      {:else if persistError && lastPersistedChannel !== activeChannel}
+        <div class="banner banner-error" data-testid="persist-error">
+          <p>Could not prepare review data: {persistError}</p>
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="persist-retry-button"
+            onclick={() => ensureChannelPersisted(activeChannel)}
+          >
+            Retry
+          </button>
+        </div>
+      {:else}
+        {#key selectedBeat.ts}
+          <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
+        {/key}
+      {/if}
+    </div>
   </div>
 </div>
+
+<style>
+  .review-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    height: 100%;
+    box-sizing: border-box;
+  }
+
+  .review-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .channel-select {
+    min-width: 160px;
+  }
+
+  .detection-summary {
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+  }
+
+  .toolbar-spacer {
+    flex: 1;
+  }
+
+  .report-status {
+    font-size: var(--font-size-sm);
+  }
+
+  .arrhythmia-toolbar {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .review-main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: var(--space-3);
+    min-height: 0;
+  }
+
+  .graph-area {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    min-width: 0;
+    overflow: auto;
+  }
+
+  .beat-panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    overflow-y: auto;
+  }
+
+  .beat-panel-placeholder {
+    font-size: var(--font-size-sm);
+  }
+
+  @media (max-width: 1024px) {
+    .review-main {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

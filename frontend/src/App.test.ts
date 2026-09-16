@@ -1,12 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App.svelte'
-import { resetForTesting } from './lib/stores/eta'
+import { resetForTesting as resetEta } from './lib/stores/eta'
+import { resetForTesting as resetFileRegistry } from './lib/stores/fileRegistry.svelte'
+import { resetForTesting as resetImportQueue } from './lib/stores/importQueue.svelte'
+import { resetForTesting as resetRecentFiles } from './lib/stores/recentFiles.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
-  resetForTesting()
+  resetEta()
+  resetFileRegistry()
+  resetImportQueue()
+  resetRecentFiles()
 })
 
 // Exercised end to end (real import flow through the rendered ImportScreen,

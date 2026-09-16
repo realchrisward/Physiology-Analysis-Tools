@@ -90,16 +90,16 @@
   }
 </script>
 
-<div data-testid="beat-category-panel">
-  <p data-testid="selected-beat-summary">Selected beat: t={beat.ts}s, HR {beat.hr}, RR {beat.rr}</p>
+<div class="beat-category-panel" data-testid="beat-category-panel">
+  <p class="beat-summary" data-testid="selected-beat-summary">Selected beat: t={beat.ts}s, HR {beat.hr}, RR {beat.rr}</p>
 
-  <div data-testid="beat-categories">
+  <div class="beat-categories" data-testid="beat-categories">
     {#if flaggedCategories.length === 0}
-      <p data-testid="no-categories">No arrhythmia categories flagged for this beat.</p>
+      <p class="text-muted" data-testid="no-categories">No arrhythmia categories flagged for this beat.</p>
     {:else}
-      <ul>
+      <ul class="category-list">
         {#each flaggedCategories as cat (cat)}
-          <li data-testid={`category-${cat}`}>{CATEGORY_LABELS[cat]}</li>
+          <li class="category-chip" data-testid={`category-${cat}`}>{CATEGORY_LABELS[cat]}</li>
         {/each}
       </ul>
     {/if}
@@ -123,20 +123,38 @@
 
   {#if errorMessage}
     {#if isPersistRequiredError}
-      <div data-testid="persist-required-error">
+      <div class="banner banner-error" data-testid="persist-required-error">
         <p>{errorMessage}</p>
-        <button data-testid="retry-category-action-button" onclick={retry}>Retry</button>
+        <button type="button" class="btn btn-sm" data-testid="retry-category-action-button" onclick={retry}>
+          Retry
+        </button>
       </div>
     {:else}
-      <p data-testid="validation-error">{errorMessage}</p>
+      <p class="text-danger" data-testid="validation-error">{errorMessage}</p>
     {/if}
   {/if}
 
   <div class="actions">
-    <button data-testid="confirm-button" disabled={submitting} onclick={() => submit('confirm')}>Confirm</button>
-    <button data-testid="reject-button" disabled={submitting} onclick={() => submit('reject')}>Reject</button>
+    <button
+      type="button"
+      class="btn btn-primary"
+      data-testid="confirm-button"
+      disabled={submitting}
+      onclick={() => submit('confirm')}
+    >
+      Confirm
+    </button>
+    <button
+      type="button"
+      class="btn btn-danger-text"
+      data-testid="reject-button"
+      disabled={submitting}
+      onclick={() => submit('reject')}
+    >
+      Reject
+    </button>
 
-    <label>
+    <label class="field">
       Reassign to:
       <select data-testid="reassign-select" bind:value={reassignCategory} disabled={submitting}>
         <option value="" disabled>Select category…</option>
@@ -146,6 +164,8 @@
       </select>
     </label>
     <button
+      type="button"
+      class="btn"
       data-testid="reassign-button"
       disabled={submitting || reassignCategory === ''}
       onclick={() => submit('reassign', reassignCategory)}
@@ -156,10 +176,40 @@
 </div>
 
 <style>
+  .beat-category-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .beat-summary {
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+  }
+
+  .category-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .category-chip {
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: var(--space-1) var(--space-2);
+    border-radius: 999px;
+    background: var(--color-accent-soft, #eef1f5);
+    color: var(--color-accent, #2563eb);
+  }
+
   /* Semantic status colors from tokens.css, distinguishing the three
      terminal review states at a glance during extended review sessions. */
   .review-state {
     font-weight: 600;
+    font-size: var(--font-size-sm);
   }
   .review-state--confirmed {
     color: var(--color-success, #15803d);
@@ -169,5 +219,12 @@
   }
   .review-state--reassigned {
     color: var(--color-warning, #b45309);
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-2);
   }
 </style>

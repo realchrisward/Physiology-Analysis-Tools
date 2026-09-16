@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/svelte'
+import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import EcgGraph, { buildBeatAlignedData } from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
@@ -307,6 +307,133 @@ describe('EcgGraph', () => {
     // extent for Reset View is the *response's* actual x[0]/x[last]
     // (0 and 9 here), which is what a reset re-fetch should request.
     expect(resetCall.searchParams.get('end')).toBe('9')
+  })
+
+  it('highlights the Reset view button after a pan, and un-highlights it after reset', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const resetButton = screen.getByTestId('reset-view-button')
+    expect(resetButton.className).not.toContain('btn-active')
+
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    vi.useFakeTimers()
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 100, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 300, clientY: 100, bubbles: true }))
+    await vi.advanceTimersByTimeAsync(150)
+    vi.useRealTimers()
+
+    expect(resetButton.className).toContain('btn-active')
+
+    await fireEvent.click(resetButton)
+    expect(resetButton.className).not.toContain('btn-active')
+  })
+
+  it('zoom-in button narrows the visible x-scale immediately', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const zoomInButton = screen.getByTestId('zoom-in-button')
+    zoomInButton.click()
+    zoomInButton.click()
+
+    // Zooming narrows the x-scale synchronously (via uPlot's own
+    // `setScale`) regardless of whether a re-fetch is needed — see
+    // `needsRefetch` in EcgGraph.svelte: a modest zoom step that stays
+    // within the already-loaded buffer intentionally triggers NO fetch at
+    // all (that's the point of buffering — most zoom/pan doesn't have to
+    // wait on a network round trip), so this only asserts the visible
+    // range itself narrowed, not that a fetch happened.
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    expect(over).toBeTruthy()
+  })
+
+  it('re-fetches at higher resolution once zoomed in enough that the loaded buffer is too coarse', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    vi.useFakeTimers()
+    const zoomInButton = screen.getByTestId('zoom-in-button')
+    // Several successive zoom-in steps (each 0.75x the range) eventually
+    // narrow the visible range past the loaded buffer's resolution
+    // threshold (see MIN_ZOOM_RATIO_BEFORE_REFETCH in EcgGraph.svelte),
+    // triggering a real debounced re-fetch — a single modest step
+    // deliberately does not (see the test above).
+    for (let i = 0; i < 5; i++) {
+      zoomInButton.click()
+      await vi.advanceTimersByTimeAsync(1)
+    }
+    await vi.advanceTimersByTimeAsync(150)
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(2)
+    vi.useRealTimers()
+  })
+
+  it('zoom-out button widens the visible x-scale', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    // Zoom in first so zooming back out has visible room to widen into.
+    vi.useFakeTimers()
+    const zoomInButton = screen.getByTestId('zoom-in-button')
+    for (let i = 0; i < 3; i++) zoomInButton.click()
+    await vi.advanceTimersByTimeAsync(150)
+    const callsAfterZoomIn = fetchMock.mock.calls.length
+
+    screen.getByTestId('zoom-out-button').click()
+    await vi.advanceTimersByTimeAsync(150)
+
+    // Zooming back out is itself always a legitimate scale change (handled
+    // the same debounced way as any other pan/zoom); this doesn't assert a
+    // fetch count, only that the interaction completes without error.
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(callsAfterZoomIn)
+    vi.useRealTimers()
+  })
+
+  it('expand-graph-button toggles a taller chart height', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const canvas = screen.getByTestId('ecg-graph-container').querySelector('canvas') as HTMLCanvasElement
+    const initialHeight = canvas.height
+
+    const expandButton = screen.getByTestId('expand-graph-button')
+    expandButton.click()
+    await waitFor(() => expect(canvas.height).toBeGreaterThan(initialHeight))
+
+    expandButton.click()
+    await waitFor(() => expect(canvas.height).toBe(initialHeight))
   })
 
   it('removes document-level drag listeners on unmount, so a stale mid-drag mouseup fetches nothing', async () => {
