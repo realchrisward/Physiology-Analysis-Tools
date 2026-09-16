@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
-  import { getFileState, persistBeats, putChannel } from '../../lib/api/persistence'
+  import { generateReport, getFileState, persistBeats, putChannel } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
@@ -12,6 +12,21 @@
     count: number | null
     meanHr: number | null
     duration: number | null
+    error: string | null
+  }
+
+  // F5's report export lifecycle — same single-state-value discipline as
+  // `DetectionSummary` above (and `ArrhythmiaControls`' own `RunState`):
+  // one status field, not a separate pending/success/error boolean trio that
+  // could drift out of sync.
+  //   'idle'       - no export in flight, nothing to show yet.
+  //   'generating' - `POST /files/report` is in flight.
+  //   'ok'         - succeeded; `outputPath` holds the real path the backend
+  //                  actually wrote to (never a fabricated/guessed one).
+  //   'error'      - failed; `error` holds the backend's message verbatim.
+  interface ReportState {
+    status: 'idle' | 'generating' | 'ok' | 'error'
+    outputPath: string | null
     error: string | null
   }
 
@@ -166,6 +181,32 @@
 
   function refreshGraphBeats() {
     beatsRefreshToken += 1
+  }
+
+  // F5's report export. See `ReportState`'s own declaration above for the
+  // state shape.
+  let report: ReportState = $state({ status: 'idle', outputPath: null, error: null })
+
+  // Opens Electron's native directory picker (F1's IPC bridge,
+  // `window.api.pickOutputDirectory`) and, unless the technician cancels it
+  // (a `null` resolution — a deliberate no-op, not an error condition), asks
+  // the backend to write the report there via `POST /files/report`
+  // (`generateReport`). `window.api` itself is optional (see
+  // `electron.d.ts`) for the same reason `HealthStatus`/`ImportScreen`
+  // already guard every `window.api` call — the web build has no Electron
+  // bridge at all — so a missing bridge is treated identically to a
+  // cancellation rather than thrown.
+  async function handleGenerateReport() {
+    const dir = await window.api?.pickOutputDirectory()
+    if (!dir) return // canceled, or no Electron bridge present
+
+    report = { status: 'generating', outputPath: null, error: null }
+    const result = await generateReport(path, dir)
+    if (result.status === 'ok' && !result.error && result.output_path) {
+      report = { status: 'ok', outputPath: result.output_path, error: null }
+    } else {
+      report = { status: 'error', outputPath: null, error: result.error ?? 'Failed to generate report' }
+    }
   }
 
   // F5 reopen hydration: checks whether this file already has a persisted
@@ -328,6 +369,22 @@
   </select>
 
   <ArrhythmiaControls path={path} channel={activeChannel} onComplete={refreshGraphBeats} />
+
+  <button
+    data-testid="generate-report-button"
+    disabled={report.status === 'generating'}
+    onclick={handleGenerateReport}
+  >
+    Generate Report
+  </button>
+
+  {#if report.status === 'generating'}
+    <span data-testid="report-generating">Generating report…</span>
+  {:else if report.status === 'ok'}
+    <p data-testid="report-success">Report saved to {report.outputPath}</p>
+  {:else if report.status === 'error'}
+    <p data-testid="report-error">Report generation failed: {report.error}</p>
+  {/if}
 
   {#if detection.status === 'pending'}
     <div data-testid="detection-summary">detecting beats for {selectedChannel}…</div>

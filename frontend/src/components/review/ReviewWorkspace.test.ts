@@ -1524,4 +1524,125 @@ describe('ReviewWorkspace', () => {
       }
     })
   })
+
+  // Task 4 of F5: report export. The technician picks an output directory
+  // via the native Electron dialog (`window.api.pickOutputDirectory`, F1),
+  // then `POST /files/report` (`generateReport` in `lib/api/persistence.ts`)
+  // writes the report there. Canceling the native dialog resolves `null` and
+  // must be a no-op — never call the API with a missing directory.
+  describe('report export: Generate Report button', () => {
+    function mockFetchForReport(reportResponse?: () => { ok: boolean; json: () => Promise<unknown> }) {
+      return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/report') && reportResponse) return Promise.resolve(reportResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+    }
+
+    it('opens the native directory picker, then calls generateReport with the chosen path', async () => {
+      const fetchMock = mockFetchForReport(() => ({
+        ok: true,
+        json: async () => ({ status: 'ok', output_path: '/Users/tech/reports/57.xlsx', error: null }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      ;(window as any).api = {
+        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+      }
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      await fireEvent.click(screen.getByTestId('generate-report-button'))
+
+      expect((window as any).api.pickOutputDirectory).toHaveBeenCalled()
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/files/report',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ path: '/data/57.txt', output_dir: '/Users/tech/reports' }),
+          }),
+        )
+      })
+    })
+
+    it('does nothing when the directory picker is canceled', async () => {
+      const fetchMock = mockFetchForReport()
+      vi.stubGlobal('fetch', fetchMock)
+      ;(window as any).api = {
+        pickOutputDirectory: vi.fn().mockResolvedValue(null),
+      }
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      await fireEvent.click(screen.getByTestId('generate-report-button'))
+
+      expect((window as any).api.pickOutputDirectory).toHaveBeenCalled()
+      // Give any (incorrect) fire-and-forget call a chance to fire before asserting.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/files/report'))).toBe(false)
+    })
+
+    it('shows the real output path on success', async () => {
+      const fetchMock = mockFetchForReport(() => ({
+        ok: true,
+        json: async () => ({ status: 'ok', output_path: '/Users/tech/reports/57.xlsx', error: null }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      ;(window as any).api = {
+        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+      }
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      await fireEvent.click(screen.getByTestId('generate-report-button'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('report-success')).toHaveTextContent('/Users/tech/reports/57.xlsx')
+      })
+    })
+
+    it('shows a clean inline error when report generation fails, without crashing', async () => {
+      const fetchMock = mockFetchForReport(() => ({
+        ok: true,
+        json: async () => ({
+          status: 'error',
+          output_path: null,
+          error: 'No persisted data for this file — run POST /files/beats first',
+        }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      ;(window as any).api = {
+        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+      }
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      await fireEvent.click(screen.getByTestId('generate-report-button'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('report-error')).toHaveTextContent(
+          'No persisted data for this file — run POST /files/beats first',
+        )
+      })
+      expect(screen.getByTestId('review-workspace')).toBeInTheDocument()
+    })
+  })
 })
