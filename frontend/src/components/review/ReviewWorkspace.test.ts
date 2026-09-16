@@ -8,22 +8,19 @@ afterEach(() => {
 })
 
 // jsdom performs no layout, so every element's real `clientWidth` is 0
-// unless overridden — same technique as EcgGraph.test.ts's own helper of the
-// same name (needed here too, for the click-to-select test below, since a
-// zero-width chart has no meaningful pixel-to-data mapping to click into).
-function withMockedClientWidth<T>(width: number, fn: () => T): T {
-  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
-  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: width })
-  try {
-    return fn()
-  } finally {
-    if (original) {
-      Object.defineProperty(HTMLElement.prototype, 'clientWidth', original)
-    } else {
-      delete (HTMLElement.prototype as any).clientWidth
-    }
-  }
-}
+// unless overridden — a zero-width chart has no meaningful pixel-to-data
+// mapping to click into. Every test below that needs to click a beat marker
+// overrides `HTMLElement.prototype.clientWidth` directly (restoring it in a
+// `finally`) rather than through a shared helper scoped to just the
+// synchronous `render()` call: EcgGraph only mounts once ReviewWorkspace's
+// own mount-time hydration (`getFileState`) has settled (see
+// `hydrationChecked` in ReviewWorkspace.svelte), which is always at least
+// one microtask after `render()` returns — so a helper whose override only
+// lives for the duration of a synchronous callback around `render()` would
+// already have restored the real (zero) `clientWidth` by the time EcgGraph
+// actually reads it in its own `onMount`. Holding the override open for
+// each test's full body (or, for tests with no click interaction at all,
+// not bothering with it) is what actually works here.
 
 function beatsOkResponse(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -317,31 +314,47 @@ describe('ReviewWorkspace', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    withMockedClientWidth(800, () => {
+    // EcgGraph no longer mounts synchronously within `render()` — it waits
+    // for ReviewWorkspace's mount-time hydration (`getFileState`) to settle
+    // first (see `hydrationChecked` in ReviewWorkspace.svelte), which only
+    // happens after an `await` has already let this synchronous test body
+    // move on. So the `clientWidth` override has to be held across that gap
+    // — scoping it to just the `render()` call (as a single-mount test could
+    // get away with before this gate existed) is no longer enough. Same
+    // technique the multi-mount describe blocks below already use.
+    const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+    try {
       render(ReviewWorkspace, {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
-    })
 
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-    expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
+      expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
 
-    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
-    // uPlot auto-ranges the x-domain to exactly the merged data's [min, max]
-    // with no padding (see EcgGraph.test.ts's `plotWidthPx`/`clientXForVal`
-    // comment for the full reasoning) — here that's exactly [0, 2], matching
-    // channelWindowOkResponse's x fixture, so this maps a click precisely
-    // onto the target beat's ts=1 (the domain midpoint).
-    const plotWidthPx = parseFloat(over.style.width)
-    const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+      const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+      // uPlot auto-ranges the x-domain to exactly the merged data's [min, max]
+      // with no padding (see EcgGraph.test.ts's `plotWidthPx`/`clientXForVal`
+      // comment for the full reasoning) — here that's exactly [0, 2], matching
+      // channelWindowOkResponse's x fixture, so this maps a click precisely
+      // onto the target beat's ts=1 (the domain midpoint).
+      const plotWidthPx = parseFloat(over.style.width)
+      const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
 
-    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+      over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+      document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
 
-    await waitFor(() => {
-      expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('t=1s, HR 75')
-    })
+      await waitFor(() => {
+        expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('t=1s, HR 75')
+      })
+    } finally {
+      if (originalClientWidth) {
+        Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+      } else {
+        delete (HTMLElement.prototype as any).clientWidth
+      }
+    }
   })
 
   // Task 2's pulled-forward persistence prerequisite: `PATCH
@@ -396,43 +409,56 @@ describe('ReviewWorkspace', () => {
       }))
       vi.stubGlobal('fetch', fetchMock)
 
-      withMockedClientWidth(800, () => {
+      // See the identical rationale in "shows the selected beat after a
+      // click on its marker..." above: EcgGraph only mounts after
+      // ReviewWorkspace's mount-time hydration settles, well after
+      // `render()` returns, so the `clientWidth` override has to be held
+      // for the whole test body, not just the synchronous `render()` call.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-      })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-      clickBeatMarker()
+        clickBeatMarker()
 
-      await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledWith(
-          'http://127.0.0.1:8000/files/beats',
-          expect.objectContaining({
-            method: 'POST',
-            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
-          }),
-        )
-      })
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({
+              method: 'POST',
+              body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+            }),
+          )
+        })
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
 
-      const persistCallsAfterFirstSelect = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes('/files/beats'),
-      ).length
-      expect(persistCallsAfterFirstSelect).toBe(1)
+        const persistCallsAfterFirstSelect = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/files/beats'),
+        ).length
+        expect(persistCallsAfterFirstSelect).toBe(1)
 
-      clickBeatMarker()
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
+        clickBeatMarker()
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
 
-      const persistCallsAfterSecondSelect = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes('/files/beats'),
-      ).length
-      expect(persistCallsAfterSecondSelect).toBe(1)
+        const persistCallsAfterSecondSelect = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/files/beats'),
+        ).length
+        expect(persistCallsAfterSecondSelect).toBe(1)
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
     })
 
     it('shows a retryable error and withholds the category panel when POST /files/beats fails', async () => {
@@ -446,27 +472,38 @@ describe('ReviewWorkspace', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      withMockedClientWidth(800, () => {
+      // Same rationale as the sibling test above: hold the override for the
+      // whole body since EcgGraph mounts asynchronously, after `render()`
+      // returns.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-      })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-      clickBeatMarker()
+        clickBeatMarker()
 
-      await waitFor(() => {
-        expect(screen.getByTestId('persist-error')).toHaveTextContent('db is locked')
-      })
-      expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
+        await waitFor(() => {
+          expect(screen.getByTestId('persist-error')).toHaveTextContent('db is locked')
+        })
+        expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
 
-      await fireEvent.click(screen.getByTestId('persist-retry-button'))
+        await fireEvent.click(screen.getByTestId('persist-retry-button'))
 
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
-      expect(screen.queryByTestId('persist-error')).not.toBeInTheDocument()
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
+        expect(screen.queryByTestId('persist-error')).not.toBeInTheDocument()
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
     })
   })
 
@@ -552,38 +589,51 @@ describe('ReviewWorkspace', () => {
       const fetchMock = mockFetchForChannelSwitch()
       vi.stubGlobal('fetch', fetchMock)
 
-      withMockedClientWidth(800, () => {
+      // EcgGraph mounts only after ReviewWorkspace's mount-time hydration
+      // settles (see `hydrationChecked` in ReviewWorkspace.svelte) — well
+      // after `render()` returns — and this test also switches channels
+      // (remounting EcgGraph again), so the override is held for the whole
+      // body, same as the "re-persists a channel..." test below.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-      })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-      await clickBeatMarker()
-      await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledWith(
-          'http://127.0.0.1:8000/files/beats',
-          expect.objectContaining({
-            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
-          }),
-        )
-      })
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
+        await clickBeatMarker()
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({
+              body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+            }),
+          )
+        })
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
 
-      const select = screen.getByTestId('channel-select') as HTMLSelectElement
-      await fireEvent.change(select, { target: { value: 'channel 2' } })
+        const select = screen.getByTestId('channel-select') as HTMLSelectElement
+        await fireEvent.change(select, { target: { value: 'channel 2' } })
 
-      await waitFor(() => {
-        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
-      })
+        await waitFor(() => {
+          expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+        })
 
-      // The stale channel-1 beat/category panel must be gone — back to the
-      // "no beat selected" state — not still showing channel 1's beat.
-      expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
-      expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
+        // The stale channel-1 beat/category panel must be gone — back to the
+        // "no beat selected" state — not still showing channel 1's beat.
+        expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
+        expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
     })
 
     it('re-persists a channel that was already persisted earlier, once a different channel has been persisted since', async () => {
@@ -591,13 +641,10 @@ describe('ReviewWorkspace', () => {
       vi.stubGlobal('fetch', fetchMock)
 
       // This test clicks the beat marker across THREE separate EcgGraph
-      // mounts (channel 1, then channel 2, then channel 1 again) — unlike
-      // the single-mount tests elsewhere in this file, `withMockedClientWidth`
-      // scoped to just the initial `render()` call isn't enough, since each
-      // channel switch remounts EcgGraph (and bakes in jsdom's real,
-      // unmocked `clientWidth` of 0) asynchronously, well after that
-      // synchronous scope has already restored the original descriptor. So
-      // the override is held for this test's entire body instead.
+      // mounts (channel 1, then channel 2, then channel 1 again), each one
+      // asynchronous (see the file-level comment above on why the override
+      // has to be held open rather than scoped to a synchronous callback) —
+      // so the override is held for this test's entire body.
       const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
       Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
       try {
@@ -1081,6 +1128,124 @@ describe('ReviewWorkspace', () => {
       })
     })
 
+    // Regression coverage for the Critical finding this task fixes: before
+    // the `hydrationChecked` gate, `{#key activeChannel}` only remounts
+    // EcgGraph when the KEY VALUE actually changes. If the persisted channel
+    // happens to equal `defaultChannel` — reopening a file on the same
+    // channel you left it on, the most common reopen case — `activeChannel`
+    // is set to the same value it already held, so no remount ever fires,
+    // and the EcgGraph instance already constructed at t=0 (seeded with
+    // `initialBadDataMarks=[]`, before hydration resolved) never picks up
+    // the hydrated marks. The test above already covers the
+    // different-channel case (which happened to work before this fix only
+    // because the channel mismatch forced a remount); this one isolates the
+    // same-channel case specifically.
+    it('preserves persisted bad-data marks on reopen even when the persisted channel equals defaultChannel', async () => {
+      const fetchMock = mockFetchWithFileState(
+        fileStateResponse({
+          found: true,
+          channel: 'channel 1', // same as defaultChannel below
+          beats: [],
+          bad_data_marks: [{ id: 1, start: 2, stop: 5 }],
+        }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+      })
+      await waitFor(() => {
+        expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+      })
+    })
+
+    // Regression coverage for the Important finding that EcgGraph's mount
+    // is a real, wasted (and possibly visibly-wrong) fetch against
+    // `defaultChannel`, not an inert one: EcgGraph's own onMount fires
+    // synchronously at initial render, before `getFileState`'s network round
+    // trip can possibly have resolved. This proves the fix — gating
+    // EcgGraph's very existence on `hydrationChecked` — by holding
+    // `getFileState`'s promise pending and asserting zero graph-related
+    // fetches have fired, then resolving it and asserting they now occur,
+    // for the correct (hydrated) channel.
+    it('does not mount EcgGraph (no /channels/window or /beats/window fetch) until GET /files/state resolves', async () => {
+      let resolveFileState: ((value: unknown) => void) | undefined
+      const fileStatePromise = new Promise((resolve) => {
+        resolveFileState = resolve
+      })
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return fileStatePromise
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      // Only the hydration check itself should have fired so far.
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(1))
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/files/state')
+      expect(screen.queryByTestId('ecg-graph')).not.toBeInTheDocument()
+
+      // Give any (incorrect) premature EcgGraph mount a chance to fire its
+      // fetches before resolving hydration, to prove the gate actually held.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(fetchMock.mock.calls.length).toBe(1)
+
+      resolveFileState!(fileStateResponse({ found: true, channel: 'channel 2', bad_data_marks: [] }))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      })
+      await waitFor(() => {
+        const calledUrls = fetchMock.mock.calls.map((call) => String(call[0]))
+        expect(calledUrls.some((url) => url.includes('/channels/window'))).toBe(true)
+        expect(calledUrls.some((url) => url.includes('/beats/window'))).toBe(true)
+      })
+    })
+
+    // Regression coverage for the Important finding that nothing coordinated
+    // the hydration write with a technician manually changing channels while
+    // `getFileState` was still in flight. Rather than adding a request-id
+    // guard to hydration itself, the fix makes the `<select>` structurally
+    // unable to fire `handleChannelChange` until hydration has settled —
+    // this proves that gate directly via the `disabled` attribute's
+    // lifecycle across the hydration promise.
+    it('disables the channel select while hydration is in flight and re-enables it once GET /files/state settles', async () => {
+      let resolveFileState: ((value: unknown) => void) | undefined
+      const fileStatePromise = new Promise((resolve) => {
+        resolveFileState = resolve
+      })
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return fileStatePromise
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      expect(select).toBeDisabled()
+
+      resolveFileState!(fileStateResponse())
+
+      await waitFor(() => {
+        expect(select).not.toBeDisabled()
+      })
+    })
+
     it('falls back to defaultChannel with no prior state (found: false)', async () => {
       const fetchMock = mockFetchWithFileState(fileStateResponse({ found: false }))
       vi.stubGlobal('fetch', fetchMock)
@@ -1252,36 +1417,47 @@ describe('ReviewWorkspace', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      withMockedClientWidth(800, () => {
+      // EcgGraph mounts only after ReviewWorkspace's mount-time hydration
+      // settles, after `render()` returns — see the identical rationale in
+      // "shows the selected beat after a click on its marker..." above.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-      })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-      clickBeatMarker()
+        clickBeatMarker()
 
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
 
-      const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes('/beats/window'),
-      ).length
-
-      await fireEvent.click(screen.getByTestId('confirm-button'))
-
-      await waitFor(() => {
-        expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
-      })
-
-      await waitFor(() => {
-        const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
+        const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
           String(call[0]).includes('/beats/window'),
         ).length
-        expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore + 1)
-      })
+
+        await fireEvent.click(screen.getByTestId('confirm-button'))
+
+        await waitFor(() => {
+          expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
+        })
+
+        await waitFor(() => {
+          const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
+            String(call[0]).includes('/beats/window'),
+          ).length
+          expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore + 1)
+        })
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
     })
 
     it('does not refresh the graph when a category update fails', async () => {
@@ -1307,34 +1483,45 @@ describe('ReviewWorkspace', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      withMockedClientWidth(800, () => {
+      // Same rationale as the sibling test above: hold the override for the
+      // whole body since EcgGraph mounts asynchronously, after `render()`
+      // returns.
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-      })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
-      clickBeatMarker()
+        clickBeatMarker()
 
-      await waitFor(() => {
-        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
-      })
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
 
-      const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes('/beats/window'),
-      ).length
+        const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/beats/window'),
+        ).length
 
-      await fireEvent.click(screen.getByTestId('confirm-button'))
+        await fireEvent.click(screen.getByTestId('confirm-button'))
 
-      await waitFor(() => {
-        expect(screen.getByTestId('validation-error')).toHaveTextContent('boom')
-      })
+        await waitFor(() => {
+          expect(screen.getByTestId('validation-error')).toHaveTextContent('boom')
+        })
 
-      const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes('/beats/window'),
-      ).length
-      expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore)
+        const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/beats/window'),
+        ).length
+        expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore)
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
     })
   })
 })

@@ -174,13 +174,15 @@
 
   // Bad-data marking. `badDataMode` gates handleDragStart below: off (the
   // default) a drag pans the graph exactly as before; on, the same drag
-  // instead selects a range to send to `addBadData`. Marks are session-local
-  // state only — F3 doesn't load persisted marks (that's F5's `GET
-  // /files/state` reopen flow) — rendered as a small proportional strip
-  // beneath the graph (`markLeftPct`/`markWidthPct`, relative to the full
-  // file extent) rather than as a canvas overlay synced to the current
-  // pan/zoom window: it's simpler, and a technician can see/remove a mark
-  // regardless of which part of the recording is currently in view.
+  // instead selects a range to send to `addBadData`. Marks are seeded from
+  // `initialBadDataMarks` on mount (F5's `GET /files/state` reopen flow, via
+  // ReviewWorkspace — see that prop's own comment below) and otherwise kept
+  // as session-local state, added/removed only through this component's own
+  // handlers — rendered as a small proportional strip beneath the graph
+  // (`markLeftPct`/`markWidthPct`, relative to the full file extent) rather
+  // than as a canvas overlay synced to the current pan/zoom window: it's
+  // simpler, and a technician can see/remove a mark regardless of which part
+  // of the recording is currently in view.
   let badDataMode: boolean = $state(false)
   // Seeded from `initialBadDataMarks` (F5 reopen hydration) instead of
   // always starting empty — see that prop's own comment above for why this

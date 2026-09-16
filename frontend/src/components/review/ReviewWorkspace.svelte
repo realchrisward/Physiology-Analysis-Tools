@@ -75,6 +75,38 @@
   // brand-new file (`found === false`) or if the state check itself fails.
   let initialBadDataMarks: BadDataMark[] = $state([])
 
+  // Set `true` once the mount-time `getFileState` call below has settled —
+  // found a record, found none, or errored, it doesn't matter which; see
+  // that `onMount`'s own `finally`. Gates two things in the template below:
+  // the channel `<select>` (`disabled={!hydrationChecked}`) and whether
+  // `<EcgGraph>` renders at all. Without this, two real bugs follow from
+  // `EcgGraph` mounting (and the `<select>` being interactive) synchronously
+  // at t=0, before hydration's network round trip can possibly have
+  // resolved: (1) `EcgGraph`'s `initialBadDataMarks` is a one-time seed
+  // (see that prop's own comment in EcgGraph.svelte) — if the persisted
+  // channel happens to equal `defaultChannel` (the common case: reopening a
+  // file on the same channel you left it on), `{#key activeChannel}` never
+  // sees the key value actually change, so no remount ever occurs to pick
+  // up the hydrated marks, and they're silently dropped. (2) Whether or not
+  // the channels match, `EcgGraph` fires a real, wasted `/channels/window`
+  // (and chained `/beats/window`) fetch against `defaultChannel` on every
+  // reopen where the persisted channel differs from it, with a real chance
+  // of a visibly-wrong chart briefly painting before the remount catches up.
+  // Holding both the graph and the `<select>` back until hydration has
+  // already set `selectedChannel`/`activeChannel`/`initialBadDataMarks` to
+  // their final values sidesteps both problems by construction — `EcgGraph`
+  // only ever mounts once, already correctly configured — and additionally
+  // makes `handleChannelChange` structurally unable to fire while a hydration
+  // write is still in flight, closing a third race: without this, a
+  // technician changing the channel mid-hydration and the hydration write
+  // itself could both write `selectedChannel`/`activeChannel`/
+  // `lastPersistedChannel` with no awareness of each other, and whichever
+  // resolved last would silently win. `getFileState` is a single, normally
+  // fast round trip, so this is a brief gap, not a perceptible delay — the
+  // `<select>`/detection-summary UI above still renders immediately either
+  // way, only the graph area waits.
+  let hydrationChecked: boolean = $state(false)
+
   // `POST /files/beats` (F5's persistence step, pulled forward here) has to
   // succeed for a given (path, channel) pair before the backend's
   // `PATCH /files/beats/category` will accept any confirm/reject/reassign
@@ -163,12 +195,20 @@
   // pre-F5 behavior. A state-check failure must never be worse than
   // starting fresh.
   onMount(async () => {
-    const result = await getFileState(path)
-    if (result.found && result.channel) {
-      selectedChannel = result.channel
-      activeChannel = result.channel
-      initialBadDataMarks = result.bad_data_marks ?? []
-      lastPersistedChannel = result.channel
+    try {
+      const result = await getFileState(path)
+      if (result.found && result.channel) {
+        selectedChannel = result.channel
+        activeChannel = result.channel
+        initialBadDataMarks = result.bad_data_marks ?? []
+        lastPersistedChannel = result.channel
+      }
+    } finally {
+      // Every exit path — found, not-found, or an error/rejection getFileState
+      // itself never actually produces (see its own "never throws" comment)
+      // but this stays defensive about regardless — lands here. See
+      // `hydrationChecked`'s own declaration above for what this unblocks.
+      hydrationChecked = true
     }
   })
 
@@ -276,7 +316,12 @@
 </script>
 
 <div data-testid="review-workspace">
-  <select data-testid="channel-select" bind:value={selectedChannel} onchange={handleChannelChange}>
+  <select
+    data-testid="channel-select"
+    bind:value={selectedChannel}
+    onchange={handleChannelChange}
+    disabled={!hydrationChecked}
+  >
     {#each channels as channel}
       <option value={channel}>{channel}</option>
     {/each}
@@ -298,22 +343,31 @@
   {/if}
 
   <div class="graph-area">
-    <!-- Keyed on `activeChannel`, NOT `selectedChannel` — see the
+    <!-- Gated on `hydrationChecked` — see its own declaration above. Nothing
+         renders here at all until the mount-time `getFileState` hydration
+         has settled, so the one and only mount of EcgGraph below is always
+         already configured with the final, correct `activeChannel`/
+         `initialBadDataMarks` — no transient fetch against `defaultChannel`,
+         and no reliance on a later remount to pick up hydrated marks.
+
+         Keyed on `activeChannel`, NOT `selectedChannel` — see the
          `activeChannel` declaration above for why the two are split.
          EcgGraph remounts (rather than updating its `channel` prop in
-         place) whenever the active channel changes — EcgGraph's own
-         fetch/uPlot-construction logic runs once, in onMount, so a remount
-         is the simplest way to get it to re-init for a new channel's
-         data. -->
-    {#key activeChannel}
-      <EcgGraph
-        {path}
-        channel={activeChannel}
-        onBeatSelect={handleBeatSelect}
-        {beatsRefreshToken}
-        {initialBadDataMarks}
-      />
-    {/key}
+         place) whenever the active channel changes after this — EcgGraph's
+         own fetch/uPlot-construction logic runs once, in onMount, so a
+         remount is the simplest way to get it to re-init for a new
+         channel's data. -->
+    {#if hydrationChecked}
+      {#key activeChannel}
+        <EcgGraph
+          {path}
+          channel={activeChannel}
+          onBeatSelect={handleBeatSelect}
+          {beatsRefreshToken}
+          {initialBadDataMarks}
+        />
+      {/key}
+    {/if}
   </div>
 
   <div data-testid="selected-beat-panel">
