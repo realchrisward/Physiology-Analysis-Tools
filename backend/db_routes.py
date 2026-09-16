@@ -81,6 +81,30 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             for mark_row in mark_rows
         ]
 
+        # Best-effort restore of the in-memory beat_cache entry every other
+        # beat-reading endpoint relies on. This is a side effect on top of
+        # this endpoint's normal response contract, so a malformed restore
+        # must never turn an otherwise-successful GET into an error.
+        try:
+            if beat_rows:
+                cache_df = pd.DataFrame(
+                    {
+                        "ts": [beat_row["ts"] for beat_row in beat_rows],
+                        "RR": [beat_row["rr"] for beat_row in beat_rows],
+                        "R_amplitude": [
+                            beat_row["r_amplitude"] for beat_row in beat_rows
+                        ],
+                        "HR": [beat_row["hr"] for beat_row in beat_rows],
+                    }
+                )
+                for col in categories.ALL_OPTIONAL_COLUMNS:
+                    col_values = [beat_row[col] for beat_row in beat_rows]
+                    if any(value is not None for value in col_values):
+                        cache_df[col] = [_to_bool(value) for value in col_values]
+                request.app.state.beat_cache[path] = cache_df
+        except Exception:
+            pass
+
         beat_settings = (
             BeatSettingsModel(**json.loads(row["beat_settings_json"]))
             if row["beat_settings_json"] is not None
@@ -222,6 +246,18 @@ def update_beat_category(
             return CategoryUpdateResult(
                 status="error", error="No beat found at this timestamp"
             )
+
+        # Keep the in-memory beat_cache entry (what every beat-reading
+        # endpoint actually reads from) in sync with this SQLite write, so a
+        # confirm/reject/reassign is visible immediately without a restart.
+        # No cache entry yet is a no-op, not an error — the DB write above
+        # already succeeded regardless.
+        cached_df = request.app.state.beat_cache.get(payload.path)
+        if cached_df is not None:
+            mask = cached_df["ts"] == updated["ts"]
+            if mask.any():
+                for col in categories.ALL_OPTIONAL_COLUMNS:
+                    cached_df.loc[mask, col] = _to_bool(updated[col])
 
         return CategoryUpdateResult(
             status="ok",

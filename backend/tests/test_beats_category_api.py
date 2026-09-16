@@ -169,6 +169,71 @@ def test_unknown_ts_is_an_error(tmp_path, real_beats_txt_file):
     assert result["error"]
 
 
+def test_reject_is_immediately_visible_via_beats_window_same_instance(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+
+    response = client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": ts, "action": "reject"},
+    )
+    assert response.json()["status"] == "ok"
+
+    window_response = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    )
+    result = window_response.json()
+    assert result["status"] == "ok"
+    beat = result["beats"][0]
+    assert beat["ts"] == pytest.approx(ts, abs=1e-6)
+    assert beat["tachycardia_absolute"] is False
+    assert beat["any_arrhythmia"] is False
+    assert beat["bradycardia_absolute"] is False
+    assert beat["skipped_beat"] is False
+    assert beat["prem_beat"] is False
+    assert beat["abn_cluster"] is False
+    assert beat["other_arrhythmia"] is False
+
+
+def test_reassign_is_immediately_visible_via_beats_window_same_instance(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.21)
+
+    response = client.patch(
+        "/files/beats/category",
+        json={
+            "path": real_beats_txt_file,
+            "ts": ts,
+            "action": "reassign",
+            "category": "prem_beat",
+        },
+    )
+    assert response.json()["status"] == "ok"
+
+    window_response = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    )
+    result = window_response.json()
+    assert result["status"] == "ok"
+    beat = result["beats"][0]
+    assert beat["ts"] == pytest.approx(ts, abs=1e-6)
+    assert beat["prem_beat"] is True
+    assert beat["any_arrhythmia"] is True
+    assert beat["bradycardia_absolute"] is False
+    assert beat["tachycardia_absolute"] is False
+    assert beat["skipped_beat"] is False
+    assert beat["abn_cluster"] is False
+    assert beat["other_arrhythmia"] is False
+
+
 def test_no_persisted_record_for_file_is_an_error(tmp_path, example_txt_file):
     client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
     client.post("/files/import", json={"paths": [example_txt_file]})
