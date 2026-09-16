@@ -219,10 +219,32 @@ def replace_beats(
     idempotent: calling this twice for the same detection result leaves
     exactly one row per beat, not duplicates.
 
+    Prior review state is preserved across a re-persist: any beat that had
+    already been confirmed/rejected/reassigned (i.e. `review_state !=
+    'unreviewed'`) keeps its `review_state`/`reassigned_category` if a beat
+    with the same `ts` is still present in `beat_df`. This makes it safe to
+    call this again after new detection output arrives (e.g. an arrhythmia
+    re-run) without silently discarding a technician's prior review work.
+    Matching is by exact float equality on `ts`, mirroring the precedent
+    already set by `update_beat_category`'s `WHERE ts=?` lookup — `ts`
+    always round-trips through the same detection pipeline rather than
+    being user-typed, so exact equality is safe here. A beat with no prior
+    review, or whose `ts` no longer appears in `beat_df`, still gets the
+    default `'unreviewed'`/`NULL`.
+
     `commit` defaults to True (standalone-call behavior). Pass
     `commit=False` when this call is one half of a larger transaction the
     caller will commit (or roll back) itself.
     """
+    preserved_state: dict[float, tuple[str, str | None]] = {
+        row["ts"]: (row["review_state"], row["reassigned_category"])
+        for row in conn.execute(
+            "SELECT ts, review_state, reassigned_category FROM beats "
+            "WHERE file_id=? AND review_state != 'unreviewed'",
+            (file_id,),
+        ).fetchall()
+    }
+
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 
     for row in beat_df.itertuples():
@@ -234,14 +256,27 @@ def replace_beats(
             else:
                 optional_values.append(None)
 
+        review_state, reassigned_category = preserved_state.get(
+            row.ts, ("unreviewed", None)
+        )
+
         conn.execute(
             "INSERT INTO beats ("
             "file_id, ts, rr, r_amplitude, hr, "
             "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
             "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
             "review_state, reassigned_category"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unreviewed', NULL)",
-            (file_id, row.ts, row.RR, row.R_amplitude, row.HR, *optional_values),
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                file_id,
+                row.ts,
+                row.RR,
+                row.R_amplitude,
+                row.HR,
+                *optional_values,
+                review_state,
+                reassigned_category,
+            ),
         )
 
     if commit:
