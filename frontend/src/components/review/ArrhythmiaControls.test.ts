@@ -95,6 +95,53 @@ describe('ArrhythmiaControls', () => {
     expect(screen.getByTestId('run-both-button')).not.toBeDisabled()
   })
 
+  // Regression coverage for the exploit described alongside this fix: a
+  // slow arrhythmia re-run started on one channel must not tell
+  // ReviewWorkspace to refresh the graph after the technician has already
+  // switched to a different channel — the backend's `beat_cache[path]` is
+  // keyed only by path (see `backend/beats.py`), so a stale response landing
+  // after the new channel's own `detectBeats` would otherwise clobber it
+  // back to the old channel's (now wrong-channel) data. This component is
+  // mounted as a live `channel` prop by ReviewWorkspace (not remounted via
+  // `{#key activeChannel}`), so the guard lives here: `run` captures the
+  // channel it was dispatched for and compares it against the CURRENT
+  // `channel` prop once `detectArrhythmias` resolves.
+  it('does not call onComplete when the channel prop changes while a run is still in flight', async () => {
+    let resolveFetch: ((value: unknown) => void) | undefined
+    const pending = new Promise((resolve) => {
+      resolveFetch = resolve
+    })
+    const fetchMock = vi.fn().mockReturnValue(pending)
+    vi.stubGlobal('fetch', fetchMock)
+    const onComplete = vi.fn()
+
+    const { rerender } = render(ArrhythmiaControls, {
+      props: { path: '/data/57.txt', channel: 'channel 1', onComplete },
+    })
+
+    await fireEvent.click(screen.getByTestId('run-heuristic-button'))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/arrhythmia/detect',
+        expect.objectContaining({
+          body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1', method: 'heuristic' }),
+        }),
+      )
+    })
+
+    // Simulate ReviewWorkspace advancing `activeChannel` to channel 2 (e.g.
+    // the technician switched and channel 2's own `detectBeats` resolved)
+    // while channel 1's arrhythmia run is still pending. This component is a
+    // live prop, not remounted, so its `channel` prop just updates in place.
+    await rerender({ path: '/data/57.txt', channel: 'channel 2', onComplete })
+
+    // Now let channel 1's stale response resolve.
+    resolveFetch!(arrhythmiaOkResponse())
+    await waitFor(() => expect(screen.queryByTestId('arrhythmia-running')).not.toBeInTheDocument())
+
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
   it('clears the running state, shows an error, and does not call onComplete on failure', async () => {
     const fetchMock = vi.fn().mockResolvedValue(arrhythmiaErrorResponse('boom'))
     vi.stubGlobal('fetch', fetchMock)

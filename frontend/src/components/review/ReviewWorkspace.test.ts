@@ -883,5 +883,98 @@ describe('ReviewWorkspace', () => {
         expect(calledPaths.filter((p) => p === '/channels/window')).toHaveLength(1)
       })
     })
+
+    // Regression coverage for the corruption exploit this fix closes:
+    // `ArrhythmiaControls` is mounted against `activeChannel` as a live prop
+    // (NOT `{#key activeChannel}`-wrapped), so a slow `detectArrhythmias`
+    // run started on channel 1 stays in flight across a channel switch. If
+    // its stale response were allowed to call `onComplete` after channel 2
+    // became active, it would bump `beatsRefreshToken` and trigger an extra
+    // `/beats/window` fetch against `beat_cache[path]` — which, on a real
+    // backend, channel 1's own (now-late) `/arrhythmia/detect` response
+    // would have just clobbered back to channel 1's data, since the cache is
+    // keyed only by path (see `backend/beats.py`). This test can't reproduce
+    // that backend clobbering with mocked fetches, but it proves the
+    // frontend half unconditionally required to prevent it: the stale
+    // channel-1 completion must never fire a second `/beats/window` fetch
+    // once channel 2 is active. Same "hold the promise pending, resolve out
+    // of order" technique as the "persist race" describe block above.
+    it('does not refresh the graph when a stale arrhythmia rerun for a previous channel resolves after switching channels', async () => {
+      let resolveArrhythmia: ((value: unknown) => void) | undefined
+      const arrhythmiaPromise = new Promise((resolve) => {
+        resolveArrhythmia = resolve
+      })
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [], count: 0, error: null }),
+          })
+        }
+        if (url.includes('/arrhythmia/detect')) return arrhythmiaPromise
+        return Promise.resolve(beatsOkResponse()) // /beats/detect
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      // Initial mount: /channels/window + /beats/window for channel 1.
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+
+      // Start an arrhythmia rerun on channel 1 — held pending, not resolved.
+      await fireEvent.click(screen.getByTestId('run-heuristic-button'))
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/arrhythmia/detect',
+          expect.objectContaining({
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1', method: 'heuristic' }),
+          }),
+        )
+      })
+
+      // Before it resolves, switch to channel 2 — its own detectBeats
+      // resolves normally (mockFetch's default /beats/detect branch), so
+      // the graph advances to channel 2.
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      await fireEvent.change(select, { target: { value: 'channel 2' } })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      })
+
+      const beatsWindowCallsBeforeStaleResolve = fetchMock.mock.calls.filter((call) =>
+        new URL(String(call[0])).pathname === '/beats/window',
+      ).length
+
+      // Now resolve channel 1's stale arrhythmia response.
+      resolveArrhythmia!({
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          beats: [],
+          count: 5,
+          any_arrhythmia_count: 1,
+          elapsed_seconds: 0.2,
+          error: null,
+        }),
+      })
+      // Let any (incorrect) stale onComplete/refresh flush before asserting.
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The graph must still be on channel 2, and must NOT have fired an
+      // extra /beats/window fetch in response to the stale channel-1 run.
+      expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      const beatsWindowCallsAfterStaleResolve = fetchMock.mock.calls.filter((call) =>
+        new URL(String(call[0])).pathname === '/beats/window',
+      ).length
+      expect(beatsWindowCallsAfterStaleResolve).toBe(beatsWindowCallsBeforeStaleResolve)
+    })
   })
 })

@@ -25,10 +25,20 @@
   let error: string | null = $state(null)
 
   async function run(method: 'heuristic' | 'unsupervised' | 'both') {
+    // Captured up front: the channel this specific run is FOR. `channel` is
+    // a live prop (this component is mounted as `channel={activeChannel}`
+    // in ReviewWorkspace, not remounted/reset via `{#key activeChannel}`),
+    // so if the technician switches channels while `detectArrhythmias` below
+    // is still in flight, `channel` will have already moved on by the time
+    // it resolves — re-reading it post-`await` gives the CURRENT channel,
+    // not the one this run was dispatched for.
+    const requestedChannel = channel
     runState = 'running'
     error = null
     try {
-      const result = await detectArrhythmias(path, channel, method)
+      const result = await detectArrhythmias(path, requestedChannel, method)
+      if (requestedChannel !== channel) return // superseded by a channel switch while this run was in flight
+
       if (result.status === 'ok' && !result.error) {
         // Only a genuinely successful run tells ReviewWorkspace to refresh
         // EcgGraph's beat markers — a failed/unchanged result must not
