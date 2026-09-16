@@ -5,10 +5,19 @@
     path,
     channel,
     onComplete,
+    disabled = false,
   }: {
     path: string
     channel: string
     onComplete: () => void
+    // Set by ReviewWorkspace to `!hydrationChecked` — see that component's
+    // comment on the `<ArrhythmiaControls>` usage. ANDed with this
+    // component's own `runState`-based button-disabling below rather than
+    // replacing it, so a run already in flight still keeps the buttons
+    // disabled even after `disabled` itself later flips back to `false`.
+    // Defaults to `false` so every other caller/test that doesn't pass it
+    // keeps today's behavior unchanged.
+    disabled?: boolean
   } = $props()
 
   // Single state value for the whole re-run lifecycle, set synchronously
@@ -54,17 +63,25 @@
 </script>
 
 <div data-testid="arrhythmia-controls">
-  <button data-testid="run-heuristic-button" disabled={runState === 'running'} onclick={() => run('heuristic')}>
+  <button
+    data-testid="run-heuristic-button"
+    disabled={runState === 'running' || disabled}
+    onclick={() => run('heuristic')}
+  >
     Run heuristic
   </button>
   <button
     data-testid="run-unsupervised-button"
-    disabled={runState === 'running'}
+    disabled={runState === 'running' || disabled}
     onclick={() => run('unsupervised')}
   >
     Run unsupervised
   </button>
-  <button data-testid="run-both-button" disabled={runState === 'running'} onclick={() => run('both')}>
+  <button
+    data-testid="run-both-button"
+    disabled={runState === 'running' || disabled}
+    onclick={() => run('both')}
+  >
     Run both
   </button>
 

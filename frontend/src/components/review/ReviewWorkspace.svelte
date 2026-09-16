@@ -270,9 +270,17 @@
     persistError = null
   })
 
-  async function ensureChannelPersisted(channel: string) {
-    if (lastPersistedChannel === channel) return
-
+  // Shared by both `ensureChannelPersisted` (below — skips the call
+  // entirely if `channel` was already the last-persisted one) and
+  // `handleArrhythmiaComplete` (below — deliberately calls this
+  // unconditionally, bypassing that skip, since a successful arrhythmia
+  // rerun changes `beat_cache[path]` even for a channel that was already
+  // persisted earlier this session). Both call sites share the SAME
+  // `persistRequestId` counter, so a stale response from either one can't
+  // clobber a newer persist's result regardless of which call site issued
+  // it — mirroring the pre-existing out-of-order-response guard this
+  // function's body already implemented before being pulled out here.
+  async function persistChannelData(channel: string) {
     const requestId = ++persistRequestId
     persistPending = true
     persistError = null
@@ -286,6 +294,11 @@
     } else {
       persistError = result.error ?? 'Failed to prepare review data'
     }
+  }
+
+  async function ensureChannelPersisted(channel: string) {
+    if (lastPersistedChannel === channel) return
+    await persistChannelData(channel)
   }
 
   function handleBeatSelect(beat: WindowBeat) {
@@ -308,9 +321,44 @@
     // beat stayed stuck at its pre-review state until a full channel
     // switch remounted EcgGraph. A failed/unchanged result must not
     // trigger a refetch against data that hasn't actually changed.
+    //
+    // Deliberately does NOT also call `persistChannelData` (unlike
+    // `handleArrhythmiaComplete` below): `PATCH /files/beats/category`
+    // already writes this one beat's review state directly to SQLite
+    // (`db.update_beat_category`), so a wholesale `POST /files/beats`
+    // re-persist here would be redundant — Part 1's replace_beats fix
+    // makes it *safe* to call again, not *useful* to call again on this
+    // path.
     if (result.status === 'ok' && !result.error) {
       refreshGraphBeats()
     }
+  }
+
+  // Passed as `ArrhythmiaControls`' `onComplete` prop — DISTINCT from
+  // `handleCategoryUpdated` above. A successful arrhythmia rerun (`POST
+  // /arrhythmia/detect`) only updates the in-memory `beat_cache[path]` on
+  // the backend; unlike a category action, nothing else writes that result
+  // to SQLite. Without this, a rerun after some beats were already
+  // reviewed would leave the *displayed* graph correct (via
+  // `refreshGraphBeats` below) while the *persisted* (and therefore
+  // reported/exported) data silently went stale — reproducible via: select
+  // a beat (persists channel) → confirm/reject it → rerun arrhythmia →
+  // generate report → the .xlsx reflects the pre-rerun detection.
+  //
+  // Calls `persistChannelData` directly (not `ensureChannelPersisted`):
+  // this channel may already be `lastPersistedChannel` from an earlier beat
+  // selection, but the underlying `beat_cache[path]` just changed, so the
+  // persist must happen again regardless — `ensureChannelPersisted`'s
+  // skip-if-already-persisted guard exists for a different reason (avoiding
+  // a redundant persist on a second beat *selection* for the same,
+  // unchanged, channel) and would wrongly suppress this one. This is safe
+  // to call repeatedly now (Part 1's `replace_beats` fix in `backend/db.py`
+  // preserves any beat's prior `review_state`/`reassigned_category` across
+  // a re-persist), so it does not undo any confirm/reject/reassign already
+  // applied on this channel.
+  async function handleArrhythmiaComplete() {
+    refreshGraphBeats()
+    await persistChannelData(activeChannel)
   }
 
   async function handleChannelChange() {
@@ -368,7 +416,23 @@
     {/each}
   </select>
 
-  <ArrhythmiaControls path={path} channel={activeChannel} onComplete={refreshGraphBeats} />
+  <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
+       own `disabled` above: `activeChannel` still holds `defaultChannel`
+       until the mount-time `getFileState` hydration resolves, so a rerun
+       triggered before that settles would run arrhythmia detection against
+       the wrong (pre-hydration) channel on reopen. Uses a `disabled` prop
+       ANDed with ArrhythmiaControls' own `runState`-based button-disabling
+       (see that component) rather than wrapping this in `{#if
+       hydrationChecked}` — that would work too, but a prop keeps this
+       component mounted (and its `channel` prop live-updating) across the
+       hydration boundary exactly like the `<select>` above, instead of an
+       unmount/remount that briefly hides these controls entirely. -->
+  <ArrhythmiaControls
+    path={path}
+    channel={activeChannel}
+    onComplete={handleArrhythmiaComplete}
+    disabled={!hydrationChecked}
+  />
 
   <button
     data-testid="generate-report-button"

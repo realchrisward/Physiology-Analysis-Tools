@@ -1053,6 +1053,117 @@ describe('ReviewWorkspace', () => {
       ).length
       expect(beatsWindowCallsAfterStaleResolve).toBe(beatsWindowCallsBeforeStaleResolve)
     })
+
+    // The core fix this wave adds: a successful arrhythmia rerun only ever
+    // updated the in-memory `beat_cache[path]` on the backend before this —
+    // never written back to SQLite — so a report generated after a rerun
+    // would silently reflect the STALE pre-rerun detection. `POST
+    // /files/beats` is the only thing that persists `beat_cache` to SQLite
+    // (via `replace_beats`), so a successful rerun must trigger it again,
+    // in addition to the existing beats-marker refresh proven above.
+    it('also persists the channel via POST /files/beats after a successful rerun, on top of an earlier beat-selection persist', async () => {
+      const targetBeat = {
+        ts: 1,
+        rr: 0.8,
+        r_amplitude: 6,
+        hr: 75,
+        bradycardia_absolute: false,
+        tachycardia_absolute: false,
+        skipped_beat: false,
+        prem_beat: false,
+        abn_cluster: false,
+        any_arrhythmia: true,
+        other_arrhythmia: false,
+      }
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/arrhythmia/detect')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              status: 'ok',
+              beats: [],
+              count: 5,
+              any_arrhythmia_count: 1,
+              elapsed_seconds: 0.2,
+              error: null,
+            }),
+          })
+        }
+        if (url.includes('/files/beats/category')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', ts: 1, review_state: 'confirmed', reassigned_category: null, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+        // Select a beat first — this fires the FIRST `POST /files/beats`
+        // via `ensureChannelPersisted`.
+        const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+        const plotWidthPx = parseFloat(over.style.width)
+        const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+        over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+        document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
+
+        const persistCallsAfterSelection = fetchMock.mock.calls.filter(
+          (call) => new URL(String(call[0])).pathname === '/files/beats',
+        ).length
+        expect(persistCallsAfterSelection).toBe(1)
+
+        // Now run arrhythmia detection — a successful rerun must fire a
+        // SECOND `/files/beats` call, with the current channel.
+        await fireEvent.click(screen.getByTestId('run-heuristic-button'))
+
+        await waitFor(() => {
+          const persistCallsAfterRerun = fetchMock.mock.calls.filter(
+            (call) => new URL(String(call[0])).pathname === '/files/beats',
+          ).length
+          expect(persistCallsAfterRerun).toBe(2)
+        })
+
+        const persistCalls = fetchMock.mock.calls.filter(
+          (call) => new URL(String(call[0])).pathname === '/files/beats',
+        )
+        expect(persistCalls[1][1]).toEqual(
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+          }),
+        )
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
+    })
   })
 
   // Task 2 of F5: reopening a file loads its prior review state (channel,
@@ -1244,6 +1355,43 @@ describe('ReviewWorkspace', () => {
       await waitFor(() => {
         expect(select).not.toBeDisabled()
       })
+    })
+
+    // Part 3 of this wave's fix: extends the same hydration-settling
+    // protection to `ArrhythmiaControls` — `activeChannel` still holds
+    // `defaultChannel` until `getFileState` resolves, so a rerun started
+    // before then would run against the wrong (pre-hydration) channel on
+    // reopen. Mirrors the channel `<select>`'s own equivalent test above,
+    // but for `ArrhythmiaControls`' three method buttons via its
+    // `disabled` prop (ANDed with its own `runState`-based disabling).
+    it('disables the ArrhythmiaControls buttons while hydration is in flight and re-enables them once GET /files/state settles', async () => {
+      let resolveFileState: ((value: unknown) => void) | undefined
+      const fileStatePromise = new Promise((resolve) => {
+        resolveFileState = resolve
+      })
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return fileStatePromise
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      expect(screen.getByTestId('run-heuristic-button')).toBeDisabled()
+      expect(screen.getByTestId('run-unsupervised-button')).toBeDisabled()
+      expect(screen.getByTestId('run-both-button')).toBeDisabled()
+
+      resolveFileState!(fileStateResponse())
+
+      await waitFor(() => {
+        expect(screen.getByTestId('run-heuristic-button')).not.toBeDisabled()
+      })
+      expect(screen.getByTestId('run-unsupervised-button')).not.toBeDisabled()
+      expect(screen.getByTestId('run-both-button')).not.toBeDisabled()
     })
 
     it('falls back to defaultChannel with no prior state (found: false)', async () => {
@@ -1451,6 +1599,77 @@ describe('ReviewWorkspace', () => {
           ).length
           expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore + 1)
         })
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
+    })
+
+    // Part 2 of this wave's fix: `handleCategoryUpdated` must stay on the
+    // pre-existing `refreshGraphBeats`-only path — `PATCH
+    // /files/beats/category` already writes straight to SQLite via
+    // `db.update_beat_category`, so a category action must NOT also trigger
+    // a wholesale `POST /files/beats` re-persist (that's reserved for
+    // `handleArrhythmiaComplete`, proven separately in the "arrhythmia
+    // re-run wiring" describe block above). Exactly one `/files/beats` call
+    // total — from the initial `ensureChannelPersisted` on beat selection —
+    // proves `handleCategoryUpdated`'s path stays undisturbed.
+    it('does not trigger an extra POST /files/beats when a category action succeeds', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats/category')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', ts: 1, review_state: 'confirmed', reassigned_category: null, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+        clickBeatMarker()
+
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
+
+        const persistCallsAfterSelection = fetchMock.mock.calls.filter(
+          (call) => new URL(String(call[0])).pathname === '/files/beats',
+        ).length
+        expect(persistCallsAfterSelection).toBe(1)
+
+        await fireEvent.click(screen.getByTestId('confirm-button'))
+
+        await waitFor(() => {
+          expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
+        })
+
+        const persistCallsAfterConfirm = fetchMock.mock.calls.filter(
+          (call) => new URL(String(call[0])).pathname === '/files/beats',
+        ).length
+        expect(persistCallsAfterConfirm).toBe(1)
       } finally {
         if (originalClientWidth) {
           Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
