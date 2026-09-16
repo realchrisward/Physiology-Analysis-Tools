@@ -4,11 +4,14 @@ The complete FastAPI backend (`backend/`) for the Physiology Analysis Tools UI
 redesign (`web-ui-redesign` branch) — a full rewrite of the old PySide6 desktop
 app's analysis logic behind a local HTTP API, consumed by an Electron+Svelte
 frontend. All four backend-completion milestones (M4-M7), plus the original
-three foundation milestones (M1-M3), are complete: **69 tests passing, 1
-correctly skipped**. This doc consolidates everything from the individual
-milestone plans/specs into one reference — those documents (listed at the
-bottom) remain as historical/audit record but this file is the fast path to
-understanding current backend state.
+three foundation milestones (M1-M3), are complete: **77 tests passing, 1
+correctly skipped**. Two small, justified additions landed during the frontend
+build's F5 milestone (a real reopen-resume gap and a review-state-preservation
+fix, both found by exercising the whole app together — see Design decisions)
+— the backend itself has otherwise been unchanged since M7. This doc
+consolidates everything from the individual milestone plans/specs into one
+reference — those documents (listed at the bottom) remain as historical/audit
+record but this file is the fast path to understanding current backend state.
 
 ## Architecture
 
@@ -66,7 +69,7 @@ understanding current backend state.
 | `backend/beats_window.py` | `GET /beats/window` — range-filters `beat_cache[path]` by `ts`. Arrhythmia category fields all optional (a file may only have had beat detection run). |
 | `backend/categories.py` | Single source of truth for arrhythmia category column names: `BASE_CATEGORIES` (5), `REASSIGNABLE_CATEGORIES` (+`other_arrhythmia`, 6), `ALL_OPTIONAL_COLUMNS` (+`any_arrhythmia`, 7). Consumed by `arrhythmia.py`, `beats_window.py`, `db.py`, `db_routes.py`. |
 | `backend/db.py` | SQLite persistence layer. `connect()`, `default_db_path()`, `get_file_row`, `upsert_file` (partial-update via an `_UNSET` sentinel, optional `commit=False` for transactions), `replace_beats`, `update_beat_category` (confirm/reject/reassign), `add_bad_data_mark`/`delete_bad_data_mark`. Schema below. |
-| `backend/db_routes.py` | `APIRouter(prefix="/files")`, 7 persistence endpoints — see API Reference. Every endpoint wraps its DB body in `try/except Exception`. |
+| `backend/db_routes.py` | `APIRouter(prefix="/files")`, 7 persistence endpoints — see API Reference. Every endpoint wraps its DB body in `try/except Exception`. `GET /files/state` restores `app.state.beat_cache[path]` from persisted rows when found (frontend-driven addition, see Design decisions); `PATCH /files/beats/category` keeps that same cache entry in sync with every mutation. |
 | `backend/models.py` | Every Pydantic request/response model — see API Reference for exact shapes. |
 | `backend/requirements.txt` | fastapi, uvicorn, httpx, pytest, openpyxl (test-only, see Known risks) — not yet split into runtime vs. dev deps. |
 | `backend/tests/` | `conftest.py` (shared fixtures: `example_txt_file`=10.txt, `real_beats_txt_file`=57.txt, `long_txt_file`="9 long.txt", `adicht_examples_dir`), one test file per module above, plus `test_adicht_extraction.py` (self-skips unless `adi-reader` is functional). |
@@ -88,10 +91,10 @@ spaces, colons) don't round-trip safely as a raw URL segment.
 | `POST /arrhythmia/detect` | `{path, channel, method}` (`method`: `"heuristic"\|"unsupervised"\|"both"`) | `ArrhythmiaDetectionResult` | `beats` (each with the 5 optional category flags + `any_arrhythmia`/`other_arrhythmia`), `any_arrhythmia_count`. |
 | `GET /channels/window` | query: `path, channel, start, end, resolution` | `ChannelWindowResult` | `x`, `y`, `point_count`, `downsampled`. Memoized. |
 | `GET /beats/window` | query: `path, start, end` | `BeatWindowResult` | `beats: [WindowBeat]` (all category fields optional). |
-| `GET /files/state` | query: `path` | `FileStateResult` | `found`, `channel`, `beats: [PersistedBeat]`, `bad_data_marks`, `beat_settings`, `arrhythmia_settings`. |
+| `GET /files/state` | query: `path` | `FileStateResult` | `found`, `channel`, `beats: [PersistedBeat]`, `bad_data_marks`, `beat_settings`, `arrhythmia_settings`. **Side effect**: when found, also restores `app.state.beat_cache[path]` from the persisted rows (best-effort, own exception guard — never breaks the response contract). |
 | `PUT /files/channel` | `{path, channel}` | `ChannelPersistResult` | |
-| `POST /files/beats` | `{path, channel}` | `PersistBeatsResult` | Wholesale delete-then-reinsert from `beat_cache[path]`, atomic with the channel/settings-snapshot update. |
-| `PATCH /files/beats/category` | `{path, ts, action, category?}` (`action`: `"confirm"\|"reject"\|"reassign"`) | `CategoryUpdateResult` | `reject` clears all 6 category columns + `any_arrhythmia`. `reassign` needs `category` in `REASSIGNABLE_CATEGORIES`. |
+| `POST /files/beats` | `{path, channel}` | `PersistBeatsResult` | Wholesale delete-then-reinsert from `beat_cache[path]`, atomic with the channel/settings-snapshot update. **Safe to call repeatedly on the same channel** — `replace_beats()` preserves any beat's existing non-`"unreviewed"` `review_state`/`reassigned_category` across the reinsert, by exact `ts` match (see Design decisions). |
+| `PATCH /files/beats/category` | `{path, ts, action, category?}` (`action`: `"confirm"\|"reject"\|"reassign"`) | `CategoryUpdateResult` | `reject` clears all 6 category columns + `any_arrhythmia`. `reassign` needs `category` in `REASSIGNABLE_CATEGORIES`. Also syncs `app.state.beat_cache[path]` in place if present. |
 | `POST /files/bad-data` | `{path, start, stop}` | `BadDataAddResult` | Always auto-sorted (`min`/`max`), regardless of input order. |
 | `DELETE /files/bad-data` | `{path, id}` | `BadDataDeleteResult` | Scoped to `(id, file_id)`. |
 | `POST /files/report` | `{path, output_dir}` | `ReportResult` | Writes `<output_dir>/<basename>.xlsx`, 3 sheets (`beats`, `bad_data_marks`, `settings`), via `xlsxwriter`. |
@@ -153,6 +156,32 @@ bad_data_marks (id, file_id, start, stop)
 - **Every `db_routes.py` endpoint wraps its DB body in `try/except
   Exception`** — including `GET /files/state`, closed in M7's final-review
   fix wave after being deliberately left open through Tasks 1-4.
+- **`GET /files/state` restores `beat_cache[path]` on reopen; `PATCH
+  /files/beats/category` keeps it synced on every mutation.** Found while
+  building the frontend's F5 milestone: M7 shipped `GET /files/state` as a
+  read-only status report, but every OTHER beat-reading endpoint
+  (`GET /beats/window`, `POST /arrhythmia/detect`) reads the in-memory
+  `beat_cache`, not SQLite — so on a genuine process restart, a technician's
+  persisted review history existed in SQLite but was invisible to the live
+  graph and blocked re-running arrhythmia detection. Neither gap was new
+  scope; both complete M7's own "resume" intent for the specific case of a
+  real restart, which M7's own tests (all same-process) never exercised.
+- **`replace_beats()` preserves review state across repeated persists.**
+  The original M7 design was correct for a channel's FIRST persist
+  (`review_state` defaults to `"unreviewed"` for every row) but wholesale
+  delete-and-reinsert on every LATER persist too — so re-persisting a
+  channel (e.g. after re-running arrhythmia detection) would silently
+  reset every beat's confirm/reject/reassign history back to
+  `"unreviewed"`. Found by exercising the full frontend flow end-to-end
+  (review some beats → rerun arrhythmia → the graph's own re-fetch logic
+  needs a fresh persist to keep the export in sync). Fix: snapshot every
+  beat's non-`"unreviewed"` `(review_state, reassigned_category)` by exact
+  `ts` before the delete, reapply it on matching `ts` during the reinsert —
+  a beat with no prior review, or a `ts` that didn't survive re-detection,
+  still correctly defaults to `"unreviewed"`/`NULL`. Matching by exact
+  `ts` mirrors `update_beat_category`'s existing precedent; a coincidental
+  `ts` collision across a genuine re-detection could in principle inherit
+  stale state (theoretical, not observed — see Known risks).
 
 ## Known cross-effects / risks
 
@@ -197,23 +226,39 @@ bad_data_marks (id, file_id, start, stop)
   columns. Worth a product check with a lab technician.
 - **`PersistedBeat` (M7) and `WindowBeat` (M6) are near-duplicate models**
   — a shared base model would remove the duplication.
+- **`replace_beats()`'s review-state preservation matches beats by exact
+  `ts` alone**, same precedent as `update_beat_category`. A coincidental
+  `ts` collision between two genuinely different beats across a real
+  re-detection would inherit the wrong (stale) review state onto the new
+  beat. Theoretical, not observed against any real file this session —
+  flagged explicitly during F5's final fix-wave rather than silently
+  assumed safe.
 
 ## Progress
 
-- **Done**: all backend work. M1 (scaffold, channel selection, extractor
-  wrapper, import/list). M4 (beat detection). M5 (settings, arrhythmia
-  detection). M6 (data windowing/LOD, deterministic downsampling). M7
-  (SQLite persistence, review mutations, Excel export). **69 tests
-  passing, 1 correctly skipped.** Every milestone reviewed per-task and
-  whole-branch (Sonnet); every final review's findings fix-waved and
-  re-reviewed clean.
+- **Done**: all backend work, plus 2 small F5-frontend-driven additions.
+  M1 (scaffold, channel selection, extractor wrapper, import/list). M4
+  (beat detection). M5 (settings, arrhythmia detection). M6 (data
+  windowing/LOD, deterministic downsampling). M7 (SQLite persistence,
+  review mutations, Excel export). F5 additions: `GET /files/state`
+  restores `beat_cache` on reopen; `PATCH /files/beats/category` keeps it
+  synced; `replace_beats()` preserves review state across repeated
+  persists. **77 tests passing, 1 correctly skipped.** Every milestone
+  and fix wave reviewed (Sonnet, per-task + whole-branch), every finding
+  fix-waved and re-reviewed clean — several with real fail-before/
+  pass-after verification against the pre-fix commit.
 - **Skipped by explicit user instruction**: the one consolidated
   cross-milestone Opus review (hit a session rate limit mid-run; user
   chose to proceed to frontend work rather than retry it).
-- **Not started**: Electron packaging, old-UI (`main.py`/PySide6) removal.
-- **In progress**: Svelte frontend with full backend integration (started
-  after this doc's consolidation) — Windows/real-`.adicht`-file testing
-  deferred to later, per explicit user instruction.
+- **The frontend (F1-F5) is also now complete** — see
+  `FRONTEND_OVERVIEW.md`. The two backend additions above were both
+  found by exercising the full app end-to-end during F5, not backend
+  work resuming independently.
+- **Not started**: Electron packaging, old-UI (`main.py`/PySide6) removal,
+  a visual/layout styling pass on the frontend — all explicitly out of
+  scope for the M1-M7/F1-F5 build, not newly discovered gaps. Real
+  device/file testing (Windows, real `.adicht` files) remains explicitly
+  deferred per direct user instruction.
 - **Branch**: `web-ui-redesign`, not merged to `main`.
 
 ## Frontend/Electron dev setup
