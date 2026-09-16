@@ -1,7 +1,9 @@
 <script lang="ts">
   import { detectBeats } from '../../lib/api/beats'
+  import { persistBeats } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
-  import type { WindowBeat } from '../../lib/api/types'
+  import BeatCategoryPanel from './BeatCategoryPanel.svelte'
+  import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
     status: 'pending' | 'ok' | 'error' | null
@@ -61,14 +63,63 @@
   let detectionRequestId = 0
 
   // The beat most recently selected via a click on EcgGraph's marker (see
-  // `onBeatSelect` below). Task 2 (BeatCategoryPanel) replaces the plain-text
-  // rendering below with real category-review controls driven by this same
-  // state — kept here as a genuinely functional stepping stone (it proves
-  // the click → select → display wiring actually works end to end) rather
-  // than an inert placeholder, per this project's "leave a real slot, don't
-  // build a placeholder" discipline (see F3 Task 1's ImportScreen for the
-  // precedent).
+  // `onBeatSelect` below), driving the real `BeatCategoryPanel` below.
   let selectedBeat: WindowBeat | null = $state(null)
+
+  // `POST /files/beats` (F5's persistence step, pulled forward here) has to
+  // succeed for a given (path, channel) pair before the backend's
+  // `PATCH /files/beats/category` will accept any confirm/reject/reassign
+  // for it — see BACKEND_OVERVIEW.md and `backend/db_routes.py`'s
+  // `update_beat_category`, which 404s with "No persisted data for this
+  // file" until a `files` row exists.
+  //
+  // Trigger point chosen: EAGERLY, the first time a beat is selected for a
+  // given channel this session — not lazily on the first confirm/reject/
+  // reassign click inside `BeatCategoryPanel`. `BeatCategoryPanel`'s own
+  // contract (path/beat/onUpdated) has no hook for a parent to intercept or
+  // delay its button clicks, so the only place this component can enforce
+  // "never let a category action reach the API before persistBeats has
+  // succeeded" is by controlling *whether `BeatCategoryPanel` is mounted at
+  // all* — gating on `selectedBeat` becoming non-null (which is also
+  // `BeatCategoryPanel`'s own mount condition) achieves that structurally,
+  // with no need for `BeatCategoryPanel` to know this gate exists.
+  //
+  // Tracked per-channel (not just a single flag) because a technician can
+  // switch channels mid-session via the select above, and `persistBeats`
+  // only covers whichever channel it was called for.
+  let persistedChannels: Set<string> = $state(new Set())
+  let persistPending: boolean = $state(false)
+  let persistError: string | null = $state(null)
+
+  async function ensureChannelPersisted(channel: string) {
+    if (persistedChannels.has(channel)) return
+
+    persistPending = true
+    persistError = null
+    const result = await persistBeats(path, channel)
+    persistPending = false
+
+    if (result.status === 'ok' && !result.error) {
+      persistedChannels = new Set(persistedChannels).add(channel)
+    } else {
+      persistError = result.error ?? 'Failed to prepare review data'
+    }
+  }
+
+  function handleBeatSelect(beat: WindowBeat) {
+    selectedBeat = beat
+    if (!persistedChannels.has(activeChannel)) {
+      void ensureChannelPersisted(activeChannel)
+    }
+  }
+
+  function handleCategoryUpdated(_result: CategoryUpdateResult) {
+    // BeatCategoryPanel already reflects the new review_state/
+    // reassigned_category in its own local state (see that component) —
+    // nothing further to do here yet. This hook exists so a later milestone
+    // (e.g. a beat-list summary elsewhere on this screen) has a place to
+    // react to updates without changing BeatCategoryPanel's contract.
+  }
 
   async function handleChannelChange() {
     const channel = selectedChannel
@@ -135,18 +186,26 @@
          is the simplest way to get it to re-init for a new channel's
          data. -->
     {#key activeChannel}
-      <EcgGraph {path} channel={activeChannel} onBeatSelect={(beat) => (selectedBeat = beat)} />
+      <EcgGraph {path} channel={activeChannel} onBeatSelect={handleBeatSelect} />
     {/key}
   </div>
 
-  <!-- Stepping-stone for Task 2's BeatCategoryPanel — see `selectedBeat`'s
-       declaration above for why this is a real (if minimal) rendering
-       rather than an inert placeholder. -->
   <div data-testid="selected-beat-panel">
-    {#if selectedBeat}
-      <p data-testid="selected-beat-summary">Selected beat: t={selectedBeat.ts}s, HR {selectedBeat.hr}</p>
-    {:else}
+    {#if selectedBeat === null}
       <p data-testid="selected-beat-summary">No beat selected</p>
+    {:else if persistPending}
+      <p data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
+    {:else if persistError && !persistedChannels.has(activeChannel)}
+      <div data-testid="persist-error">
+        <p>Could not prepare review data: {persistError}</p>
+        <button data-testid="persist-retry-button" onclick={() => ensureChannelPersisted(activeChannel)}>
+          Retry
+        </button>
+      </div>
+    {:else}
+      {#key selectedBeat.ts}
+        <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
+      {/key}
     {/if}
   </div>
 </div>

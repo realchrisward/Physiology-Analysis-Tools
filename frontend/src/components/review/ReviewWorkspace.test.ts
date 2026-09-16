@@ -313,4 +313,130 @@ describe('ReviewWorkspace', () => {
       expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('t=1s, HR 75')
     })
   })
+
+  // Task 2's pulled-forward persistence prerequisite: `PATCH
+  // /files/beats/category` 404s until `POST /files/beats` has succeeded for
+  // this (path, channel) — see ReviewWorkspace.svelte's `ensureChannelPersisted`
+  // comment for why this fires eagerly on first selection rather than
+  // lazily from inside BeatCategoryPanel.
+  describe('persist-on-first-selection prerequisite', () => {
+    const targetBeat = {
+      ts: 1,
+      rr: 0.8,
+      r_amplitude: 6,
+      hr: 75,
+      bradycardia_absolute: false,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: false,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    }
+
+    // Clicks the beat marker placed at the domain midpoint by
+    // channelWindowOkResponse's [0, 1, 2] x fixture — same math as the
+    // click-to-select test above.
+    function clickBeatMarker() {
+      const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+      const plotWidthPx = parseFloat(over.style.width)
+      const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+      over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+      document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+    }
+
+    function mockFetchWithBeatsWindowAndPersist(persistResponse: () => { ok: boolean; json: () => Promise<unknown> }) {
+      return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) return Promise.resolve(persistResponse())
+        return Promise.resolve(beatsOkResponse())
+      })
+    }
+
+    it('calls POST /files/beats on first selection, then mounts the category panel, and does not re-persist on a second selection', async () => {
+      const fetchMock = mockFetchWithBeatsWindowAndPersist(() => ({
+        ok: true,
+        json: async () => ({ status: 'ok', count: 1, error: null }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+      clickBeatMarker()
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/files/beats',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+          }),
+        )
+      })
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+
+      const persistCallsAfterFirstSelect = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/files/beats'),
+      ).length
+      expect(persistCallsAfterFirstSelect).toBe(1)
+
+      clickBeatMarker()
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+
+      const persistCallsAfterSecondSelect = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/files/beats'),
+      ).length
+      expect(persistCallsAfterSecondSelect).toBe(1)
+    })
+
+    it('shows a retryable error and withholds the category panel when POST /files/beats fails', async () => {
+      let attempt = 0
+      const fetchMock = mockFetchWithBeatsWindowAndPersist(() => {
+        attempt += 1
+        if (attempt === 1) {
+          return { ok: true, json: async () => ({ status: 'error', count: 0, error: 'db is locked' }) }
+        }
+        return { ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) }
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+      clickBeatMarker()
+
+      await waitFor(() => {
+        expect(screen.getByTestId('persist-error')).toHaveTextContent('db is locked')
+      })
+      expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
+
+      await fireEvent.click(screen.getByTestId('persist-retry-button'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('persist-error')).not.toBeInTheDocument()
+    })
+  })
 })
