@@ -10,9 +10,10 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-15-frontend-implementation-design.md` (F5 scope), `docs/superpowers/specs/2026-09-14-ui-workflow-features-design.md` §1 ("Annotation persistence", app flow step 3 "Skip straight to review — auto-run is skipped for this file, it already has results", step 5 "Autosave", step 6 "Export"), `BACKEND_OVERVIEW.md` (M7 API reference).
 
-## Global Constraints — including one backend architecture gap found during planning
+## Global Constraints — including two gaps found during/after planning
 
-- **Found while planning, not previously caught**: `GET /files/state` (backend, M7) reads persisted beats/marks from SQLite and reports them, but never restores `app.state.beat_cache[path]` — the in-memory dict every other beat-reading endpoint (`GET /beats/window`, `POST /arrhythmia/detect`) actually reads from. `PATCH /files/beats/category` itself is fine (it operates purely against SQLite, verified this session by reading `backend/db.py`'s `update_beat_category` directly — no `beat_cache` involvement). But on a genuine reopen (a fresh backend process, `beat_cache` empty), the graph's markers (`GET /beats/window`) would come back empty/erroring even though the technician's prior confirm/reject/reassign work is safely in SQLite, and re-running arrhythmia detection would fail with "beat detection has not been run for this file yet" despite it clearly having been. This directly blocks the workflow spec's own explicit "skip straight to review, it already has results" requirement — it's not new scope, it's finishing what M7 set out to do. Task 1 closes this gap with a small, backend-only addition.
+- **Found while planning, not previously caught**: `GET /files/state` (backend, M7) reads persisted beats/marks from SQLite and reports them, but never restores `app.state.beat_cache[path]` — the in-memory dict every other beat-reading endpoint (`GET /beats/window`, `POST /arrhythmia/detect`) actually reads from. `PATCH /files/beats/category` itself is fine on the SQLite side (it operates purely against SQLite, verified this session by reading `backend/db.py`'s `update_beat_category` directly). But on a genuine reopen (a fresh backend process, `beat_cache` empty), the graph's markers (`GET /beats/window`) would come back empty/erroring even though the technician's prior confirm/reject/reassign work is safely in SQLite, and re-running arrhythmia detection would fail with "beat detection has not been run for this file yet" despite it clearly having been. This directly blocks the workflow spec's own explicit "skip straight to review, it already has results" requirement — it's not new scope, it's finishing what M7 set out to do. Task 1 closes this gap with a small, backend-only addition.
+- **Found by F4's final review, folded in here rather than reopening F4's scope**: `PATCH /files/beats/category` writes only to SQLite, never to `app.state.beat_cache[path]` — so a rejected/reassigned beat's marker on the live graph stays showing its PRE-review flagged state indefinitely (the graph reads `beat_cache` via `GET /beats/window`, which never sees the mutation), and `BeatCategoryPanel`'s own local `reviewState` resets on every `{#key selectedBeat.ts}` remount, so reselecting a previously-reviewed beat shows no trace of the action having happened, even though it's safely recorded. Task 1 (which already touches `beat_cache`-reconstruction logic in `backend/db_routes.py`) also fixes the PATCH handler to keep `beat_cache[path]` in sync with every mutation. Task 2 (which already touches `ReviewWorkspace.svelte`'s completion-handling for other async operations) wires the graph to actually refresh after a successful category action, reusing the existing `beatsRefreshToken` mechanism from F4 rather than inventing a new refresh path.
 - Every new UI surface follows this project's established conventions: `data-testid` on anything tested, `T | ApiError`-aware narrowing where the API client requires it, real component tests mocking only `fetch`/`window.api`.
 - No new npm dependencies.
 
@@ -45,16 +46,22 @@
 
   In `backend/db_routes.py`'s `get_file_state` handler, after building the `beats`/`bad_data_marks` response lists (the existing code already fetches `beat_rows` via SQL) and before returning: if `beat_rows` is non-empty, build a `pandas.DataFrame` with one row per `beat_row` — columns `ts`, `RR` (from `beat_row["rr"]`), `R_amplitude` (from `beat_row["r_amplitude"]`), `HR` (from `beat_row["hr"]`), plus each of `categories.ALL_OPTIONAL_COLUMNS` included as a column only if at least one row has a non-`None` value for it (reading directly from `beat_row[col]`, already `0`/`1`/`None` from SQLite — convert `0`/`1` to real Python `bool`, keep `None` as `NaN`/`None` in the DataFrame, matching every other `_to_bool`-style conversion already in this file). Assign this DataFrame to `request.app.state.beat_cache[path]`. Wrap this reconstruction in the SAME `try/except Exception` the handler already has (never let a malformed restore crash the endpoint — on any exception here, log/ignore and still return the normal `FileStateResult`, since the restore is a best-effort side effect, not the endpoint's primary contract).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Also keep `beat_cache` in sync with every `PATCH /files/beats/category` mutation**
+
+  In `backend/tests/test_beats_category_api.py`, add: **A confirm/reject/reassign is immediately visible via `GET /beats/window` on the SAME app instance** (no restart needed for this one — this is the live-sync case, distinct from the reopen-restore case above). Import, detect, persist, `PATCH ... action="reject"` on the first beat, then `GET /beats/window` for that beat's range on the SAME app instance — assert the category columns are `False`/`any_arrhythmia: False` in the windowed response, not still showing the pre-reject flagged state. Repeat for `reassign` (assert the newly-assigned category is `True`, others `False`).
+
+  Run these new tests, confirm they fail, then implement: in `backend/db_routes.py`'s `update_beat_category` route handler, after `db.update_beat_category(...)` returns the updated row successfully, if `request.app.state.beat_cache.get(path)` is not `None`, locate the row with matching `ts` in that cached DataFrame and update its category columns (`bradycardia_absolute` through `other_arrhythmia`, plus `any_arrhythmia`) to match the fresh DB row's values — same column-name mapping as the restore logic above. If no `beat_cache[path]` entry exists yet, this is a no-op, not an error — the SQLite write already succeeded regardless.
+
+- [ ] **Step 5: Run the tests to verify they pass**
 
   Run: `pytest backend/ -v`
-  Expected: total grows from 69 passed/1 skipped to 73 passed/1 skipped.
+  Expected: total grows from 69 passed/1 skipped to 75 passed/1 skipped (2 more than the restore tests alone).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
   ```bash
-  git add backend/db_routes.py backend/tests/test_files_state_api.py
-  git commit -m "Restore beat_cache from persisted state in GET /files/state"
+  git add backend/db_routes.py backend/tests/test_files_state_api.py backend/tests/test_beats_category_api.py
+  git commit -m "Restore beat_cache on reopen; keep it synced with every category mutation"
   ```
 
 ---
@@ -69,7 +76,7 @@
 
 **Interfaces:**
 - Consumes: `getFileState(path)`, `putChannel(path, channel)` (F1, `frontend/src/lib/api/persistence.ts`, both currently unused anywhere in the app).
-- Produces: `EcgGraph` gains an `initialBadDataMarks?: BadDataMark[]` prop, seeding its local `badDataMarks` state instead of always starting empty.
+- Produces: `EcgGraph` gains an `initialBadDataMarks?: BadDataMark[]` prop, seeding its local `badDataMarks` state instead of always starting empty. `ReviewWorkspace`'s existing `handleCategoryUpdated` (currently a documented no-op from F4) becomes real: on a successful confirm/reject/reassign, it calls the existing `refreshGraphBeats()` (F4's `beatsRefreshToken` mechanism) so the graph's marker for that beat updates immediately instead of staying stuck at its pre-review state — this closes Important finding #2 from F4's final review (backend now keeps `beat_cache` synced on every category mutation per Task 1 above; this step is what actually makes the graph pick that up).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -83,6 +90,9 @@
   In `EcgGraph.test.ts`:
   6. **`initialBadDataMarks` prop seeds the local marks state and renders them immediately**, without needing a drag interaction first — mount with `initialBadDataMarks: [{id:1, start:2, stop:5}]`, assert a `data-testid="bad-data-mark"` is present without any drag having happened.
 
+  Also in `ReviewWorkspace.test.ts` (closing F4's Important finding #2):
+  7. **A successful confirm/reject/reassign refreshes the graph's beat markers.** Select a beat, trigger a category action via `BeatCategoryPanel` (mock `updateBeatCategory` resolving `status:'ok'`), assert an additional `/beats/window` fetch fires afterward (the same observable signal Task 3-of-F4's arrhythmia-refresh test already uses for "the graph refreshed").
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
   Run: `npm --prefix frontend run test -- ReviewWorkspace EcgGraph`
@@ -92,7 +102,9 @@
 
   `EcgGraph.svelte`: add `initialBadDataMarks?: BadDataMark[]` to props; initialize `badDataMarks = $state(initialBadDataMarks ?? [])` instead of always `[]`.
 
-  `ReviewWorkspace.svelte`: on mount (an `$effect` or top-level async IIFE — match the file's existing idiom for one-time-on-mount async work), call `getFileState(path)`. Narrow `FileStateResult`'s `status`/`found`: if `found === true`, set `selectedChannel`/`activeChannel` directly to the persisted `channel` (skip the `detectBeats`-then-advance dance Task-1-era code uses for a fresh default — the persisted channel is already known-good per Task 1's backend restore), pass its `bad_data_marks` through to `EcgGraph` as `initialBadDataMarks`. If `found === false` or the call fails/errors, proceed exactly as today (no behavior change). In `handleChannelChange` (the existing channel-`<select>` handler), after a successful `detectBeats`+`activeChannel` advance, also call `putChannel(path, channel)` (fire-and-forget is acceptable — don't let its failure roll back the already-successful channel switch; log the error if you want, don't surface it as blocking).
+  `ReviewWorkspace.svelte`: on mount (an `$effect` or top-level async IIFE — match the file's existing idiom for one-time-on-mount async work), call `getFileState(path)`. Narrow `FileStateResult`'s `status`/`found`: if `found === true`, set `selectedChannel`/`activeChannel` directly to the persisted `channel` (skip the `detectBeats`-then-advance dance Task-1-era code uses for a fresh default — the persisted channel is already known-good per Task 1's backend restore), pass its `bad_data_marks` through to `EcgGraph` as `initialBadDataMarks`, and also seed `lastPersistedChannel = channel` (the value the existing `persistRequestId`-guarded `ensureChannelPersisted` checks against) so selecting a beat on the just-reloaded channel doesn't fire a redundant, wasted `POST /files/beats` for data that's already known to be current. If `found === false` or the call fails/errors, proceed exactly as today (no behavior change, `lastPersistedChannel` stays `null` as it already does). In `handleChannelChange` (the existing channel-`<select>` handler), after a successful `detectBeats`+`activeChannel` advance, also call `putChannel(path, channel)` (fire-and-forget is acceptable — don't let its failure roll back the already-successful channel switch; log the error if you want, don't surface it as blocking).
+
+  Also implement `handleCategoryUpdated` for real (currently a documented no-op): on `result.status === 'ok'`, call the existing `refreshGraphBeats()` (the same function `ArrhythmiaControls`'s `onComplete` already calls — reuse it exactly, don't build a second beats-refresh path).
 
 - [ ] **Step 4: Run the tests to verify they pass, commit**
 
