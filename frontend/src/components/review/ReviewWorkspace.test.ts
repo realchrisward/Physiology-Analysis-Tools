@@ -56,13 +56,41 @@ function channelWindowOkResponse() {
   }
 }
 
+// F5 reopen hydration's `GET /files/state`, called once from
+// ReviewWorkspace's own `onMount` (see that component). Every test in this
+// file now triggers this call at mount, whether or not the test cares about
+// its outcome — `found: false` (this default) is the "brand-new file, no
+// prior state" case and leaves all of today's pre-F5 behavior untouched, so
+// it's a safe default for every test that doesn't explicitly test hydration
+// itself.
+function fileStateResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    ok: true,
+    json: async () => ({
+      status: 'ok',
+      found: false,
+      channel: null,
+      beats: [],
+      bad_data_marks: [],
+      beat_settings: null,
+      arrhythmia_settings: null,
+      error: null,
+      ...overrides,
+    }),
+  }
+}
+
 // The mounted EcgGraph (see ecg-graph tests for its own coverage) fetches
 // `/channels/window` on mount independently of whatever `/beats/detect`
 // behavior a given test is exercising — so every fetch mock here has to
-// answer both endpoints, not just the one the test cares about.
+// answer both endpoints, not just the one the test cares about. Also routes
+// `GET /files/state` (ReviewWorkspace's own mount-time hydration check, see
+// `fileStateResponse` above) to a "not found" default so hydration never
+// overrides `defaultChannel` for tests that aren't exercising it.
 function mockFetch(beatsResponse: { ok: boolean; json: () => Promise<unknown> }) {
   return vi.fn().mockImplementation((url: string) => {
     if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+    if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
     return Promise.resolve(beatsResponse)
   })
 }
@@ -169,10 +197,10 @@ describe('ReviewWorkspace', () => {
       props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
     })
 
-    // Wait for the initial mount's own channel-window + beats-window fetch
+    // Wait for the initial mount's own files/state + channel-window + beats-window fetch
     // pair to settle before capturing the "before switch" call count, so it
     // doesn't race the assertion below.
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
     const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
 
@@ -198,9 +226,11 @@ describe('ReviewWorkspace', () => {
       expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
     })
     // The graph's remount fires new /channels/window + /beats/window calls
-    // for the new channel.
+    // for the new channel, plus the fire-and-forget `PUT /files/channel`
+    // that now follows a successful channel switch (see
+    // `handleChannelChange`'s `putChannel` call).
     await waitFor(() => {
-      expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 3)
+      expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 4)
     })
   })
 
@@ -221,7 +251,7 @@ describe('ReviewWorkspace', () => {
       props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
     })
 
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
     const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
 
@@ -293,7 +323,7 @@ describe('ReviewWorkspace', () => {
       })
     })
 
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
     expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
 
@@ -372,7 +402,7 @@ describe('ReviewWorkspace', () => {
         })
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
       clickBeatMarker()
 
@@ -422,7 +452,7 @@ describe('ReviewWorkspace', () => {
         })
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
       clickBeatMarker()
 
@@ -528,7 +558,7 @@ describe('ReviewWorkspace', () => {
         })
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
       await clickBeatMarker()
       await waitFor(() => {
@@ -575,7 +605,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
         // Select on channel 1 — persists for channel 1.
         await clickBeatMarker()
@@ -726,7 +756,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
         // Select on channel 1 — dispatches persistBeats('channel 1'), held
         // pending (not yet resolved).
@@ -858,8 +888,8 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      // Initial mount: /channels/window + /beats/window.
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      // Initial mount: /files/state + /channels/window + /beats/window.
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
 
       await fireEvent.click(screen.getByTestId('run-heuristic-button'))
 
@@ -922,8 +952,8 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      // Initial mount: /channels/window + /beats/window for channel 1.
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+      // Initial mount: /files/state + /channels/window + /beats/window for channel 1.
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
       expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
 
       // Start an arrhythmia rerun on channel 1 — held pending, not resolved.
@@ -975,6 +1005,336 @@ describe('ReviewWorkspace', () => {
         new URL(String(call[0])).pathname === '/beats/window',
       ).length
       expect(beatsWindowCallsAfterStaleResolve).toBe(beatsWindowCallsBeforeStaleResolve)
+    })
+  })
+
+  // Task 2 of F5: reopening a file loads its prior review state (channel,
+  // bad-data marks) instead of starting over, via `GET /files/state` in
+  // ReviewWorkspace's own `onMount` (see that component). Task 1's backend
+  // restore (`df02d2c`) is what makes a persisted channel's `beat_cache`
+  // trustworthy enough to skip re-detection entirely here.
+  describe('reopen hydration: GET /files/state on mount', () => {
+    function mockFetchWithFileState(
+      fileState: { ok: boolean; json: () => Promise<unknown> },
+      opts: { onDetect?: () => unknown } = {},
+    ) {
+      return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileState)
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/detect')) return Promise.resolve((opts.onDetect ?? (() => beatsOkResponse()))())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+    }
+
+    it('uses the persisted channel and skips detection when prior state is found', async () => {
+      const fetchMock = mockFetchWithFileState(
+        fileStateResponse({
+          found: true,
+          channel: 'channel 2',
+          beats: [],
+          bad_data_marks: [{ id: 1, start: 2, stop: 5 }],
+        }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => {
+        const call = fetchMock.mock.calls.find((c) => String(c[0]).includes('/files/state'))
+        expect(call).toBeTruthy()
+        const url = new URL(String(call![0]))
+        expect(url.searchParams.get('path')).toBe('/data/57.txt')
+      })
+
+      // Deliberately different from defaultChannel — proves the persisted
+      // choice wins.
+      await waitFor(() => {
+        const select = screen.getByTestId('channel-select') as HTMLSelectElement
+        expect(select.value).toBe('channel 2')
+      })
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      })
+
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/beats/detect'))).toBe(false)
+    })
+
+    it('passes the persisted bad-data marks through to EcgGraph as initialBadDataMarks', async () => {
+      const fetchMock = mockFetchWithFileState(
+        fileStateResponse({
+          found: true,
+          channel: 'channel 2',
+          beats: [],
+          bad_data_marks: [{ id: 1, start: 2, stop: 5 }],
+        }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => {
+        expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+      })
+    })
+
+    it('falls back to defaultChannel with no prior state (found: false)', async () => {
+      const fetchMock = mockFetchWithFileState(fileStateResponse({ found: false }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => {
+        expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/files/state'))).toBe(true)
+      })
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      expect(select.value).toBe('channel 1')
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+      })
+      expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument()
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/beats/detect'))).toBe(false)
+    })
+
+    it('falls back to defaultChannel exactly as the not-found case when GET /files/state fails', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.reject(new Error('network down'))
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        return Promise.resolve(beatsOkResponse()) // /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      expect(select.value).toBe('channel 1')
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+      })
+      expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument()
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('/beats/detect'))).toBe(false)
+    })
+  })
+
+  // Task 2 of F5: remembers the technician's channel choice per file via
+  // `PUT /files/channel`, fired (fire-and-forget) right after a successful
+  // channel switch — see `handleChannelChange`'s `putChannel` call.
+  describe('channel choice persistence: PUT /files/channel on channel switch', () => {
+    it('persists the newly selected channel alongside the existing detectBeats call', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/files/channel')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', channel: 'channel 2', error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse()) // /beats/detect, /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      await fireEvent.change(select, { target: { value: 'channel 2' } })
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/beats/detect',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }),
+          }),
+        )
+      })
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/files/channel',
+          expect.objectContaining({
+            method: 'PUT',
+            body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }),
+          }),
+        )
+      })
+    })
+
+    it('does not block the channel switch when putChannel fails', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/files/channel')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'error', channel: null, error: 'boom' }),
+          })
+        }
+        return Promise.resolve(beatsOkResponse()) // /beats/detect, /beats/window
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      const select = screen.getByTestId('channel-select') as HTMLSelectElement
+      await fireEvent.change(select, { target: { value: 'channel 2' } })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+      })
+    })
+  })
+
+  // Closes F4's Important finding #2 (deferred to F5, see the plan): a
+  // successful confirm/reject/reassign must refresh EcgGraph's beat markers
+  // immediately, via the same `beatsRefreshToken` mechanism
+  // ArrhythmiaControls' `onComplete` already uses — proven here by the same
+  // observable signal the arrhythmia-refresh tests above use: an additional
+  // `/beats/window` fetch firing after the action succeeds.
+  describe('category update refreshes graph beat markers', () => {
+    const targetBeat = {
+      ts: 1,
+      rr: 0.8,
+      r_amplitude: 6,
+      hr: 75,
+      bradycardia_absolute: false,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: false,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    }
+
+    function clickBeatMarker() {
+      const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+      const plotWidthPx = parseFloat(over.style.width)
+      const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+      over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+      document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+    }
+
+    it('refreshes the graph beats after a successful confirm action', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats/category')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', ts: 1, review_state: 'confirmed', reassigned_category: null, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      clickBeatMarker()
+
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+
+      const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/beats/window'),
+      ).length
+
+      await fireEvent.click(screen.getByTestId('confirm-button'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
+      })
+
+      await waitFor(() => {
+        const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/beats/window'),
+        ).length
+        expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore + 1)
+      })
+    })
+
+    it('does not refresh the graph when a category update fails', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/window')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats/category')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'error', ts: null, review_state: null, reassigned_category: null, error: 'boom' }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+      })
+
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+      clickBeatMarker()
+
+      await waitFor(() => {
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+      })
+
+      const beatsWindowCallsBefore = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/beats/window'),
+      ).length
+
+      await fireEvent.click(screen.getByTestId('confirm-button'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('validation-error')).toHaveTextContent('boom')
+      })
+
+      const beatsWindowCallsAfter = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/beats/window'),
+      ).length
+      expect(beatsWindowCallsAfter).toBe(beatsWindowCallsBefore)
     })
   })
 })

@@ -584,6 +584,26 @@ describe('EcgGraph', () => {
     expect(onBeatSelect).not.toHaveBeenCalled()
   })
 
+  // F5 reopen hydration: `initialBadDataMarks` seeds `badDataMarks` at
+  // component init (see EcgGraph.svelte's `badDataMarks` declaration) so a
+  // reopened file's prior marks render immediately — this proves that seed
+  // renders with no drag/interaction needed first, unlike every other mark
+  // in this file's other tests, which all arrive via `addBadData`.
+  it('renders a mark from initialBadDataMarks immediately, without any drag interaction', () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(EcgGraph, {
+      props: {
+        path: '/data/57.txt',
+        channel: 'channel 1',
+        initialBadDataMarks: [{ id: 1, start: 2, stop: 5 }],
+      },
+    })
+
+    expect(screen.getByTestId('bad-data-mark')).toBeInTheDocument()
+  })
+
   it('removes a bad-data mark via deleteBadData when the mark is clicked', async () => {
     const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
     const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })

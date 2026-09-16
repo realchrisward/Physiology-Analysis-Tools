@@ -71,6 +71,7 @@
     channel,
     onBeatSelect,
     beatsRefreshToken = 0,
+    initialBadDataMarks,
   }: {
     path: string
     channel: string
@@ -85,6 +86,16 @@
     // first one is never silently swallowed — each distinct value the
     // effect observes triggers its own re-fetch.
     beatsRefreshToken?: number
+    // F5's reopen-hydration seed: a parent (ReviewWorkspace, after a
+    // successful `GET /files/state`) passes the file's previously-persisted
+    // bad-data marks here so they render immediately instead of the
+    // technician seeing an empty marks bar until a fresh drag adds one.
+    // Read once, at component init, into `badDataMarks` below — like
+    // `initialChannel` in ReviewWorkspace.svelte, this deliberately does not
+    // stay in sync with the prop afterwards (this component's own
+    // add/remove handlers become the sole source of truth for
+    // `badDataMarks` from mount onward).
+    initialBadDataMarks?: BadDataMark[]
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -171,7 +182,10 @@
   // pan/zoom window: it's simpler, and a technician can see/remove a mark
   // regardless of which part of the recording is currently in view.
   let badDataMode: boolean = $state(false)
-  let badDataMarks: BadDataMark[] = $state([])
+  // Seeded from `initialBadDataMarks` (F5 reopen hydration) instead of
+  // always starting empty — see that prop's own comment above for why this
+  // is a one-time read, not an ongoing sync.
+  let badDataMarks: BadDataMark[] = $state(initialBadDataMarks ?? [])
 
   // Plain (non-reactive) instance state: the live uPlot instance, the
   // full-extent range for "Reset view", and the pan/zoom debounce timer.

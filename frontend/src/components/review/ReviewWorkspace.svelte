@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
-  import { persistBeats } from '../../lib/api/persistence'
+  import { getFileState, persistBeats, putChannel } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
-  import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
+  import type { BadDataMark, CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
     status: 'pending' | 'ok' | 'error' | null
@@ -67,6 +68,13 @@
   // `onBeatSelect` below), driving the real `BeatCategoryPanel` below.
   let selectedBeat: WindowBeat | null = $state(null)
 
+  // F5 reopen hydration: the prior session's bad-data marks, if any, fetched
+  // via `GET /files/state` in the `onMount` below and passed straight
+  // through as EcgGraph's `initialBadDataMarks` prop (see that prop's own
+  // comment in EcgGraph.svelte). Stays `[]` — EcgGraph's own default — for a
+  // brand-new file (`found === false`) or if the state check itself fails.
+  let initialBadDataMarks: BadDataMark[] = $state([])
+
   // `POST /files/beats` (F5's persistence step, pulled forward here) has to
   // succeed for a given (path, channel) pair before the backend's
   // `PATCH /files/beats/category` will accept any confirm/reject/reassign
@@ -128,6 +136,42 @@
     beatsRefreshToken += 1
   }
 
+  // F5 reopen hydration: checks whether this file already has a persisted
+  // review in progress, once, when the workspace first mounts (see
+  // `HealthStatus.svelte` for this codebase's existing
+  // `onMount(async () => {...})` idiom for one-time-on-mount async work).
+  //
+  // A found record means Task 1's backend restore (`df02d2c`) has already
+  // rebuilt `beat_cache[path]` for `channel` — so this deliberately skips
+  // the `detectBeats`-then-advance dance `handleChannelChange` uses for a
+  // fresh channel switch (see its own comment) and sets `selectedChannel`/
+  // `activeChannel` directly: re-running detection here would be redundant
+  // work against data the backend already has ready.
+  //
+  // `lastPersistedChannel` is also seeded to the persisted channel — it
+  // already reflects the backend's persisted `beats` rows for this
+  // (path, channel) pair (that's exactly what made it "found"), so the
+  // first beat selection on this channel this session shouldn't re-fire a
+  // wasted `POST /files/beats` via `ensureChannelPersisted`.
+  //
+  // `found === false` (a brand-new file) or any failure of the state check
+  // itself (network error, non-2xx — `getFileState`/`apiGet` never throws,
+  // converting either into `{status: 'error', ...}`, whose `found` is
+  // simply absent/falsy here) both fall through unchanged: `selectedChannel`/
+  // `activeChannel` stay at `defaultChannel`, `initialBadDataMarks` stays
+  // `[]`, and `lastPersistedChannel` stays `null` — exactly today's
+  // pre-F5 behavior. A state-check failure must never be worse than
+  // starting fresh.
+  onMount(async () => {
+    const result = await getFileState(path)
+    if (result.found && result.channel) {
+      selectedChannel = result.channel
+      activeChannel = result.channel
+      initialBadDataMarks = result.bad_data_marks ?? []
+      lastPersistedChannel = result.channel
+    }
+  })
+
   // Whenever `activeChannel` actually advances (see its declaration above),
   // any selection/persist state from the previous channel is stale and must
   // be cleared — `selected-beat-panel` is a SIBLING of the `{#key
@@ -170,12 +214,22 @@
     }
   }
 
-  function handleCategoryUpdated(_result: CategoryUpdateResult) {
+  function handleCategoryUpdated(result: CategoryUpdateResult) {
     // BeatCategoryPanel already reflects the new review_state/
     // reassigned_category in its own local state (see that component) —
-    // nothing further to do here yet. This hook exists so a later milestone
-    // (e.g. a beat-list summary elsewhere on this screen) has a place to
-    // react to updates without changing BeatCategoryPanel's contract.
+    // nothing further to do here for that. But a successful confirm/reject/
+    // reassign also means the backend's `beat_cache[path]` is now in sync
+    // (Task 1, `df02d2c`'s reopen/mutation sync) — so refresh EcgGraph's
+    // beat markers via the same `beatsRefreshToken` mechanism
+    // ArrhythmiaControls' `onComplete` already uses (reusing that one path
+    // rather than building a second beats-refresh mechanism). This closes
+    // F4's Important finding #2: previously the graph's marker for this
+    // beat stayed stuck at its pre-review state until a full channel
+    // switch remounted EcgGraph. A failed/unchanged result must not
+    // trigger a refetch against data that hasn't actually changed.
+    if (result.status === 'ok' && !result.error) {
+      refreshGraphBeats()
+    }
   }
 
   async function handleChannelChange() {
@@ -199,6 +253,13 @@
       // reflect this channel's detection — advance the channel EcgGraph is
       // keyed/mounted against.
       activeChannel = channel
+      // Remember this channel choice for next time this file is reopened
+      // (F5's `GET /files/state` hydration above reads it back). Deliberately
+      // fire-and-forget: `putChannel`/`apiPost` never throws (see http.ts),
+      // and even if it failed, that must never roll back the channel switch
+      // that has already succeeded above — it's a nice-to-have next to
+      // detection actually working, not a blocking precondition.
+      void putChannel(path, channel)
     } else {
       detection = {
         status: 'error',
@@ -245,7 +306,13 @@
          is the simplest way to get it to re-init for a new channel's
          data. -->
     {#key activeChannel}
-      <EcgGraph {path} channel={activeChannel} onBeatSelect={handleBeatSelect} {beatsRefreshToken} />
+      <EcgGraph
+        {path}
+        channel={activeChannel}
+        onBeatSelect={handleBeatSelect}
+        {beatsRefreshToken}
+        {initialBadDataMarks}
+      />
     {/key}
   </div>
 
