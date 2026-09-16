@@ -638,4 +638,181 @@ describe('ReviewWorkspace', () => {
       }
     })
   })
+
+  // Regression coverage for the `persistRequestId` guard added alongside
+  // this test (mirroring `detectionRequestId`'s existing protection for
+  // `detectBeats`, exercised by the "keeps the graph on the previous
+  // channel..." test above): `POST /files/beats` requests can complete
+  // out of order over a real network even though they're dispatched in
+  // order. If the technician selects a beat on channel 1 (dispatching
+  // `persistBeats('channel 1')`) then quickly switches to channel 2 and
+  // selects a beat there (dispatching `persistBeats('channel 2')`), and
+  // channel 1's slower response arrives AFTER channel 2's, the stale
+  // channel-1 response must not clobber `lastPersistedChannel` back to
+  // `'channel 1'` — the backend (which can only ever hold one channel's
+  // persisted beats at a time) actually has channel 2's data persisted.
+  describe('persist race: out-of-order POST /files/beats responses', () => {
+    const beatOnChannel1 = {
+      ts: 1,
+      rr: 0.8,
+      r_amplitude: 6,
+      hr: 75,
+      bradycardia_absolute: false,
+      tachycardia_absolute: false,
+      skipped_beat: false,
+      prem_beat: false,
+      abn_cluster: false,
+      any_arrhythmia: true,
+      other_arrhythmia: false,
+    }
+    const beatOnChannel2 = { ...beatOnChannel1, hr: 90 }
+
+    // Same click-math and "wait for .u-over to be ready" technique as the
+    // channel-switch describe block above (this test also remounts EcgGraph
+    // across channel switches).
+    async function clickBeatMarker() {
+      const over = await waitFor(() => {
+        const el = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement | null
+        if (!el || !el.style.width) throw new Error('chart not ready yet')
+        return el
+      })
+      const plotWidthPx = parseFloat(over.style.width)
+      const clickX = plotWidthPx * ((1 - 0) / (2 - 0))
+      over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: clickX, clientY: 100, bubbles: true }))
+      document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
+    }
+
+    it('keeps the later-dispatched channel as the effective last-persisted channel when its response resolves before the earlier channel\'s stale one', async () => {
+      let resolvePersistChannel1: ((value: unknown) => void) | undefined
+      let resolvePersistChannel2: ((value: unknown) => void) | undefined
+      const persistChannel1Promise = new Promise((resolve) => {
+        resolvePersistChannel1 = resolve
+      })
+      const persistChannel2Promise = new Promise((resolve) => {
+        resolvePersistChannel2 = resolve
+      })
+
+      let lastDetectedChannel = 'channel 1'
+      const fetchMock = vi.fn().mockImplementation((url: string, init?: { body?: string }) => {
+        if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+        if (url.includes('/beats/detect')) {
+          const channel = init?.body ? JSON.parse(init.body).channel : undefined
+          if (channel) lastDetectedChannel = channel
+          return Promise.resolve(beatsOkResponse())
+        }
+        if (url.includes('/beats/window')) {
+          const beat = lastDetectedChannel === 'channel 2' ? beatOnChannel2 : beatOnChannel1
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'ok', beats: [beat], count: 1, error: null }),
+          })
+        }
+        if (url.includes('/files/beats')) {
+          const channel = init?.body ? JSON.parse(init.body).channel : undefined
+          if (channel === 'channel 1') return persistChannel1Promise
+          if (channel === 'channel 2') return persistChannel2Promise
+        }
+        return Promise.resolve(beatsOkResponse())
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      // Held for this test's entire body — it remounts EcgGraph across two
+      // channel switches (see the identical rationale in the "re-persists a
+      // channel that was already persisted earlier..." test above).
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
+
+        // Select on channel 1 — dispatches persistBeats('channel 1'), held
+        // pending (not yet resolved).
+        await clickBeatMarker()
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }) }),
+          )
+        })
+        await waitFor(() => {
+          expect(screen.getByTestId('persist-pending')).toBeInTheDocument()
+        })
+
+        // Quickly switch to channel 2 and select a beat there — dispatches
+        // persistBeats('channel 2'), also held pending. This is dispatched
+        // strictly AFTER channel 1's call above.
+        const select = screen.getByTestId('channel-select') as HTMLSelectElement
+        await fireEvent.change(select, { target: { value: 'channel 2' } })
+        await waitFor(() => {
+          expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 2')
+        })
+
+        await clickBeatMarker()
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }) }),
+          )
+        })
+
+        // Resolve channel 2's (later-dispatched) response FIRST.
+        resolvePersistChannel2!({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
+
+        // Now resolve channel 1's (earlier-dispatched) response SECOND — an
+        // out-of-order completion. Without the `persistRequestId` guard,
+        // this stale handler would clobber `lastPersistedChannel` back to
+        // 'channel 1'.
+        resolvePersistChannel1!({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        // Let any (incorrect) stale handling flush before proceeding.
+        await Promise.resolve()
+        await Promise.resolve()
+
+        // The category panel must still reflect channel 2's beat/state —
+        // the stale channel-1 response must not have reset anything.
+        expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        expect(screen.queryByTestId('persist-error')).not.toBeInTheDocument()
+
+        // Switch back to channel 1 and select again. The backend's real
+        // last-persisted channel is channel 2 (not channel 1, despite
+        // channel 1's response resolving most recently) — so selecting on
+        // channel 1 again must trigger a FRESH persistBeats call rather than
+        // wrongly skipping it because a stale response set
+        // `lastPersistedChannel` back to 'channel 1'.
+        await fireEvent.change(select, { target: { value: 'channel 1' } })
+        await waitFor(() => {
+          expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
+        })
+
+        const persistCallsBeforeReselect = fetchMock.mock.calls.filter((call) =>
+          String(call[0]).includes('/files/beats'),
+        ).length
+
+        await clickBeatMarker()
+        await waitFor(() => {
+          const persistCallsAfterReselect = fetchMock.mock.calls.filter((call) =>
+            String(call[0]).includes('/files/beats'),
+          ).length
+          expect(persistCallsAfterReselect).toBe(persistCallsBeforeReselect + 1)
+        })
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            'http://127.0.0.1:8000/files/beats',
+            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }) }),
+          )
+        })
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
+    })
+  })
 })

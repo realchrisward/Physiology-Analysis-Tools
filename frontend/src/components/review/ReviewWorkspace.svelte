@@ -96,6 +96,20 @@
   let persistPending: boolean = $state(false)
   let persistError: string | null = $state(null)
 
+  // Guards against out-of-order responses if a newer `persistBeats` call is
+  // dispatched (e.g. the technician switches channels and selects a beat
+  // there) while a previous one is still in flight — same pattern as
+  // `detectionRequestId` above, and for the same underlying reason: two
+  // requests dispatched in order can still complete out of order over a real
+  // network. Without this, a slow channel-1 response arriving AFTER a
+  // faster channel-2 response would clobber `lastPersistedChannel` back to
+  // `'channel 1'`, even though the backend (which can only hold one
+  // channel's persisted beats at a time — see the comment above) actually
+  // has channel 2's data. Only the response matching the most recently
+  // issued `persistBeats` call is allowed to update `lastPersistedChannel`/
+  // `persistPending`/`persistError`.
+  let persistRequestId = 0
+
   // Whenever `activeChannel` actually advances (see its declaration above),
   // any selection/persist state from the previous channel is stale and must
   // be cleared — `selected-beat-panel` is a SIBLING of the `{#key
@@ -116,9 +130,12 @@
   async function ensureChannelPersisted(channel: string) {
     if (lastPersistedChannel === channel) return
 
+    const requestId = ++persistRequestId
     persistPending = true
     persistError = null
     const result = await persistBeats(path, channel)
+    if (requestId !== persistRequestId) return // superseded by a newer persist call
+
     persistPending = false
 
     if (result.status === 'ok' && !result.error) {
