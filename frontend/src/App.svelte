@@ -135,11 +135,25 @@
     {#if view === 'import'}
       <ImportScreen />
     {:else if view === 'review' && selectedFile}
-      <ReviewWorkspace
-        path={selectedFile.path}
-        channels={selectedFile.channels}
-        defaultChannel={selectedFile.defaultChannel}
-      />
+      <!-- Keyed on path: the sidebar is reachable (and its files clickable)
+           from inside Review now, not just the Welcome screen, so switching
+           directly from one open file to another no longer unmounts this
+           `{#if}` block first (view stays 'review' the whole time) — without
+           this key, ReviewWorkspace would keep its OLD internal state
+           (activeChannel, hydrationChecked, the mounted EcgGraph, etc.)
+           while only its props silently changed underneath it, since most
+           of that state is deliberately seeded once from props on mount,
+           not kept in sync with them afterward (see its own comments on
+           `initialChannel`). Forcing a full remount on path change is the
+           same "start clean" approach already used for `{#key
+           activeChannel}` inside EcgGraph. -->
+      {#key selectedFile.path}
+        <ReviewWorkspace
+          path={selectedFile.path}
+          channels={selectedFile.channels}
+          defaultChannel={selectedFile.defaultChannel}
+        />
+      {/key}
     {/if}
   </main>
 

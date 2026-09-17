@@ -24,7 +24,7 @@ export function persistBeats(path: string, channel: string): Promise<PersistBeat
 export function updateBeatCategory(
   path: string,
   ts: number,
-  action: 'confirm' | 'reject' | 'reassign',
+  action: 'confirm' | 'reject' | 'reassign' | 'remove_flag',
   category?: string,
 ): Promise<CategoryUpdateResult> {
   return apiPost('/files/beats/category', 'PATCH', { path, ts, action, category })

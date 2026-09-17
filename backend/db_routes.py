@@ -205,16 +205,17 @@ def persist_beats(
 def update_beat_category(
     payload: CategoryUpdateRequest, request: Request
 ) -> CategoryUpdateResult:
-    if payload.action not in {"confirm", "reject", "reassign"}:
+    if payload.action not in {"confirm", "reject", "reassign", "remove_flag"}:
         return CategoryUpdateResult(
             status="error",
             error=f"Unknown action: {payload.action!r}",
         )
 
-    if payload.action == "reassign":
+    if payload.action in {"reassign", "remove_flag"}:
         if payload.category is None:
             return CategoryUpdateResult(
-                status="error", error="category is required for a reassign action"
+                status="error",
+                error=f"category is required for a {payload.action} action",
             )
         if payload.category not in REASSIGNABLE_CATEGORIES:
             return CategoryUpdateResult(

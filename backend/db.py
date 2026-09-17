@@ -147,6 +147,15 @@ def update_beat_category(
     `"reject"` clears every category column (not just the top-level
     `any_arrhythmia` flag) so a rejected beat's per-category data doesn't
     stay stuck showing as if it were still flagged.
+
+    `"remove_flag"` is narrower than all three: it clears exactly one
+    auto-detected category column (`category`, already validated by the
+    caller against `REASSIGNABLE_CATEGORIES` before it reaches here — never
+    interpolate an unvalidated value into the column-name SQL below) and
+    recomputes `any_arrhythmia` from whatever flags remain, WITHOUT
+    touching `review_state`/`reassigned_category` — this corrects the
+    detector's raw output, it isn't a confirm/reject/reassign review
+    decision the way the other three actions are.
     """
     row = conn.execute(
         "SELECT id FROM beats WHERE file_id=? AND ts=?", (file_id, ts)
@@ -178,6 +187,17 @@ def update_beat_category(
             + ", any_arrhythmia=1, review_state='confirmed', "
             "reassigned_category=? WHERE id=?",
             (category, beat_id),
+        )
+    elif action == "remove_flag":
+        conn.execute(f"UPDATE beats SET {category}=0 WHERE id=?", (beat_id,))
+        remaining = conn.execute(
+            "SELECT " + ", ".join(CATEGORY_COLUMNS) + " FROM beats WHERE id=?",
+            (beat_id,),
+        ).fetchone()
+        any_flagged = any(remaining[col] for col in CATEGORY_COLUMNS)
+        conn.execute(
+            "UPDATE beats SET any_arrhythmia=? WHERE id=?",
+            (1 if any_flagged else 0, beat_id),
         )
 
     conn.commit()

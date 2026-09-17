@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ReviewWorkspace from './ReviewWorkspace.svelte'
+import { fileRegistry, resetForTesting as resetFileRegistry } from '../../lib/stores/fileRegistry.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
+  resetFileRegistry()
 })
 
 // jsdom performs no layout, so every element's real `clientWidth` is 0
@@ -162,6 +164,82 @@ describe('ReviewWorkspace', () => {
       expect(summary).toHaveTextContent('15')
       expect(summary).toHaveTextContent('65')
     })
+  })
+
+  // A folder import's background auto-run detection (importQueue.svelte.ts)
+  // can still be queued, or actively running, by the time a technician
+  // opens the file here from the sidebar — this reflects that shared
+  // registry row's own status into the toolbar instead of showing a blank
+  // summary and empty graph markers until a channel change/rerun.
+  it('reflects the shared file registry row (queued → detected) into the detection summary and refreshes the graph', async () => {
+    const fetchMock = mockFetch(beatsOkResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    fileRegistry.push({
+      path: '/data/57.txt',
+      filename: '57.txt',
+      status: 'queued',
+      channels: ['channel 1'],
+      defaultChannel: 'channel 1',
+      size: 100,
+      error: null,
+      beatCount: null,
+      meanHr: null,
+    })
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detection-summary')).toHaveTextContent('beat detection is queued')
+    })
+
+    const callsBeforeDetected = fetchMock.mock.calls.length
+    const row = fileRegistry[0]
+    row.status = 'detecting'
+
+    await waitFor(() => {
+      expect(screen.getByTestId('detection-summary')).toHaveTextContent('detecting beats')
+    })
+
+    row.status = 'detected'
+    row.beatCount = 15
+    row.meanHr = 65
+
+    await waitFor(() => {
+      const summary = screen.getByTestId('detection-summary')
+      expect(summary).toHaveTextContent('15')
+      expect(summary).toHaveTextContent('65')
+    })
+    // Graph markers were refreshed (a new /beats/window-shaped fetch fired)
+    // rather than staying stuck showing the empty pre-detection window.
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeDetected)
+  })
+
+  it('shows a loading indicator in the graph area while mount-time hydration is still in flight', async () => {
+    let resolveFileState: ((value: unknown) => void) | undefined
+    const pendingFileState = new Promise((resolve) => {
+      resolveFileState = resolve
+    })
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/files/state')) return pendingFileState
+      return Promise.resolve(beatsOkResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    expect(screen.getByTestId('graph-loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('ecg-graph')).not.toBeInTheDocument()
+
+    resolveFileState!(fileStateResponse())
+
+    await waitFor(() => expect(screen.queryByTestId('graph-loading')).not.toBeInTheDocument())
+    expect(screen.getByTestId('ecg-graph')).toBeInTheDocument()
   })
 
   it('shows a detection-error summary when detection fails', async () => {

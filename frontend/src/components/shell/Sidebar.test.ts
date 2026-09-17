@@ -37,6 +37,14 @@ function pushRow(overrides: Partial<FileRow> = {}): FileRow {
 // ImportScreen.test.ts for that side) — so these tests drive the store
 // directly rather than going through a full import flow.
 describe('Sidebar file list', () => {
+  it('labels the main list "Files", and labels the two import buttons distinctly', () => {
+    render(Sidebar)
+
+    expect(screen.getByText('Files')).toBeInTheDocument()
+    expect(screen.getByTestId('sidebar-import-files-button')).toHaveTextContent('Import Files')
+    expect(screen.getByTestId('sidebar-import-folder-button')).toHaveTextContent('Import Folder')
+  })
+
   it('renders a row per registered file, showing status text', () => {
     pushRow({ path: '/data/57.txt', filename: '57.txt', status: 'ready' })
     pushRow({ path: '/data/bad.txt', filename: 'bad.txt', status: 'error', defaultChannel: null, error: 'No extractor succeeded' })
@@ -50,6 +58,16 @@ describe('Sidebar file list', () => {
     expect(rows[0]).not.toHaveTextContent('No extractor succeeded')
     expect(rows[1]).toHaveTextContent('bad.txt')
     expect(rows[1]).toHaveTextContent('No extractor succeeded')
+  })
+
+  it('shows a distinct "queued" status, and still offers an Open button, for a file waiting in the detection queue', () => {
+    pushRow({ path: '/data/57.txt', filename: '57.txt', status: 'queued' })
+
+    render(Sidebar, { props: { onReview: vi.fn() } })
+
+    const row = screen.getByTestId('file-row')
+    expect(row).toHaveTextContent('queued for detection')
+    expect(screen.getByTestId('review-button')).toBeInTheDocument()
   })
 
   it('shows "Calculating..." ETA for the first detecting file, then a real ETA for the next', async () => {

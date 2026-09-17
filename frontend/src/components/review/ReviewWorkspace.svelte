@@ -5,6 +5,7 @@
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
+  import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import type { BadDataMark, CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
@@ -182,6 +183,60 @@
   function refreshGraphBeats() {
     beatsRefreshToken += 1
   }
+
+  // The same shared registry row Sidebar renders (see fileRegistry.svelte.ts)
+  // — read directly here rather than threaded down as a prop, matching the
+  // pattern already used elsewhere for shared session state. A folder
+  // import's background auto-run detection (importQueue.svelte.ts) can
+  // still be queued, or actively running, by the time a technician opens
+  // this file from the sidebar — without watching this row, ReviewWorkspace
+  // had no idea and just showed a blank detection summary and empty
+  // markers until the technician happened to change channels or click
+  // Re-run detection.
+  let fileRow = $derived(fileRegistry.find((row) => row.path === path))
+
+  // Reflects the shared registry row's own queued/detecting/detected/error
+  // status into the toolbar's detection summary — but ONLY into `detection`
+  // fields, never touching `activeChannel`: the backend's beat_cache[path]
+  // for the default channel is what the worker in importQueue.svelte.ts is
+  // actually populating, and `activeChannel` already starts at
+  // `defaultChannel` (see its own declaration above), so no channel
+  // advance is needed here the way `handleChannelChange` needs one.
+  //
+  // Only fires again when `fileRow.status` itself actually CHANGES value —
+  // a later manual channel switch or Re-run detection click updates
+  // `detection` through their own paths without touching `fileRow.status`
+  // at all, so this never clobbers either of those afterward.
+  $effect(() => {
+    const status = fileRow?.status
+    if (status === 'queued' || status === 'detecting') {
+      detection = { status: 'pending', count: null, meanHr: null, duration: null, error: null }
+    } else if (status === 'detected' && fileRow) {
+      detection = {
+        status: 'ok',
+        count: fileRow.beatCount,
+        meanHr: fileRow.meanHr,
+        duration: null,
+        error: null,
+      }
+      // The backend's beat_cache[path] just gained real beats — EcgGraph
+      // may already be mounted (and showing an empty markers window) if
+      // the technician opened this file before detection finished.
+      //
+      // Deferred one microtask rather than called synchronously here: doing
+      // it inline reliably threw Svelte's `effect_update_depth_exceeded` in
+      // this exact chain (this effect → `refreshGraphBeats` bumping
+      // `beatsRefreshToken` → EcgGraph's own `$effect` on that prop →
+      // `refreshBeatsOnly` → `chart.setData`) — every step reads state this
+      // effect doesn't, so nothing here is a genuine circular dependency,
+      // but Svelte's depth guard still counted the whole synchronous chain
+      // against this effect's own budget. A microtask breaks the chain into
+      // two independent flushes with no user-visible delay.
+      queueMicrotask(() => refreshGraphBeats())
+    } else if (status === 'detection-error' && fileRow) {
+      detection = { status: 'error', count: null, meanHr: null, duration: null, error: fileRow.error }
+    }
+  })
 
   // F5's report export. See `ReportState`'s own declaration above for the
   // state shape.
@@ -478,7 +533,12 @@
 
     {#if detection.status === 'pending'}
       <div class="detection-summary text-muted" data-testid="detection-summary">
-        detecting beats for {selectedChannel}…
+        <span class="spinner" aria-hidden="true"></span>
+        {#if fileRow?.status === 'queued'}
+          beat detection is queued…
+        {:else}
+          detecting beats for {selectedChannel}…
+        {/if}
       </div>
     {:else if detection.status === 'ok'}
       <div class="detection-summary text-muted" data-testid="detection-summary">
@@ -494,25 +554,7 @@
     {/if}
 
     <span class="toolbar-spacer"></span>
-
-    <button
-      type="button"
-      class="btn btn-primary"
-      data-testid="generate-report-button"
-      disabled={report.status === 'generating'}
-      onclick={handleGenerateReport}
-    >
-      Generate Report
-    </button>
   </div>
-
-  {#if report.status === 'generating'}
-    <span class="report-status text-muted" data-testid="report-generating">Generating report…</span>
-  {:else if report.status === 'ok'}
-    <p class="report-status text-success" data-testid="report-success">Report saved to {report.outputPath}</p>
-  {:else if report.status === 'error'}
-    <p class="report-status text-danger" data-testid="report-error">Report generation failed: {report.error}</p>
-  {/if}
 
   <div class="arrhythmia-toolbar">
     <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
@@ -550,6 +592,12 @@
            own fetch/uPlot-construction logic runs once, in onMount, so a
            remount is the simplest way to get it to re-init for a new
            channel's data. -->
+      {#if !hydrationChecked}
+        <div class="graph-loading" data-testid="graph-loading">
+          <span class="spinner" aria-hidden="true"></span>
+          Loading…
+        </div>
+      {/if}
       {#if hydrationChecked}
         {#key activeChannel}
           <EcgGraph
@@ -564,27 +612,51 @@
     </div>
 
     <div class="beat-panel" data-testid="selected-beat-panel">
-      {#if selectedBeat === null}
-        <p class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">No beat selected</p>
-      {:else if persistPending}
-        <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
-      {:else if persistError && lastPersistedChannel !== activeChannel}
-        <div class="banner banner-error" data-testid="persist-error">
-          <p>Could not prepare review data: {persistError}</p>
-          <button
-            type="button"
-            class="btn btn-sm"
-            data-testid="persist-retry-button"
-            onclick={() => ensureChannelPersisted(activeChannel)}
-          >
-            Retry
-          </button>
-        </div>
-      {:else}
-        {#key selectedBeat.ts}
-          <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
-        {/key}
-      {/if}
+      <div class="beat-panel-content">
+        {#if selectedBeat === null}
+          <p class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">No beat selected</p>
+        {:else if persistPending}
+          <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
+        {:else if persistError && lastPersistedChannel !== activeChannel}
+          <div class="banner banner-error" data-testid="persist-error">
+            <p>Could not prepare review data: {persistError}</p>
+            <button
+              type="button"
+              class="btn btn-sm"
+              data-testid="persist-retry-button"
+              onclick={() => ensureChannelPersisted(activeChannel)}
+            >
+              Retry
+            </button>
+          </div>
+        {:else}
+          {#key selectedBeat.ts}
+            <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
+          {/key}
+        {/if}
+      </div>
+
+      <!-- Pinned to the bottom-right of the beat-detail panel, per explicit
+           request — it was easy to miss up in the top toolbar next to the
+           channel select. -->
+      <div class="beat-panel-footer">
+        {#if report.status === 'generating'}
+          <span class="report-status text-muted" data-testid="report-generating">Generating report…</span>
+        {:else if report.status === 'ok'}
+          <p class="report-status text-success" data-testid="report-success">Report saved to {report.outputPath}</p>
+        {:else if report.status === 'error'}
+          <p class="report-status text-danger" data-testid="report-error">Report generation failed: {report.error}</p>
+        {/if}
+        <button
+          type="button"
+          class="btn btn-primary"
+          data-testid="generate-report-button"
+          disabled={report.status === 'generating'}
+          onclick={handleGenerateReport}
+        >
+          Generate Report
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -651,12 +723,56 @@
     overflow: auto;
   }
 
+  .graph-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    height: 320px;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .beat-panel {
+    display: flex;
+    flex-direction: column;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .beat-panel-content {
+    flex: 1;
     padding: var(--space-4);
     overflow-y: auto;
+  }
+
+  .beat-panel-footer {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--color-border);
   }
 
   .beat-panel-placeholder {

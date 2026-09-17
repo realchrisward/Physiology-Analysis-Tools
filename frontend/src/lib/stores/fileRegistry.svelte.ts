@@ -9,7 +9,12 @@
 export interface FileRow {
   path: string
   filename: string
-  status: 'ready' | 'error' | 'detecting' | 'detected' | 'detection-error'
+  // 'ready' - imported, not yet queued for detection (or auto-run is off).
+  // 'queued' - waiting in the detection worker's FIFO, not yet started.
+  // 'detecting' - the worker is actively running detection for this file.
+  // 'detected' / 'detection-error' - finished, successfully or not.
+  // 'error' - the import itself failed; never queued at all.
+  status: 'ready' | 'error' | 'queued' | 'detecting' | 'detected' | 'detection-error'
   channels: string[]
   defaultChannel: string | null
   size: number | null

@@ -97,6 +97,17 @@ async function importPaths(paths: string[]): Promise<void> {
 }
 
 function enqueueDetection(rows: FileRow[]): void {
+  // Marked 'queued' up front (not left at 'ready') so the sidebar — and a
+  // technician who opens the file before the worker reaches it — can tell
+  // "will be detected shortly" apart from "not queued at all". Only rows
+  // the worker will actually pick up get this — a row whose import itself
+  // failed (no `defaultChannel`) would otherwise show a misleading
+  // "queued" it can never leave.
+  for (const row of rows) {
+    if (row.status === 'ready' && row.defaultChannel !== null) {
+      row.status = 'queued'
+    }
+  }
   pendingDetection.push(...rows)
   if (!workerRunning) {
     void runDetectionWorker()
@@ -112,13 +123,18 @@ async function runDetectionWorker(): Promise<void> {
       if (stopRequested) {
         // Lets the in-flight file finish (this check only runs between
         // files), then drops everything else still queued — no partial
-        // results are ever kept for a dropped file.
+        // results are ever kept for a dropped file. Everything dropped
+        // here reverts from 'queued' back to 'ready' — otherwise it would
+        // show "queued" forever with no worker left to ever process it.
+        for (const row of pendingDetection) {
+          if (row.status === 'queued') row.status = 'ready'
+        }
         pendingDetection.length = 0
         break
       }
 
       const row = pendingDetection.shift()!
-      if (row.status !== 'ready' || row.defaultChannel === null) continue
+      if (row.status !== 'queued' || row.defaultChannel === null) continue
 
       row.status = 'detecting'
       const result = await detectBeats(row.path, row.defaultChannel)

@@ -81,25 +81,24 @@
       data-testid="sidebar-import-files-button"
       onclick={handleImportFiles}
       disabled={importQueue.importing}
-      title="Import files"
-      aria-label="Import files"
+      title="Import Files"
+      aria-label="Import Files"
     >
       <Icon name="file-plus" size={16} />
-      {#if !collapsed}<span>Import</span>{/if}
+      {#if !collapsed}<span>Import Files</span>{/if}
     </button>
-    {#if !collapsed}
-      <button
-        type="button"
-        class="icon-btn"
-        data-testid="sidebar-import-folder-button"
-        onclick={handleImportFolder}
-        disabled={importQueue.importing}
-        title="Import folder"
-        aria-label="Import folder"
-      >
-        <Icon name="folder" size={16} />
-      </button>
-    {/if}
+    <button
+      type="button"
+      class="btn btn-sm sidebar-import-btn"
+      data-testid="sidebar-import-folder-button"
+      onclick={handleImportFolder}
+      disabled={importQueue.importing}
+      title="Import Folder"
+      aria-label="Import Folder"
+    >
+      <Icon name="folder" size={16} />
+      {#if !collapsed}<span>Import Folder</span>{/if}
+    </button>
   </div>
 
   {#if importQueue.detecting && !collapsed}
@@ -109,6 +108,9 @@
     </div>
   {/if}
 
+  {#if !collapsed}
+    <h3 class="sidebar-list-label">Files</h3>
+  {/if}
   <div class="sidebar-list" data-testid="sidebar-file-list">
     {#each fileRegistry as row (row.path)}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -128,9 +130,13 @@
             <span class="sidebar-row-name">{row.filename}</span>
             {#if row.status === 'ready'}
               <span class="sidebar-row-status text-muted">ready</span>
+            {:else if row.status === 'queued'}
+              <span class="sidebar-row-status text-muted">queued for detection…</span>
             {:else if row.status === 'detecting'}
               <span class="sidebar-row-status text-muted"
-                >detecting… <span data-testid="eta-badge">{formatEta(row.size)}</span></span
+                ><span class="spinner" aria-hidden="true"></span> detecting… <span data-testid="eta-badge"
+                  >{formatEta(row.size)}</span
+                ></span
               >
             {:else if row.status === 'detected'}
               <span class="sidebar-row-status text-muted"
@@ -247,26 +253,34 @@
 
   .sidebar-import {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: var(--space-2);
     padding: var(--space-3);
     border-bottom: 1px solid var(--color-border);
   }
 
   .sidebar.collapsed .sidebar-import {
-    justify-content: center;
+    align-items: center;
   }
 
   .sidebar-import-btn {
-    flex: 1;
     justify-content: center;
   }
 
   .sidebar.collapsed .sidebar-import-btn {
-    flex: none;
     width: 32px;
     height: 32px;
     padding: 0;
+  }
+
+  .sidebar-list-label {
+    padding: var(--space-2) var(--space-3) 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
   }
 
   .sidebar-list {
@@ -325,9 +339,30 @@
     background: var(--color-text-muted);
   }
 
+  .sidebar-row-dot[data-status='queued'] {
+    background: var(--color-warning);
+  }
+
   .sidebar-row-dot[data-status='detecting'] {
     background: var(--color-accent);
     animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .sidebar-row-dot[data-status='detected'] {

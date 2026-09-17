@@ -123,6 +123,91 @@ describe('App', () => {
     expect(screen.getByTestId('breadcrumb-current')).toHaveTextContent('57.txt')
   })
 
+  // Regression coverage: the sidebar is reachable from inside Review now
+  // (not just the Welcome screen — see the sidebar redesign), so switching
+  // directly from one open file to another no longer unmounts the
+  // `{#if view === 'review'}` block first. Without a `{#key
+  // selectedFile.path}` around <ReviewWorkspace>, it would keep its OLD
+  // internal state (activeChannel, the mounted EcgGraph, etc.) while only
+  // its props silently changed underneath it — reported as "the graph
+  // doesn't update for the selected file" (only Reset View, which forces
+  // its own fresh fetch using the live `path` prop, "fixed" it).
+  it('re-fetches the graph for the newly selected file when switching directly between two open files', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue([]),
+      pickFolder: vi.fn().mockResolvedValue(['/data/a.txt', '/data/b.txt']),
+    }
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url !== 'string') return Promise.resolve({ ok: true, json: async () => ({}) })
+      if (url.includes('/files/import')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                path: '/data/a.txt',
+                filename: 'a.txt',
+                status: 'ok',
+                channels: ['channel 1'],
+                time_column: 'ts',
+                size: 100,
+                modified_time: 1.0,
+                default_channel: 'channel 1',
+                default_channel_matched_rule: true,
+                error: null,
+              },
+              {
+                path: '/data/b.txt',
+                filename: 'b.txt',
+                status: 'ok',
+                channels: ['channel 1'],
+                time_column: 'ts',
+                size: 100,
+                modified_time: 1.0,
+                default_channel: 'channel 1',
+                default_channel_matched_rule: true,
+                error: null,
+              },
+            ],
+          }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ status: 'ok', found: false, x: [0, 1], y: [0, 1], beats: [], error: null }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(App)
+
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-folder-button'))
+
+    // Auto-open puts us on file a.txt already.
+    await waitFor(() => {
+      expect(screen.getByTestId('breadcrumb-current')).toHaveTextContent('a.txt')
+    })
+    await waitFor(() => {
+      const channelCalls = fetchMock.mock.calls.filter((c: any) => String(c[0]).includes('/channels/window'))
+      expect(channelCalls.some((c: any) => new URL(c[0]).searchParams.get('path') === '/data/a.txt')).toBe(true)
+    })
+
+    // Now open the OTHER file directly from the sidebar, without going back
+    // to the Welcome screen first.
+    const openButtons = screen.getAllByTestId('review-button')
+    const bRow = openButtons.find((btn) => btn.closest('[data-testid="file-row"]')?.textContent?.includes('b.txt'))
+    await fireEvent.click(bRow!)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('breadcrumb-current')).toHaveTextContent('b.txt')
+    })
+    await waitFor(() => {
+      const channelCalls = fetchMock.mock.calls.filter((c: any) => String(c[0]).includes('/channels/window'))
+      expect(channelCalls.some((c: any) => new URL(c[0]).searchParams.get('path') === '/data/b.txt')).toBe(true)
+    })
+  })
+
   // Settings must be reachable from both views, since detection parameters
   // matter whether the technician is about to import/detect or is already
   // reviewing a file. These are smoke tests (button present, dialog opens) —

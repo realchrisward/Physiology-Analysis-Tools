@@ -78,8 +78,15 @@ describe('ArrhythmiaControls', () => {
     expect(screen.getByTestId('run-unsupervised-button')).toBeDisabled()
     expect(screen.getByTestId('run-both-button')).toBeDisabled()
 
+    // The spinner shows on the specific button that was clicked, not the
+    // other two, so it's clear at a glance which run is actually in flight.
+    expect(screen.getByTestId('run-heuristic-button').querySelector('.spinner')).toBeInTheDocument()
+    expect(screen.getByTestId('run-unsupervised-button').querySelector('.spinner')).not.toBeInTheDocument()
+    expect(screen.getByTestId('run-both-button').querySelector('.spinner')).not.toBeInTheDocument()
+
     resolveFetch!(arrhythmiaOkResponse())
     await waitFor(() => expect(screen.queryByTestId('arrhythmia-running')).not.toBeInTheDocument())
+    expect(screen.getByTestId('run-heuristic-button').querySelector('.spinner')).not.toBeInTheDocument()
   })
 
   it('calls onComplete and clears the running state on a successful run', async () => {

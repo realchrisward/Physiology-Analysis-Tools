@@ -32,6 +32,10 @@
   type RunState = 'idle' | 'running'
   let runState: RunState = $state('idle')
   let error: string | null = $state(null)
+  // Which specific method is running, so its own button can show a spinner
+  // in place of the others — distinct from `runState`, which just gates
+  // whether ALL three buttons are disabled together.
+  let runningMethod: 'heuristic' | 'unsupervised' | 'both' | null = $state(null)
 
   async function run(method: 'heuristic' | 'unsupervised' | 'both') {
     // Captured up front: the channel this specific run is FOR. `channel` is
@@ -43,6 +47,7 @@
     // not the one this run was dispatched for.
     const requestedChannel = channel
     runState = 'running'
+    runningMethod = method
     error = null
     try {
       const result = await detectArrhythmias(path, requestedChannel, method)
@@ -58,6 +63,7 @@
       }
     } finally {
       runState = 'idle'
+      runningMethod = null
     }
   }
 </script>
@@ -71,6 +77,7 @@
     disabled={runState === 'running' || disabled}
     onclick={() => run('heuristic')}
   >
+    {#if runningMethod === 'heuristic'}<span class="spinner" aria-hidden="true"></span>{/if}
     Run heuristic
   </button>
   <button
@@ -80,6 +87,7 @@
     disabled={runState === 'running' || disabled}
     onclick={() => run('unsupervised')}
   >
+    {#if runningMethod === 'unsupervised'}<span class="spinner" aria-hidden="true"></span>{/if}
     Run unsupervised
   </button>
   <button
@@ -89,11 +97,15 @@
     disabled={runState === 'running' || disabled}
     onclick={() => run('both')}
   >
+    {#if runningMethod === 'both'}<span class="spinner" aria-hidden="true"></span>{/if}
     Run both
   </button>
 
   {#if runState === 'running'}
-    <span class="text-muted" data-testid="arrhythmia-running">Running arrhythmia detection…</span>
+    <span class="text-muted" data-testid="arrhythmia-running">
+      <span class="spinner" aria-hidden="true"></span>
+      Running arrhythmia detection…
+    </span>
   {/if}
 
   {#if error}
@@ -115,5 +127,23 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-right: var(--space-1);
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: var(--space-1);
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

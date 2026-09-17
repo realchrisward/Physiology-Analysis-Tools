@@ -234,6 +234,122 @@ def test_reassign_is_immediately_visible_via_beats_window_same_instance(
     assert beat["other_arrhythmia"] is False
 
 
+def test_remove_flag_clears_one_category_and_leaves_others_and_review_state_alone(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+    before = _get_beat(client, real_beats_txt_file, 0.0855)
+    assert before["tachycardia_absolute"] is True
+    assert before["review_state"] == "unreviewed"
+
+    response = client.patch(
+        "/files/beats/category",
+        json={
+            "path": real_beats_txt_file,
+            "ts": ts,
+            "action": "remove_flag",
+            "category": "tachycardia_absolute",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ok"
+    # remove_flag is a correction to the raw detection, not a review
+    # decision — review_state/reassigned_category are untouched.
+    assert result["review_state"] == "unreviewed"
+    assert result["reassigned_category"] is None
+
+    beat = _get_beat(client, real_beats_txt_file, 0.0855)
+    assert beat["tachycardia_absolute"] is False
+    assert beat["review_state"] == "unreviewed"
+
+
+def test_remove_flag_clears_any_arrhythmia_once_no_flags_remain(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+    before = _get_beat(client, real_beats_txt_file, 0.0855)
+    flagged = [
+        cat
+        for cat in [
+            "bradycardia_absolute",
+            "tachycardia_absolute",
+            "skipped_beat",
+            "prem_beat",
+            "abn_cluster",
+            "other_arrhythmia",
+        ]
+        if before[cat]
+    ]
+    assert flagged  # sanity: this beat has at least one real flag to remove
+
+    for category in flagged:
+        response = client.patch(
+            "/files/beats/category",
+            json={
+                "path": real_beats_txt_file,
+                "ts": ts,
+                "action": "remove_flag",
+                "category": category,
+            },
+        )
+        assert response.json()["status"] == "ok"
+
+    beat = _get_beat(client, real_beats_txt_file, 0.0855)
+    assert beat["any_arrhythmia"] is False
+    for category in flagged:
+        assert beat[category] is False
+
+    # Immediately visible via /beats/window too (same in-memory beat_cache
+    # sync path the other three actions already rely on).
+    window_response = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    )
+    window_beat = window_response.json()["beats"][0]
+    assert window_beat["any_arrhythmia"] is False
+
+
+def test_remove_flag_with_invalid_category_is_an_error(tmp_path, real_beats_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+
+    response = client.patch(
+        "/files/beats/category",
+        json={
+            "path": real_beats_txt_file,
+            "ts": 0.0855,
+            "action": "remove_flag",
+            "category": "not_a_real_category",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert result["error"]
+
+
+def test_remove_flag_without_category_is_an_error(tmp_path, real_beats_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+
+    response = client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": 0.0855, "action": "remove_flag"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert result["error"]
+
+
 def test_no_persisted_record_for_file_is_an_error(tmp_path, example_txt_file):
     client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
     client.post("/files/import", json={"paths": [example_txt_file]})
