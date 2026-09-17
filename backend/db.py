@@ -232,7 +232,7 @@ def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -
 
 def replace_beats(
     conn: sqlite3.Connection, file_id: int, beat_df, *, commit: bool = True
-) -> None:
+) -> dict[float, tuple[str, str | None]]:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 
     Wholesale-replacing (rather than merging) keeps repeated persists
@@ -255,6 +255,16 @@ def replace_beats(
     `commit` defaults to True (standalone-call behavior). Pass
     `commit=False` when this call is one half of a larger transaction the
     caller will commit (or roll back) itself.
+
+    Returns the SAME `preserved_state` mapping (`ts -> (review_state,
+    reassigned_category)`) this function computed to do its own preserving
+    — the caller (`persist_beats` in db_routes.py) uses it to sync
+    `review_state`/`reassigned_category` back onto `beat_cache[path]` (the
+    live, in-memory `beat_df` this function was handed), which never gets
+    that write otherwise: only `update_beat_category` (a single-beat
+    action) syncs the cache today, so without this, a beat reviewed before
+    a redetect+re-persist would keep showing as "unreviewed" in the graph
+    even though SQLite correctly preserved it.
     """
     preserved_state: dict[float, tuple[str, str | None]] = {
         row["ts"]: (row["review_state"], row["reassigned_category"])
@@ -301,3 +311,5 @@ def replace_beats(
 
     if commit:
         conn.commit()
+
+    return preserved_state

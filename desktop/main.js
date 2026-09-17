@@ -73,11 +73,12 @@ app.whenReady().then(async () => {
       if (result.canceled) return []
       return findSupportedFiles(result.filePaths[0])
     })
-    ipcMain.handle('pick-output-directory', async () => {
-      const result = await dialog.showOpenDialog({
-        properties: ['openDirectory'],
+    ipcMain.handle('pick-report-save-path', async (_event, defaultFileName) => {
+      const result = await dialog.showSaveDialog({
+        defaultPath: defaultFileName || 'report.xlsx',
+        filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
       })
-      return result.canceled ? null : result.filePaths[0]
+      return result.canceled || !result.filePath ? null : result.filePath
     })
     createWindow()
   } catch (err) {

@@ -350,6 +350,68 @@ def test_remove_flag_without_category_is_an_error(tmp_path, real_beats_txt_file)
     assert result["error"]
 
 
+def test_confirm_is_immediately_visible_via_beats_window_review_state(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+
+    window_before = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    ).json()
+    assert window_before["beats"][0]["review_state"] == "unreviewed"
+
+    response = client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": ts, "action": "confirm"},
+    )
+    assert response.json()["status"] == "ok"
+
+    window_after = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    ).json()
+    assert window_after["beats"][0]["review_state"] == "confirmed"
+
+
+def test_review_state_survives_a_redetect_and_re_persist(
+    tmp_path, real_beats_txt_file
+):
+    """A beat confirmed, then re-persisted after a fresh detect+persist
+    cycle (e.g. the frontend's Re-run detection button), must still show
+    its review_state via /beats/window — not just in SQLite. Regression
+    coverage for db.replace_beats's preserved state never being synced back
+    onto beat_cache[path] itself (only SQLite), which meant the graph kept
+    showing a reviewed beat as unreviewed until it was clicked again."""
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+
+    client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": ts, "action": "confirm"},
+    )
+
+    # Re-run detection (replaces beat_cache[path] with a fresh DataFrame —
+    # no review_state column at all) and re-persist (SQLite preserves the
+    # confirm via replace_beats's own preserved_state logic).
+    client.post(
+        "/beats/detect", json={"path": real_beats_txt_file, "channel": "channel 1"}
+    )
+    persist_response = client.post(
+        "/files/beats", json={"path": real_beats_txt_file, "channel": "channel 1"}
+    )
+    assert persist_response.json()["status"] == "ok"
+
+    window_after = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": ts - 0.01, "end": ts + 0.01},
+    ).json()
+    assert window_after["beats"][0]["review_state"] == "confirmed"
+
+
 def test_no_persisted_record_for_file_is_an_error(tmp_path, example_txt_file):
     client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
     client.post("/files/import", json={"paths": [example_txt_file]})

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import EcgGraph, { buildBeatAlignedData } from './EcgGraph.svelte'
+import EcgGraph, { buildBeatAlignedData, toChartData } from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
 
 afterEach(() => {
@@ -92,6 +92,8 @@ function beat(overrides: Partial<WindowBeat> & Pick<WindowBeat, 'ts' | 'r_amplit
     abn_cluster: false,
     any_arrhythmia: false,
     other_arrhythmia: false,
+    review_state: 'unreviewed',
+    reassigned_category: null,
     ...overrides,
   }
 }
@@ -765,20 +767,153 @@ describe('EcgGraph', () => {
 
     await waitFor(() => expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument())
   })
+
+  describe('Y-axis zoom', () => {
+    it('the Y zoom-in button highlights Reset view without firing a new fetch', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      const resetButton = screen.getByTestId('reset-view-button')
+      expect(resetButton.className).not.toContain('btn-active')
+
+      await fireEvent.click(screen.getByTestId('zoom-in-y-button'))
+
+      expect(resetButton.className).toContain('btn-active')
+      // Y-zoom is a pure rendering concern — no new data is needed.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('Shift+wheel zooms Y (highlights Reset view) instead of X (no debounced re-fetch)', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+      vi.useFakeTimers()
+      over.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, shiftKey: true, bubbles: true, cancelable: true }),
+      )
+      await vi.advanceTimersByTimeAsync(150)
+      vi.useRealTimers()
+
+      expect(screen.getByTestId('reset-view-button').className).toContain('btn-active')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('Reset view restores Y auto-ranging without throwing, after a Y-zoom', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+
+      withMockedClientWidth(800, () => {
+        render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      await fireEvent.click(screen.getByTestId('zoom-in-y-button'))
+      await fireEvent.click(screen.getByTestId('reset-view-button'))
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+      expect(screen.getByTestId('reset-view-button').className).not.toContain('btn-active')
+      expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('legend / category filter', () => {
+    it('renders a legend entry for every display category', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      const { DISPLAY_CATEGORIES } = await import('../../lib/categories')
+      for (const cat of DISPLAY_CATEGORIES) {
+        expect(screen.getByTestId(`legend-toggle-${cat}`)).toBeInTheDocument()
+      }
+    })
+
+    it('toggling a legend entry marks it inactive, and toggling again restores it', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      const toggle = screen.getByTestId('legend-toggle-tachycardia_absolute')
+      expect(toggle.getAttribute('aria-pressed')).toBe('true')
+
+      await fireEvent.click(toggle)
+      expect(toggle.getAttribute('aria-pressed')).toBe('false')
+      expect(toggle.className).toContain('legend-chip--inactive')
+
+      await fireEvent.click(toggle)
+      expect(toggle.getAttribute('aria-pressed')).toBe('true')
+      expect(toggle.className).not.toContain('legend-chip--inactive')
+    })
+
+    it('the review-state filter toggles which button is active', async () => {
+      const fetchMock = routedFetch()
+      vi.stubGlobal('fetch', fetchMock)
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      expect(screen.getByTestId('review-filter-all').className).toContain('btn-active')
+
+      await fireEvent.click(screen.getByTestId('review-filter-reviewed'))
+      expect(screen.getByTestId('review-filter-reviewed').className).toContain('btn-active')
+      expect(screen.getByTestId('review-filter-all').className).not.toContain('btn-active')
+
+      await fireEvent.click(screen.getByTestId('review-filter-unreviewed'))
+      expect(screen.getByTestId('review-filter-unreviewed').className).toContain('btn-active')
+      expect(screen.getByTestId('review-filter-reviewed').className).not.toContain('btn-active')
+    })
+  })
+
+  describe('selected beat highlight', () => {
+    it('accepts a selectedBeatTs prop and re-renders without error when it changes', async () => {
+      const targetBeat = beat({ ts: 5, r_amplitude: 6, any_arrhythmia: true })
+      const fetchMock = routedFetch({ beats: () => beatsWindowResponse({ beats: [targetBeat], count: 1 }) })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const { rerender } = render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', selectedBeatTs: null },
+      })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+      await rerender({ path: '/data/57.txt', channel: 'channel 1', selectedBeatTs: 5 })
+
+      expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
+
+      await rerender({ path: '/data/57.txt', channel: 'channel 1', selectedBeatTs: null })
+      expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
+    })
+  })
 })
 
 describe('buildBeatAlignedData', () => {
   // This is the exact "series/point data passed to uPlot" the beat-marker
   // feature is built on (see EcgGraph.svelte's onMount/refetch, which feed
-  // its output straight into `new uPlot(...)`/`chart.setData(...)`) — so
-  // asserting on its output directly is a precise, uPlot-internals-free way
-  // to verify "the plot receives 3 distinguishable marker points" per
-  // arrhythmia category, without reaching into a live chart instance.
-  it('merges the channel waveform with beat markers into a shared x-axis and 3 per-category y-series', () => {
+  // its output straight into `new uPlot(...)`/`chart.setData(...)` via
+  // `toChartData`) — so asserting on its output directly is a precise,
+  // uPlot-internals-free way to verify "the plot receives one
+  // distinguishable marker point per (category, reviewed-state) bucket",
+  // without reaching into a live chart instance.
+  function bucketY(result: ReturnType<typeof buildBeatAlignedData>, category: string, reviewed: boolean) {
+    return result.markerY[`${category}|${reviewed ? 'reviewed' : 'unreviewed'}`]
+  }
+
+  it('merges the channel waveform with beat markers into a shared x-axis', () => {
     const channelX = [0, 1, 2, 3, 4]
     const channelY = [0, 1, 0, -1, 0]
     const beats: WindowBeat[] = [
-      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true }),
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, tachycardia_absolute: true }),
       beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false }),
       // A beat timestamp that doesn't land on a channel sample (4.5) — the
       // "not yet arrhythmia-detected" case.
@@ -791,17 +926,93 @@ describe('buildBeatAlignedData', () => {
     // spanGaps on the waveform series (set in EcgGraph.svelte) means this
     // trailing null doesn't fragment the rendered line.
     expect(result.channelY).toEqual([0, 1, 0, -1, 0, null])
-    expect(result.arrhythmiaY).toEqual([null, 5, null, null, null, null])
-    expect(result.normalY).toEqual([null, null, 6, null, null, null])
-    expect(result.unevaluatedY).toEqual([null, null, null, null, null, 7])
+  })
+
+  it('buckets each beat by its primary display category, unreviewed by default', () => {
+    const channelX = [0, 1, 2, 4.5]
+    const channelY = [0, 1, 0, 0]
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, tachycardia_absolute: true }),
+      beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false }),
+      beat({ ts: 4.5, r_amplitude: 7, any_arrhythmia: null }),
+    ]
+
+    const result = buildBeatAlignedData(channelX, channelY, beats)
+
+    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, 5, null, null])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, 6, null])
+    expect(bucketY(result, 'unevaluated', false)).toEqual([null, null, null, 7])
+    // Every other bucket stays entirely null for this fixture.
+    expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null, null])
+  })
+
+  it('picks the primary category by fixed priority when multiple flags are set', () => {
+    const beats: WindowBeat[] = [
+      beat({
+        ts: 1,
+        r_amplitude: 5,
+        any_arrhythmia: true,
+        tachycardia_absolute: true,
+        bradycardia_absolute: true, // earlier in REASSIGNABLE_CATEGORIES' priority order
+      }),
+    ]
+    const result = buildBeatAlignedData([0, 1], [0, 0], beats)
+
+    expect(bucketY(result, 'bradycardia_absolute', false)).toEqual([null, 5])
+    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, null])
+  })
+
+  it('splits reviewed beats into the reviewed bucket, separate from unreviewed', () => {
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, prem_beat: true, review_state: 'confirmed' }),
+      beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false, review_state: 'unreviewed' }),
+    ]
+    const result = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats)
+
+    expect(bucketY(result, 'prem_beat', true)).toEqual([null, 5, null])
+    expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, 6])
+    expect(bucketY(result, 'normal', true)).toEqual([null, null, null])
+  })
+
+  it('marks only the selected beat in selectedY, by exact ts', () => {
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5 }),
+      beat({ ts: 2, r_amplitude: 6 }),
+    ]
+    const result = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, 2)
+
+    expect(result.selectedY).toEqual([null, null, 6])
+  })
+
+  it('leaves selectedY entirely null when nothing is selected', () => {
+    const beats: WindowBeat[] = [beat({ ts: 1, r_amplitude: 5 })]
+    const result = buildBeatAlignedData([0, 1], [0, 0], beats)
+
+    expect(result.selectedY).toEqual([null, null])
   })
 
   it('returns the channel waveform unchanged when there are no beats', () => {
     const result = buildBeatAlignedData([0, 1, 2], [1, 2, 3], [])
     expect(result.xs).toEqual([0, 1, 2])
     expect(result.channelY).toEqual([1, 2, 3])
-    expect(result.arrhythmiaY).toEqual([null, null, null])
-    expect(result.normalY).toEqual([null, null, null])
-    expect(result.unevaluatedY).toEqual([null, null, null])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, null])
+  })
+})
+
+describe('toChartData', () => {
+  it('flattens xs/channelY/markerY/selectedY into MARKER_BUCKETS order, for uPlot.setData', async () => {
+    const { MARKER_BUCKETS } = await import('../../lib/categories')
+    const beats: WindowBeat[] = [beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, prem_beat: true })]
+    const merged = buildBeatAlignedData([0, 1], [0, 0], beats)
+
+    const data = toChartData(merged)
+
+    expect(data[0]).toBe(merged.xs)
+    expect(data[1]).toBe(merged.channelY)
+    MARKER_BUCKETS.forEach((bucket, i) => {
+      expect(data[i + 2]).toBe(merged.markerY[bucket.key])
+    })
+    expect(data[data.length - 1]).toBe(merged.selectedY)
   })
 })

@@ -108,6 +108,26 @@ describe('ReviewWorkspace', () => {
     expect(select.value).toBe('channel 1')
   })
 
+  it('collapses and expands the beat-detail panel via its toggle button', async () => {
+    vi.stubGlobal('fetch', mockFetch(beatsOkResponse()))
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+    })
+
+    const toggle = screen.getByTestId('beat-panel-toggle')
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByTestId('selected-beat-summary')).toBeInTheDocument()
+
+    await fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByTestId('selected-beat-summary')).not.toBeInTheDocument()
+
+    await fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByTestId('selected-beat-summary')).toBeInTheDocument()
+  })
+
   it('re-runs detection when the channel changes, and shows the updated summary', async () => {
     const fetchMock = mockFetch(beatsOkResponse({ count: 42, mean_hr: 72, duration: 60 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -612,6 +632,40 @@ describe('ReviewWorkspace', () => {
         }
       }
     })
+
+    it('auto-expands the collapsible beat panel when a new beat is selected, even if previously collapsed', async () => {
+      const fetchMock = mockFetchWithBeatsWindowAndPersist(() => ({
+        ok: true,
+        json: async () => ({ status: 'ok', count: 1, error: null }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+      try {
+        render(ReviewWorkspace, {
+          props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+        })
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+
+        // Collapse it manually before any beat is selected.
+        await fireEvent.click(screen.getByTestId('beat-panel-toggle'))
+        expect(screen.queryByTestId('selected-beat-summary')).not.toBeInTheDocument()
+
+        clickBeatMarker()
+
+        await waitFor(() => {
+          expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
+        })
+        expect(screen.getByTestId('beat-panel-toggle').getAttribute('aria-pressed')).toBe('false')
+      } finally {
+        if (originalClientWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+        } else {
+          delete (HTMLElement.prototype as any).clientWidth
+        }
+      }
+    })
   })
 
   // Regression coverage for two compounding bugs found in review of Task 2
@@ -998,6 +1052,7 @@ describe('ReviewWorkspace', () => {
         }
       }
     })
+
   })
 
   // Task 3: arrhythmia re-run controls. ArrhythmiaControls' own behavior
@@ -1851,11 +1906,12 @@ describe('ReviewWorkspace', () => {
     })
   })
 
-  // Task 4 of F5: report export. The technician picks an output directory
-  // via the native Electron dialog (`window.api.pickOutputDirectory`, F1),
-  // then `POST /files/report` (`generateReport` in `lib/api/persistence.ts`)
-  // writes the report there. Canceling the native dialog resolves `null` and
-  // must be a no-op — never call the API with a missing directory.
+  // Report export: the technician picks a full Save As destination (folder
+  // AND filename) via the native Electron dialog
+  // (`window.api.pickReportSavePath`), then `POST /files/report`
+  // (`generateReport` in `lib/api/persistence.ts`) writes the report there.
+  // Canceling the native dialog resolves `null` and must be a no-op — never
+  // call the API with a missing path.
   describe('report export: Generate Report button', () => {
     function mockFetchForReport(reportResponse?: () => { ok: boolean; json: () => Promise<unknown> }) {
       return vi.fn().mockImplementation((url: string) => {
@@ -1866,14 +1922,14 @@ describe('ReviewWorkspace', () => {
       })
     }
 
-    it('opens the native directory picker, then calls generateReport with the chosen path', async () => {
+    it('opens the native Save As dialog with a suggested filename, then calls generateReport with the chosen path', async () => {
       const fetchMock = mockFetchForReport(() => ({
         ok: true,
-        json: async () => ({ status: 'ok', output_path: '/Users/tech/reports/57.xlsx', error: null }),
+        json: async () => ({ status: 'ok', output_path: '/Users/tech/reports/57-report.xlsx', error: null }),
       }))
       vi.stubGlobal('fetch', fetchMock)
       ;(window as any).api = {
-        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+        pickReportSavePath: vi.fn().mockResolvedValue('/Users/tech/reports/57-report.xlsx'),
       }
 
       render(ReviewWorkspace, {
@@ -1884,23 +1940,23 @@ describe('ReviewWorkspace', () => {
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
-      expect((window as any).api.pickOutputDirectory).toHaveBeenCalled()
+      expect((window as any).api.pickReportSavePath).toHaveBeenCalledWith('57-report.xlsx')
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledWith(
           'http://127.0.0.1:8000/files/report',
           expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ path: '/data/57.txt', output_dir: '/Users/tech/reports' }),
+            body: JSON.stringify({ path: '/data/57.txt', output_path: '/Users/tech/reports/57-report.xlsx' }),
           }),
         )
       })
     })
 
-    it('does nothing when the directory picker is canceled', async () => {
+    it('does nothing when the Save As dialog is canceled', async () => {
       const fetchMock = mockFetchForReport()
       vi.stubGlobal('fetch', fetchMock)
       ;(window as any).api = {
-        pickOutputDirectory: vi.fn().mockResolvedValue(null),
+        pickReportSavePath: vi.fn().mockResolvedValue(null),
       }
 
       render(ReviewWorkspace, {
@@ -1911,7 +1967,7 @@ describe('ReviewWorkspace', () => {
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
-      expect((window as any).api.pickOutputDirectory).toHaveBeenCalled()
+      expect((window as any).api.pickReportSavePath).toHaveBeenCalled()
       // Give any (incorrect) fire-and-forget call a chance to fire before asserting.
       await Promise.resolve()
       await Promise.resolve()
@@ -1925,7 +1981,7 @@ describe('ReviewWorkspace', () => {
       }))
       vi.stubGlobal('fetch', fetchMock)
       ;(window as any).api = {
-        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+        pickReportSavePath: vi.fn().mockResolvedValue('/Users/tech/reports/57-report.xlsx'),
       }
 
       render(ReviewWorkspace, {
@@ -1952,7 +2008,7 @@ describe('ReviewWorkspace', () => {
       }))
       vi.stubGlobal('fetch', fetchMock)
       ;(window as any).api = {
-        pickOutputDirectory: vi.fn().mockResolvedValue('/Users/tech/reports'),
+        pickReportSavePath: vi.fn().mockResolvedValue('/Users/tech/reports/57-report.xlsx'),
       }
 
       render(ReviewWorkspace, {

@@ -115,6 +115,8 @@ class WindowBeat(BaseModel):
     abn_cluster: bool | None = None
     any_arrhythmia: bool | None = None
     other_arrhythmia: bool | None = None
+    review_state: str = "unreviewed"
+    reassigned_category: str | None = None
 
 
 class BeatWindowResult(BaseModel):
@@ -227,7 +229,10 @@ class CategoryUpdateResult(BaseModel):
 
 class ReportRequest(BaseModel):
     path: str
-    output_dir: str
+    # The full destination file path (directory + filename), chosen by the
+    # technician via a native Save As dialog — not just a directory with a
+    # server-picked filename, so they can rename the export freely.
+    output_path: str
 
 
 class ReportResult(BaseModel):

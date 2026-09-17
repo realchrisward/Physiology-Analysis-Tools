@@ -101,6 +101,12 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                     col_values = [beat_row[col] for beat_row in beat_rows]
                     if any(value is not None for value in col_values):
                         cache_df[col] = [_to_bool(value) for value in col_values]
+                cache_df["review_state"] = [
+                    beat_row["review_state"] for beat_row in beat_rows
+                ]
+                cache_df["reassigned_category"] = [
+                    beat_row["reassigned_category"] for beat_row in beat_rows
+                ]
                 request.app.state.beat_cache[path] = cache_df
         except Exception:
             pass
@@ -191,8 +197,26 @@ def persist_beats(
             ),
             commit=False,
         )
-        db.replace_beats(conn, file_id, beat_df, commit=False)
+        preserved_state = db.replace_beats(conn, file_id, beat_df, commit=False)
         conn.commit()
+
+        # Sync review_state/reassigned_category onto the SAME beat_cache[path]
+        # DataFrame `/beats/window` reads from — replace_beats above only
+        # preserved them in SQLite; without this, a beat reviewed before this
+        # redetect+persist would show as "unreviewed" on the graph until
+        # individually touched again. Every row gets a value (defaulting to
+        # unreviewed/None) — beat_df's index isn't guaranteed to be 0-based
+        # after upstream filtering, so this goes by `ts` via .items() rather
+        # than positional assignment.
+        review_states = {}
+        reassigned_categories = {}
+        for ts in beat_df["ts"]:
+            state, category = preserved_state.get(ts, ("unreviewed", None))
+            review_states[ts] = state
+            reassigned_categories[ts] = category
+        beat_df["review_state"] = beat_df["ts"].map(review_states)
+        beat_df["reassigned_category"] = beat_df["ts"].map(reassigned_categories)
+
         return PersistBeatsResult(status="ok", count=len(beat_df))
     except Exception as e:
         conn.rollback()
@@ -259,6 +283,8 @@ def update_beat_category(
             if mask.any():
                 for col in categories.ALL_OPTIONAL_COLUMNS:
                     cached_df.loc[mask, col] = _to_bool(updated[col])
+                cached_df.loc[mask, "review_state"] = updated["review_state"]
+                cached_df.loc[mask, "reassigned_category"] = updated["reassigned_category"]
 
         return CategoryUpdateResult(
             status="ok",
@@ -346,10 +372,11 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
                 error="No persisted data for this file — run POST /files/beats first",
             )
 
-        if not os.path.isdir(payload.output_dir):
+        output_dir = os.path.dirname(payload.output_path) or "."
+        if not os.path.isdir(output_dir):
             return ReportResult(
                 status="error",
-                error=f"Output directory does not exist: {payload.output_dir}",
+                error=f"Output directory does not exist: {output_dir}",
             )
 
         beats_df = pd.read_sql_query(
@@ -378,10 +405,12 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             index=[0],
         )
 
-        output_path = os.path.join(
-            payload.output_dir,
-            os.path.splitext(os.path.basename(payload.path))[0] + ".xlsx",
-        )
+        # The technician's chosen filename wins as-is; only defensively
+        # append .xlsx if they (or a non-Electron caller) omitted it — the
+        # Save As dialog's own file-type filter normally prevents this.
+        output_path = payload.output_path
+        if not output_path.lower().endswith(".xlsx"):
+            output_path += ".xlsx"
 
         try:
             writer = pd.ExcelWriter(output_path, engine="xlsxwriter")

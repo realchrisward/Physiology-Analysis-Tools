@@ -32,16 +32,17 @@ def test_generate_report_writes_xlsx_with_three_sheets(tmp_path, real_beats_txt_
 
     output_dir = tmp_path / "reports"
     os.makedirs(output_dir)
+    output_path = output_dir / "57-report.xlsx"
 
     response = client.post(
         "/files/report",
-        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+        json={"path": real_beats_txt_file, "output_path": str(output_path)},
     )
 
     assert response.status_code == 200
     result = response.json()
     assert result["status"] == "ok"
-    assert result["output_path"].endswith("57.xlsx")
+    assert result["output_path"].endswith("57-report.xlsx")
     assert os.path.exists(result["output_path"])
 
     sheets = pd.read_excel(result["output_path"], sheet_name=None)
@@ -63,6 +64,35 @@ def test_generate_report_writes_xlsx_with_three_sheets(tmp_path, real_beats_txt_
     assert settings_df.iloc[0]["ml_version"] == "0.0.1"
 
 
+def test_generate_report_appends_xlsx_extension_if_missing(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    client.post(
+        "/beats/detect", json={"path": real_beats_txt_file, "channel": "channel 1"}
+    )
+    client.post(
+        "/files/beats", json={"path": real_beats_txt_file, "channel": "channel 1"}
+    )
+
+    output_dir = tmp_path / "reports"
+    os.makedirs(output_dir)
+
+    response = client.post(
+        "/files/report",
+        json={
+            "path": real_beats_txt_file,
+            "output_path": str(output_dir / "no-extension"),
+        },
+    )
+
+    result = response.json()
+    assert result["status"] == "ok"
+    assert result["output_path"].endswith("no-extension.xlsx")
+    assert os.path.exists(result["output_path"])
+
+
 def test_generate_report_without_persisted_data_is_an_error(
     tmp_path, real_beats_txt_file
 ):
@@ -74,7 +104,7 @@ def test_generate_report_without_persisted_data_is_an_error(
 
     response = client.post(
         "/files/report",
-        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+        json={"path": real_beats_txt_file, "output_path": str(output_dir / "57.xlsx")},
     )
 
     assert response.status_code == 200
@@ -101,7 +131,7 @@ def test_generate_report_with_only_bad_data_persisted_is_clean_domain_error(
 
     response = client.post(
         "/files/report",
-        json={"path": real_beats_txt_file, "output_dir": str(output_dir)},
+        json={"path": real_beats_txt_file, "output_path": str(output_dir / "57.xlsx")},
     )
 
     assert response.status_code == 200
@@ -133,7 +163,7 @@ def test_generate_report_with_nonexistent_output_dir_is_an_error(
         "/files/report",
         json={
             "path": real_beats_txt_file,
-            "output_dir": str(tmp_path / "does_not_exist"),
+            "output_path": str(tmp_path / "does_not_exist" / "57.xlsx"),
         },
     )
 

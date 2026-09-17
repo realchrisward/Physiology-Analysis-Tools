@@ -6,7 +6,7 @@ declare global {
       getBackendPort: () => Promise<number>
       pickFiles: () => Promise<string[]>
       pickFolder: () => Promise<string[]>
-      pickOutputDirectory: () => Promise<string | null>
+      pickReportSavePath: (defaultFileName?: string) => Promise<string | null>
     }
   }
 }

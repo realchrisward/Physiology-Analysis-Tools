@@ -5,6 +5,7 @@
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
+  import Icon from '../shared/Icon.svelte'
   import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import type { BadDataMark, CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
@@ -83,6 +84,28 @@
   // The beat most recently selected via a click on EcgGraph's marker (see
   // `onBeatSelect` below), driving the real `BeatCategoryPanel` below.
   let selectedBeat: WindowBeat | null = $state(null)
+
+  // Collapsible beat-detail side panel — collapsed, it shrinks to a slim
+  // icon rail so the graph gets the full width; a technician can collapse
+  // it manually while just panning/browsing the waveform. Auto-expands
+  // back the moment a NEW beat is selected (see the `$effect` below) so
+  // selecting a beat always shows its detail without an extra click, but a
+  // technician who collapses it again while looking at the SAME beat has
+  // that choice respected until they pick a different one.
+  let beatPanelCollapsed: boolean = $state(false)
+  let previousSelectedBeatTs: number | null = null
+
+  function toggleBeatPanel(): void {
+    beatPanelCollapsed = !beatPanelCollapsed
+  }
+
+  $effect(() => {
+    const ts = selectedBeat?.ts ?? null
+    if (ts !== null && ts !== previousSelectedBeatTs) {
+      beatPanelCollapsed = false
+    }
+    previousSelectedBeatTs = ts
+  })
 
   // F5 reopen hydration: the prior session's bad-data marks, if any, fetched
   // via `GET /files/state` in the `onMount` below and passed straight
@@ -252,11 +275,16 @@
   // bridge at all — so a missing bridge is treated identically to a
   // cancellation rather than thrown.
   async function handleGenerateReport() {
-    const dir = await window.api?.pickOutputDirectory()
-    if (!dir) return // canceled, or no Electron bridge present
+    // A native Save As dialog (not just a directory picker) — the
+    // technician chooses BOTH the destination folder and the filename,
+    // pre-filled with a sensible default derived from the source file.
+    const sourceName = path.split(/[\\/]/).pop() ?? 'report'
+    const defaultFileName = `${sourceName.replace(/\.[^./\\]+$/, '')}-report.xlsx`
+    const outputPath = await window.api?.pickReportSavePath(defaultFileName)
+    if (!outputPath) return // canceled, or no Electron bridge present
 
     report = { status: 'generating', outputPath: null, error: null }
-    const result = await generateReport(path, dir)
+    const result = await generateReport(path, outputPath)
     if (result.status === 'ok' && !result.error && result.output_path) {
       report = { status: 'ok', outputPath: result.output_path, error: null }
     } else {
@@ -576,7 +604,7 @@
     />
   </div>
 
-  <div class="review-main">
+  <div class="review-main" class:beat-panel-collapsed={beatPanelCollapsed}>
     <div class="graph-area">
       <!-- Gated on `hydrationChecked` — see its own declaration above. Nothing
            renders here at all until the mount-time `getFileState` hydration
@@ -606,12 +634,29 @@
             onBeatSelect={handleBeatSelect}
             {beatsRefreshToken}
             {initialBadDataMarks}
+            selectedBeatTs={selectedBeat?.ts ?? null}
           />
         {/key}
       {/if}
     </div>
 
-    <div class="beat-panel" data-testid="selected-beat-panel">
+    <div class="beat-panel" class:collapsed={beatPanelCollapsed} data-testid="selected-beat-panel">
+      <div class="beat-panel-header">
+        <button
+          type="button"
+          class="icon-btn"
+          data-testid="beat-panel-toggle"
+          onclick={toggleBeatPanel}
+          aria-pressed={beatPanelCollapsed}
+          aria-label={beatPanelCollapsed ? 'Expand beat details' : 'Collapse beat details'}
+          title={beatPanelCollapsed ? 'Expand beat details' : 'Collapse beat details'}
+        >
+          <Icon name={beatPanelCollapsed ? 'chevron-left' : 'chevron-right'} size={16} />
+        </button>
+        {#if !beatPanelCollapsed}<span class="beat-panel-title">Beat details</span>{/if}
+      </div>
+
+      {#if !beatPanelCollapsed}
       <div class="beat-panel-content">
         {#if selectedBeat === null}
           <p class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">No beat selected</p>
@@ -657,6 +702,7 @@
           Generate Report
         </button>
       </div>
+      {/if}
     </div>
   </div>
 </div>
@@ -712,6 +758,11 @@
     grid-template-columns: minmax(0, 1fr) 320px;
     gap: var(--space-3);
     min-height: 0;
+    transition: grid-template-columns var(--transition-fast, 150ms ease);
+  }
+
+  .review-main.beat-panel-collapsed {
+    grid-template-columns: minmax(0, 1fr) 48px;
   }
 
   .graph-area {
@@ -728,7 +779,7 @@
     align-items: center;
     justify-content: center;
     gap: var(--space-2);
-    height: 320px;
+    height: 380px;
     color: var(--color-text-muted);
     font-size: var(--font-size-sm);
   }
@@ -757,6 +808,26 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     overflow: hidden;
+    min-width: 0;
+  }
+
+  .beat-panel-header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .beat-panel.collapsed .beat-panel-header {
+    justify-content: center;
+    border-bottom: none;
+  }
+
+  .beat-panel-title {
+    font-size: var(--font-size-sm);
+    font-weight: 600;
   }
 
   .beat-panel-content {
@@ -769,7 +840,8 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: center;
+    text-align: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--color-border);

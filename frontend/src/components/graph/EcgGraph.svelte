@@ -1,12 +1,22 @@
 <script module lang="ts">
+  import type UplotNS from 'uplot'
   import type { WindowBeat } from '../../lib/api/types'
+  import { MARKER_BUCKETS, primaryDisplayCategory } from '../../lib/categories'
 
   export interface BeatSeriesData {
     xs: number[]
     channelY: (number | null)[]
-    arrhythmiaY: (number | null)[]
-    normalY: (number | null)[]
-    unevaluatedY: (number | null)[]
+    // One y-array per `MARKER_BUCKETS` entry, keyed by that bucket's `key` —
+    // this shape (a map, not fixed fields) is what lets the marker system
+    // support 16 category×reviewed-state combinations without 16 named
+    // fields; `toChartData` below flattens it into `MARKER_BUCKETS`' fixed
+    // order to build uPlot's data array.
+    markerY: Record<string, (number | null)[]>
+    // The currently-selected beat's r_amplitude at its own x, null
+    // elsewhere — a dedicated highlight-ring series, kept in this same
+    // merged structure so it always shares the exact same `xs` as
+    // everything else (see `applySelectionHighlight`).
+    selectedY: (number | null)[]
   }
 
   /**
@@ -21,15 +31,21 @@
    * config below) so the extra x-entries contributed by beat timestamps
    * don't fragment its line into visible gaps.
    *
-   * Beats are split into three parallel y-arrays by `any_arrhythmia` so each
-   * renders as its own uPlot points-only series with a distinct color/style
-   * (arrhythmia-flagged / normal / not-yet-evaluated) — see `markerSeriesConfig`.
-   * This function is the exact "series/point data passed to uPlot" the
-   * marker tests assert against, exported here so those tests can verify the
-   * merge/categorization logic directly rather than reaching into a live
-   * uPlot instance's internals.
+   * Each beat is bucketed into exactly one of `MARKER_BUCKETS` (its
+   * `primaryDisplayCategory` crossed with whether it's been reviewed), so it
+   * renders as its own uPlot points-only series with a distinct
+   * color/shape/fill — see `categoryMarkerSeries`. This function is the
+   * exact "series/point data passed to uPlot" the marker tests assert
+   * against, exported here so those tests can verify the merge/
+   * categorization logic directly rather than reaching into a live uPlot
+   * instance's internals.
    */
-  export function buildBeatAlignedData(channelX: number[], channelY: number[], beats: WindowBeat[]): BeatSeriesData {
+  export function buildBeatAlignedData(
+    channelX: number[],
+    channelY: number[],
+    beats: WindowBeat[],
+    selectedTs?: number | null,
+  ): BeatSeriesData {
     const channelYByX = new Map<number, number>()
     channelX.forEach((x, i) => channelYByX.set(x, channelY[i]))
 
@@ -41,20 +57,36 @@
     const xs = Array.from(xsSet).sort((a, b) => a - b)
 
     const channelYOut: (number | null)[] = []
-    const arrhythmiaY: (number | null)[] = []
-    const normalY: (number | null)[] = []
-    const unevaluatedY: (number | null)[] = []
+    const markerY: Record<string, (number | null)[]> = {}
+    for (const bucket of MARKER_BUCKETS) markerY[bucket.key] = []
+    const selectedY: (number | null)[] = []
 
     for (const x of xs) {
       channelYOut.push(channelYByX.has(x) ? (channelYByX.get(x) ?? null) : null)
 
       const beat = beatByTs.get(x)
-      arrhythmiaY.push(beat && beat.any_arrhythmia === true ? beat.r_amplitude : null)
-      normalY.push(beat && beat.any_arrhythmia === false ? beat.r_amplitude : null)
-      unevaluatedY.push(beat && beat.any_arrhythmia === null ? beat.r_amplitude : null)
+      const category = beat ? primaryDisplayCategory(beat) : null
+      const reviewed = beat ? beat.review_state !== 'unreviewed' : false
+
+      for (const bucket of MARKER_BUCKETS) {
+        const matches = beat !== undefined && category === bucket.category && reviewed === bucket.reviewed
+        markerY[bucket.key].push(matches ? beat!.r_amplitude : null)
+      }
+
+      selectedY.push(beat && selectedTs != null && beat.ts === selectedTs ? beat.r_amplitude : null)
     }
 
-    return { xs, channelY: channelYOut, arrhythmiaY, normalY, unevaluatedY }
+    return { xs, channelY: channelYOut, markerY, selectedY }
+  }
+
+  /** Flattens a merged `BeatSeriesData` into uPlot's `data` array shape, in the exact series order the chart is constructed with. */
+  export function toChartData(merged: BeatSeriesData): UplotNS.AlignedData {
+    return [
+      merged.xs,
+      merged.channelY,
+      ...MARKER_BUCKETS.map((bucket) => merged.markerY[bucket.key]),
+      merged.selectedY,
+    ]
   }
 </script>
 
@@ -67,6 +99,14 @@
   import { themeState } from '../../lib/stores/theme.svelte'
   import Icon from '../shared/Icon.svelte'
   import type { BadDataMark } from '../../lib/api/types'
+  import {
+    CATEGORY_COLOR_VAR,
+    DISPLAY_CATEGORIES,
+    DISPLAY_CATEGORY_LABELS,
+    DISPLAY_CATEGORY_SHAPE,
+    type DisplayCategory,
+    type MarkerShape,
+  } from '../../lib/categories'
 
   let {
     path,
@@ -74,6 +114,7 @@
     onBeatSelect,
     beatsRefreshToken = 0,
     initialBadDataMarks,
+    selectedBeatTs = null,
   }: {
     path: string
     channel: string
@@ -98,11 +139,17 @@
     // add/remove handlers become the sole source of truth for
     // `badDataMarks` from mount onward).
     initialBadDataMarks?: BadDataMark[]
+    // The `ts` of the beat currently selected in BeatCategoryPanel, if any —
+    // drawn as a highlight ring (see `selectionHighlightSeries`) so it's
+    // obvious at a glance which marker the detail panel refers to. A live
+    // prop, not seeded-once: `applySelectionHighlight`'s effect reacts to it
+    // changing for as long as this component stays mounted.
+    selectedBeatTs?: number | null
   } = $props()
 
   const DEBOUNCE_MS = 150
-  const HEIGHT = 320
-  const EXPANDED_HEIGHT = 600
+  const HEIGHT = 380
+  const EXPANDED_HEIGHT = 640
   const ZOOM_FACTOR = 0.75
   // A pan/zoom re-fetch loads a window PAD_FACTOR times wider on EACH side
   // than what's actually visible (so 1 = 3x the visible width total), at a
@@ -178,19 +225,170 @@
     return `rgba(${r}, ${g}, ${b}, ${alpha})`
   }
   const waveformColor = () => cssVar('--color-waveform', '#15803d')
-  const arrhythmiaBeatColor = () => cssVar('--color-danger', '#b91c1c')
-  const normalBeatColor = () => cssVar('--color-accent', '#2563eb')
-  // "Not yet evaluated" (any_arrhythmia: null) gets a dimmed treatment:
-  // whatever `--color-text-muted` resolves to for the active theme, at
-  // reduced opacity.
-  const unevaluatedBeatColor = () => hexToRgba(cssVar('--color-text-muted', '#5b6b7c'), 0.45)
   const axisColor = () => cssVar('--color-text-muted', '#5b6b7c')
   const gridColor = () => cssVar('--color-graph-grid', 'rgba(211, 218, 225, 0.6)')
 
-  function markerSeriesConfig(colorFn: () => string): uPlot.Series {
+  // Fallback hex per display category, used only when the corresponding
+  // CSS custom property can't be resolved (e.g. jsdom in tests, which never
+  // resolves custom properties via getComputedStyle) — same role
+  // `waveformColor`'s own fallback already plays.
+  const CATEGORY_FALLBACK_COLOR: Record<DisplayCategory, string> = {
+    normal: '#15803d',
+    unevaluated: '#5b6b7c',
+    bradycardia_absolute: '#2563eb',
+    tachycardia_absolute: '#dc2626',
+    skipped_beat: '#7c3aed',
+    prem_beat: '#d97706',
+    abn_cluster: '#db2777',
+    other_arrhythmia: '#0d9488',
+  }
+
+  // "Not yet evaluated" beats stay a dimmed treatment (as before this
+  // category system existed); "normal" reuses the app's existing success
+  // token rather than adding a 7th arrhythmia-style token for a
+  // non-arrhythmia state; every real arrhythmia category resolves its own
+  // token from lib/categories.ts's CATEGORY_COLOR_VAR.
+  // The CSS custom property name backing a display category's color — used
+  // both to resolve the actual color (below) and, as a var() reference
+  // string, to color the legend's swatch icons directly in CSS.
+  function legendColorVarName(cat: DisplayCategory): string {
+    if (cat === 'normal') return '--color-success'
+    if (cat === 'unevaluated') return '--color-text-muted'
+    return CATEGORY_COLOR_VAR[cat]
+  }
+
+  function displayCategoryColor(cat: DisplayCategory): string {
+    if (cat === 'unevaluated') {
+      return hexToRgba(cssVar(legendColorVarName(cat), CATEGORY_FALLBACK_COLOR.unevaluated), 0.55)
+    }
+    return cssVar(legendColorVarName(cat), CATEGORY_FALLBACK_COLOR[cat])
+  }
+
+  // Draws one marker shape centered at (cx, cy) with "radius" r into an
+  // existing Path2D — shape is the colorblind/black-&-white-theme-safe way
+  // two categories stay distinguishable even when their colors alone
+  // wouldn't be (see lib/categories.ts's CATEGORY_SHAPE comment).
+  function addShapeToPath(path: Path2D, shape: MarkerShape, cx: number, cy: number, r: number): void {
+    switch (shape) {
+      case 'circle':
+        path.moveTo(cx + r, cy)
+        path.arc(cx, cy, r, 0, 2 * Math.PI)
+        break
+      case 'square': {
+        const s = r * 1.6
+        path.rect(cx - s / 2, cy - s / 2, s, s)
+        break
+      }
+      case 'triangle': {
+        const h = r * 1.8
+        path.moveTo(cx, cy - h / 1.6)
+        path.lineTo(cx - h / 1.6, cy + h / 2.2)
+        path.lineTo(cx + h / 1.6, cy + h / 2.2)
+        path.closePath()
+        break
+      }
+      case 'diamond': {
+        const s = r * 1.3
+        path.moveTo(cx, cy - s)
+        path.lineTo(cx + s, cy)
+        path.lineTo(cx, cy + s)
+        path.lineTo(cx - s, cy)
+        path.closePath()
+        break
+      }
+      case 'cross': {
+        const s = r * 0.85
+        const w = Math.max(1, r * 0.35)
+        path.moveTo(cx - s, cy - s + w)
+        path.lineTo(cx - s + w, cy - s)
+        path.lineTo(cx, cy - w)
+        path.lineTo(cx + s - w, cy - s)
+        path.lineTo(cx + s, cy - s + w)
+        path.lineTo(cx + w, cy)
+        path.lineTo(cx + s, cy + s - w)
+        path.lineTo(cx + s - w, cy + s)
+        path.lineTo(cx, cy + w)
+        path.lineTo(cx - s + w, cy + s)
+        path.lineTo(cx - s, cy + s - w)
+        path.lineTo(cx - w, cy)
+        path.closePath()
+        break
+      }
+      case 'plus': {
+        const s = r
+        const w = Math.max(1, r * 0.4)
+        path.rect(cx - w / 2, cy - s, w, s * 2)
+        path.rect(cx - s, cy - w / 2, s * 2, w)
+        break
+      }
+    }
+  }
+
+  // A uPlot `points.paths` implementation: iterates this series' own data
+  // in [idx0, idx1], converts each point to pixel space via `u.valToPos`,
+  // and draws `shape` at each — returning both `stroke` and `fill` (when
+  // `filled`) as the SAME Path2D, which is how uPlot fills+strokes custom
+  // point shapes. `filled: false` omits the fill path entirely, leaving a
+  // hollow outline-only marker (used for not-yet-reviewed beats — see
+  // `categoryMarkerSeries`).
+  function makeShapePathsFn(
+    shape: MarkerShape,
+    pxSize: number,
+    filled: boolean,
+  ): NonNullable<uPlot.Series['points']>['paths'] {
+    return (u: uPlot, seriesIdx: number, idx0: number, idx1: number) => {
+      const path = new Path2D()
+      const series = u.series[seriesIdx]
+      const scaleKey = series.scale ?? 'y'
+      const yData = u.data[seriesIdx] as (number | null)[]
+      const xData = u.data[0] as number[]
+      const r = pxSize / 2
+      for (let i = idx0; i <= idx1; i++) {
+        const xVal = xData[i]
+        const yVal = yData[i]
+        if (xVal == null || yVal == null) continue
+        const cx = u.valToPos(xVal, 'x', true)
+        const cy = u.valToPos(yVal, scaleKey, true)
+        addShapeToPath(path, shape, cx, cy, r)
+      }
+      return filled ? { stroke: path, fill: path } : { stroke: path }
+    }
+  }
+
+  // One uPlot series per (category, reviewed) bucket — see MARKER_BUCKETS.
+  // Reviewed beats render larger, filled, and with a heavier outline than
+  // unreviewed ones (which are smaller and hollow), on top of the
+  // category's own distinct color+shape — the "already-annotated vs not"
+  // distinction requested alongside category coloring.
+  function categoryMarkerSeries(category: DisplayCategory, reviewed: boolean): uPlot.Series {
+    const shape = DISPLAY_CATEGORY_SHAPE[category]
+    const colorFn = () => displayCategoryColor(category)
+    const size = reviewed ? 9 : 6
     return {
-      paths: () => null,
-      points: { show: true, size: 8, width: 1, stroke: () => colorFn(), fill: () => colorFn() },
+      points: {
+        show: true,
+        size,
+        width: reviewed ? 2 : 1.25,
+        stroke: colorFn,
+        fill: colorFn,
+        paths: makeShapePathsFn(shape, size, reviewed),
+      },
+    }
+  }
+
+  // The currently-selected beat's highlight ring — always a hollow circle
+  // (not the category's own shape, so it reads as "a ring around the real
+  // marker" regardless of what that marker looks like) in the accent color.
+  function selectionHighlightSeries(): uPlot.Series {
+    const size = 18
+    return {
+      points: {
+        show: true,
+        size,
+        width: 2.5,
+        stroke: () => cssVar('--color-accent', '#2563eb'),
+        paths: makeShapePathsFn('circle', size, false),
+      },
     }
   }
 
@@ -203,6 +401,13 @@
   // height for a closer look at dense waveforms. See the `$effect` below
   // that applies it to the live chart.
   let expanded: boolean = $state(false)
+
+  // Legend/filter state — see the legend template below and
+  // `applyFilters`. Categories in this set are hidden (`chart.setSeries`);
+  // empty means "show every category". `reviewFilter` narrows further by
+  // reviewed/unreviewed, independent of which categories are shown.
+  let hiddenCategories: Set<DisplayCategory> = $state(new Set())
+  let reviewFilter: 'all' | 'reviewed' | 'unreviewed' = $state('all')
 
   let containerEl: HTMLDivElement | undefined = $state()
   // Tracked via `bind:clientWidth` below. Read directly off `containerEl`
@@ -333,7 +538,7 @@
     if (!channelData) return null
     lastChannelWindow = channelData
     const beats = await loadBeats(start, end)
-    return { channel: channelData, merged: buildBeatAlignedData(channelData.x, channelData.y, beats) }
+    return { channel: channelData, merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs) }
   }
 
   // Re-fetches ONLY `/beats/window` for the currently visible x-scale range
@@ -349,8 +554,48 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     const beats = await loadBeats(min, max)
-    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats)
-    chart.setData([merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY], false)
+    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs)
+    chart.setData(toChartData(merged), false)
+    applyFilters()
+  }
+
+  // Re-applies just the selection-highlight ring against whatever waveform
+  // window is currently on screen, without any network round trip — beats
+  // are cheap to have retained (`lastBeats`) and re-merging is pure local
+  // computation. Guarded on `chart`/`lastChannelWindow` existing, same as
+  // `refreshBeatsOnly` above, so it's a safe no-op before the first mount
+  // fetch has resolved.
+  function applySelectionHighlight() {
+    if (!chart || !lastChannelWindow) return
+    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, lastBeats, selectedBeatTs)
+    chart.setData(toChartData(merged), false)
+    applyFilters()
+  }
+
+  // Shows/hides marker series per the legend's category toggles and the
+  // reviewed/unreviewed filter — `chart.setSeries` alone, no data
+  // re-merge/re-fetch needed; the underlying data for a hidden category is
+  // still there, just not drawn.
+  function applyFilters() {
+    if (!chart) return
+    MARKER_BUCKETS.forEach((bucket, i) => {
+      const seriesIdx = i + 2 // series[0]=x, series[1]=waveform, then MARKER_BUCKETS in order
+      const categoryVisible = !hiddenCategories.has(bucket.category)
+      const reviewVisible =
+        reviewFilter === 'all' || (reviewFilter === 'reviewed' ? bucket.reviewed : !bucket.reviewed)
+      chart!.setSeries(seriesIdx, { show: categoryVisible && reviewVisible })
+    })
+  }
+
+  function toggleCategoryFilter(cat: DisplayCategory): void {
+    const next = new Set(hiddenCategories)
+    if (next.has(cat)) next.delete(cat)
+    else next.add(cat)
+    hiddenCategories = next
+  }
+
+  function setReviewFilter(value: 'all' | 'reviewed' | 'unreviewed'): void {
+    reviewFilter = value
   }
 
   // True once the visible [min, max] range has moved close enough to (or
@@ -371,7 +616,11 @@
   // no buffer — Reset already targets the maximal legitimate range, so
   // padding it further would just over-request with no benefit. Every
   // other caller pads (see PAD_FACTOR).
-  async function refetch(min: number, max: number, options: { pad?: boolean } = {}) {
+  async function refetch(
+    min: number,
+    max: number,
+    options: { pad?: boolean; resetScales?: boolean } = {},
+  ) {
     const requestId = ++refetchRequestId
     const usePad = options.pad ?? true
     const requestedWidth = max - min
@@ -389,8 +638,23 @@
 
     if (result && chart) {
       const { merged } = result
-      chart.setData([merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY], false)
+      // `resetScales: true` (Reset View only) hands BOTH x and y back to
+      // uPlot's own auto-ranging from this fresh data — the only supported
+      // way to undo a manual Y-zoom's `setScale` pin; uPlot normalizes
+      // `Scale.auto` into an internal function at construction time, so
+      // directly reassigning `chart.scales.y.auto = true` afterward corrupts
+      // it (throws `sc.auto is not a function` on the next commit) rather
+      // than re-enabling auto-ranging. X is re-pinned to the exact requested
+      // range right after regardless, since resetScales' own x auto-range
+      // depends on this fetch's returned data matching `[min, max]` exactly,
+      // which is true for Reset View's own unpadded call but is never
+      // assumed here.
+      chart.setData(toChartData(merged), options.resetScales ?? false)
+      if (options.resetScales) {
+        chart.setScale('x', { min, max })
+      }
       loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth }
+      applyFilters() // setData resets series visibility; re-apply the active category/review filters
     }
   }
 
@@ -587,8 +851,27 @@
 
   // Wheel zooms in/out centered on the cursor's x position, then schedules a
   // debounced re-fetch of the new visible range.
+  // Plain wheel/scroll zooms X (unchanged); Shift+wheel zooms Y instead —
+  // the common cross-application convention for a secondary-axis zoom, so
+  // it needs no new persistent UI to discover (the Y zoom buttons in the
+  // toolbar are the discoverable path for technicians who don't know the
+  // modifier). Y is purely a rendering concern — the already-loaded
+  // waveform's amplitude values don't change, only how much vertical space
+  // they're drawn into — so it never touches `scheduleRefetch`/
+  // `maybeBufferAhead` at all, unlike every X-axis zoom path.
   function handleWheel(u: uPlot, wheelEvent: WheelEvent) {
     wheelEvent.preventDefault()
+
+    if (wheelEvent.shiftKey) {
+      const oldMin = u.scales.y.min ?? 0
+      const oldMax = u.scales.y.max ?? 0
+      const oldRange = oldMax - oldMin
+      const newRange = wheelEvent.deltaY < 0 ? oldRange * ZOOM_FACTOR : oldRange / ZOOM_FACTOR
+      const mid = (oldMin + oldMax) / 2
+      viewChanged = true
+      u.setScale('y', { min: mid - newRange / 2, max: mid + newRange / 2 })
+      return
+    }
 
     const rect = u.over.getBoundingClientRect()
     const left = wheelEvent.clientX - rect.left
@@ -637,12 +920,32 @@
     scheduleRefetch(newMin, newMax)
   }
 
+  // Y-axis equivalent of `zoomBy` — no fetch needed at all (see
+  // `handleWheel`'s own comment on why Y-zoom is a pure rendering concern).
+  function zoomYBy(factor: number) {
+    if (!chart) return
+    const { min, max } = chart.scales.y
+    if (min == null || max == null) return
+    const mid = (min + max) / 2
+    const newRange = (max - min) * factor
+    viewChanged = true
+    chart.setScale('y', { min: mid - newRange / 2, max: mid + newRange / 2 })
+  }
+
   function handleZoomIn() {
     zoomBy(ZOOM_FACTOR)
   }
 
   function handleZoomOut() {
     zoomBy(1 / ZOOM_FACTOR)
+  }
+
+  function handleZoomInY() {
+    zoomYBy(ZOOM_FACTOR)
+  }
+
+  function handleZoomOutY() {
+    zoomYBy(1 / ZOOM_FACTOR)
   }
 
   function toggleExpanded() {
@@ -681,7 +984,12 @@
         {
           width,
           height: expanded ? EXPANDED_HEIGHT : HEIGHT,
-          scales: { x: { time: false } },
+          // `y.auto: true` is uPlot's own default (implicit until now) —
+          // stated explicitly since `handleResetView` toggles it back on
+          // after a manual Y-zoom, and Y-zoom (`zoomYBy`/Shift+wheel) turns
+          // it off implicitly the same way X's own manual `setScale` always
+          // has.
+          scales: { x: { time: false }, y: { auto: true } },
           // uPlot's own default cursor behavior is a click-drag rubber-band
           // select that zooms into the selected x-range on mouseup
           // (`cursor.drag` defaults to `{ setScale: true, x: true, dist: 0
@@ -695,6 +1003,16 @@
           // entirely (`x`/`y`/`setScale` all false) since our own listeners
           // are the sole intended source of scale changes.
           cursor: { drag: { x: false, y: false, setScale: false } },
+          // uPlot auto-generates a "Value: --" legend row with one entry
+          // per series by default — harmless with the original 3 marker
+          // series, but with 16 (one per category × reviewed state) plus
+          // the waveform and selection-highlight series, that became a
+          // dense, uninformative grid of placeholder values (we don't wire
+          // up hover-tracking, so every entry always reads "--"). Our own
+          // legend below the graph (color+shape swatches, doubling as the
+          // category filter) already covers this, so uPlot's built-in one
+          // is switched off entirely rather than left as visual noise.
+          legend: { show: false },
           axes: [
             { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
             { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
@@ -702,15 +1020,15 @@
           series: [
             {},
             { stroke: () => waveformColor(), width: 1.5, spanGaps: true },
-            markerSeriesConfig(arrhythmiaBeatColor),
-            markerSeriesConfig(normalBeatColor),
-            markerSeriesConfig(unevaluatedBeatColor),
+            ...MARKER_BUCKETS.map((bucket) => categoryMarkerSeries(bucket.category, bucket.reviewed)),
+            selectionHighlightSeries(),
           ],
           plugins: [panZoomPlugin()],
         },
-        [merged.xs, merged.channelY, merged.arrhythmiaY, merged.normalY, merged.unevaluatedY],
+        toChartData(merged),
         containerEl,
       )
+      applyFilters()
     })()
 
     return () => {
@@ -785,6 +1103,23 @@
     void refreshBeatsOnly()
   })
 
+  // Re-draws the selection-highlight ring whenever the parent's selected
+  // beat changes — see `applySelectionHighlight`'s own comment. Runs once
+  // (harmlessly, as a no-op — see that function's own `chart`/
+  // `lastChannelWindow` guard) on mount too, before either exists yet.
+  $effect(() => {
+    selectedBeatTs
+    applySelectionHighlight()
+  })
+
+  // Re-applies the legend's category/review-state filters whenever either
+  // changes — see `applyFilters`.
+  $effect(() => {
+    hiddenCategories
+    reviewFilter
+    applyFilters()
+  })
+
   function handleResetView() {
     if (!chart || !fullExtent) return
     if (debounceTimer !== undefined) {
@@ -793,7 +1128,11 @@
     }
     viewChanged = false
     chart.setScale('x', { min: fullExtent.start, max: fullExtent.end })
-    void refetch(fullExtent.start, fullExtent.end, { pad: false })
+    // `resetScales: true` also hands Y back to uPlot's own auto-ranging,
+    // undoing any manual Y-zoom — see `refetch`'s own comment on why that
+    // option (not a direct `chart.scales.y.auto` mutation) is the correct
+    // way to do this.
+    void refetch(fullExtent.start, fullExtent.end, { pad: false, resetScales: true })
   }
 
   // Positions a bad-data mark within the marks bar as a percentage of the
@@ -823,12 +1162,36 @@
 
 <div class="ecg-graph" data-testid="ecg-graph" data-channel={channel}>
   <div class="ecg-graph-toolbar">
-    <button type="button" class="btn btn-sm" data-testid="zoom-in-button" title="Zoom in" onclick={handleZoomIn}>
-      <Icon name="zoom-in" size={14} />
-    </button>
-    <button type="button" class="btn btn-sm" data-testid="zoom-out-button" title="Zoom out" onclick={handleZoomOut}>
-      <Icon name="zoom-out" size={14} />
-    </button>
+    <div class="zoom-group">
+      <span class="zoom-group-label">X</span>
+      <button type="button" class="btn btn-sm" data-testid="zoom-in-button" title="Zoom in (X)" onclick={handleZoomIn}>
+        <Icon name="zoom-in" size={14} />
+      </button>
+      <button type="button" class="btn btn-sm" data-testid="zoom-out-button" title="Zoom out (X)" onclick={handleZoomOut}>
+        <Icon name="zoom-out" size={14} />
+      </button>
+    </div>
+    <div class="zoom-group">
+      <span class="zoom-group-label">Y</span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="zoom-in-y-button"
+        title="Zoom in (Y) — or hold Shift and scroll"
+        onclick={handleZoomInY}
+      >
+        <Icon name="zoom-in" size={14} />
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="zoom-out-y-button"
+        title="Zoom out (Y) — or hold Shift and scroll"
+        onclick={handleZoomOutY}
+      >
+        <Icon name="zoom-out" size={14} />
+      </button>
+    </div>
     <button
       type="button"
       class="btn btn-sm"
@@ -881,6 +1244,76 @@
       ></button>
     {/each}
   </div>
+
+  <!-- Legend doubles as the marker filter: each entry toggles that
+       category's visibility on the graph. -->
+  <div class="ecg-legend" data-testid="ecg-legend">
+    <div class="ecg-legend-categories">
+      {#each DISPLAY_CATEGORIES as cat (cat)}
+        {@const active = !hiddenCategories.has(cat)}
+        <button
+          type="button"
+          class="legend-chip"
+          class:legend-chip--inactive={!active}
+          data-testid={`legend-toggle-${cat}`}
+          aria-pressed={active}
+          title={`${active ? 'Hide' : 'Show'} ${DISPLAY_CATEGORY_LABELS[cat]}`}
+          onclick={() => toggleCategoryFilter(cat)}
+          style={`--legend-color: var(${legendColorVarName(cat)})`}
+        >
+          <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+            {#if DISPLAY_CATEGORY_SHAPE[cat] === 'circle'}
+              <circle cx="0" cy="0" r="6" fill="currentColor" />
+            {:else if DISPLAY_CATEGORY_SHAPE[cat] === 'square'}
+              <rect x="-5" y="-5" width="10" height="10" fill="currentColor" />
+            {:else if DISPLAY_CATEGORY_SHAPE[cat] === 'triangle'}
+              <polygon points="0,-7 -6,5 6,5" fill="currentColor" />
+            {:else if DISPLAY_CATEGORY_SHAPE[cat] === 'diamond'}
+              <polygon points="0,-7 7,0 0,7 -7,0" fill="currentColor" />
+            {:else if DISPLAY_CATEGORY_SHAPE[cat] === 'cross'}
+              <path
+                d="M-6,-3 L-3,-6 L0,-3 L3,-6 L6,-3 L3,0 L6,3 L3,6 L0,3 L-3,6 L-6,3 L-3,0 Z"
+                fill="currentColor"
+              />
+            {:else}
+              <rect x="-1.5" y="-6" width="3" height="12" fill="currentColor" />
+              <rect x="-6" y="-1.5" width="12" height="3" fill="currentColor" />
+            {/if}
+          </svg>
+          {DISPLAY_CATEGORY_LABELS[cat]}
+        </button>
+      {/each}
+    </div>
+    <div class="ecg-legend-review-filter" role="radiogroup" aria-label="Filter by review status">
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-active={reviewFilter === 'all'}
+        data-testid="review-filter-all"
+        onclick={() => setReviewFilter('all')}
+      >
+        All
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-active={reviewFilter === 'reviewed'}
+        data-testid="review-filter-reviewed"
+        onclick={() => setReviewFilter('reviewed')}
+      >
+        Reviewed
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-active={reviewFilter === 'unreviewed'}
+        data-testid="review-filter-unreviewed"
+        onclick={() => setReviewFilter('unreviewed')}
+      >
+        Unreviewed
+      </button>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -892,8 +1325,25 @@
 
   .ecg-graph-toolbar {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-2);
     align-self: flex-end;
+  }
+
+  .zoom-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 var(--space-1);
+    border: 1px solid var(--color-border, #d3dae1);
+    border-radius: var(--radius-sm, 4px);
+  }
+
+  .zoom-group-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--color-text-muted, #5b6b7c);
+    padding: 0 2px;
   }
 
   .btn-active {
@@ -923,5 +1373,54 @@
     border: none;
     padding: 0;
     cursor: pointer;
+  }
+
+  .ecg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-1) 0;
+    border-top: 1px solid var(--color-border, #d3dae1);
+  }
+
+  .ecg-legend-categories {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .legend-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-2) 2px var(--space-1);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: none;
+    color: var(--color-text, #1e293b);
+    font-size: 0.7rem;
+    line-height: 1.4;
+    transition: opacity var(--transition-fast, 150ms ease), background var(--transition-fast, 150ms ease);
+  }
+
+  .legend-chip:hover {
+    background: var(--color-surface-hover, #eef1f5);
+  }
+
+  .legend-chip--inactive {
+    opacity: 0.4;
+  }
+
+  .legend-swatch {
+    color: var(--legend-color, currentColor);
+    flex-shrink: 0;
+  }
+
+  .ecg-legend-review-filter {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
   }
 </style>

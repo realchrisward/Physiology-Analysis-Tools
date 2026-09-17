@@ -4,5 +4,5 @@ contextBridge.exposeInMainWorld('api', {
   getBackendPort: () => ipcRenderer.invoke('get-backend-port'),
   pickFiles: () => ipcRenderer.invoke('pick-files'),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
-  pickOutputDirectory: () => ipcRenderer.invoke('pick-output-directory'),
+  pickReportSavePath: (defaultFileName) => ipcRenderer.invoke('pick-report-save-path', defaultFileName),
 })

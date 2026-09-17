@@ -23,6 +23,8 @@ function makeBeat(overrides: Partial<WindowBeat> = {}): WindowBeat {
     abn_cluster: false,
     any_arrhythmia: false,
     other_arrhythmia: false,
+    review_state: 'unreviewed',
+    reassigned_category: null,
     ...overrides,
   }
 }

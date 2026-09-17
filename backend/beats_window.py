@@ -33,6 +33,17 @@ def get_beat_window(
             if col in df.columns:
                 value = getattr(row, col)
                 kwargs[col] = None if pd.isna(value) else bool(value)
+        # `review_state`/`reassigned_category` are only ever added to
+        # beat_cache[path] by a review action or a reopen/re-persist sync
+        # (see backend/db_routes.py) — absent (a never-reviewed file this
+        # session) or NaN (a row that sync didn't have a value for) both
+        # mean the beat itself is genuinely unreviewed.
+        if "review_state" in df.columns:
+            value = row.review_state
+            kwargs["review_state"] = "unreviewed" if pd.isna(value) else value
+        if "reassigned_category" in df.columns:
+            value = row.reassigned_category
+            kwargs["reassigned_category"] = None if pd.isna(value) else value
         beats.append(WindowBeat(**kwargs))
 
     return BeatWindowResult(status="ok", beats=beats, count=len(beats))

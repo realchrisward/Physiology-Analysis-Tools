@@ -37,19 +37,19 @@ describe('persistence api', () => {
     })
   })
 
-  it('generateReport sends output_dir (snake_case) not outputDir', async () => {
+  it('generateReport sends output_path (snake_case) not outputPath', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ status: 'ok' }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    await generateReport('/a.txt', '/out')
+    await generateReport('/a.txt', '/out/report.xlsx')
 
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files/report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: '/a.txt', output_dir: '/out' }),
+      body: JSON.stringify({ path: '/a.txt', output_path: '/out/report.xlsx' }),
     })
   })
 })

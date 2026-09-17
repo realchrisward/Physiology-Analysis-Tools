@@ -38,6 +38,6 @@ export function deleteBadData(path: string, id: number): Promise<BadDataDeleteRe
   return apiPost('/files/bad-data', 'DELETE', { path, id })
 }
 
-export function generateReport(path: string, outputDir: string): Promise<ReportResult> {
-  return apiPost('/files/report', 'POST', { path, output_dir: outputDir })
+export function generateReport(path: string, outputPath: string): Promise<ReportResult> {
+  return apiPost('/files/report', 'POST', { path, output_path: outputPath })
 }

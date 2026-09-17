@@ -120,6 +120,8 @@ export interface WindowBeat {
   abn_cluster: boolean | null
   any_arrhythmia: boolean | null
   other_arrhythmia: boolean | null
+  review_state: string
+  reassigned_category: string | null
 }
 
 export interface BeatWindowResult {
