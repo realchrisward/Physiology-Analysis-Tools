@@ -74,6 +74,55 @@ describe('App', () => {
     expect(screen.queryByTestId('review-workspace')).not.toBeInTheDocument()
   })
 
+  it('opens the first imported file in Review automatically, with no explicit Open click', async () => {
+    ;(window as any).api = {
+      pickFiles: vi.fn().mockResolvedValue(['/data/57.txt']),
+      pickFolder: vi.fn().mockResolvedValue([]),
+    }
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/files/import')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                path: '/data/57.txt',
+                filename: '57.txt',
+                status: 'ok',
+                channels: ['channel 1'],
+                time_column: 'ts',
+                size: 12345,
+                modified_time: 1.0,
+                default_channel: 'channel 1',
+                default_channel_matched_rule: true,
+                error: null,
+              },
+            ],
+          }),
+        })
+      }
+      // ReviewWorkspace's own mount-time hydration/EcgGraph fetches — a
+      // generic "found: false" / empty-ok shape satisfies all of them for
+      // the purposes of this test, which only cares about navigation.
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ status: 'ok', found: false, x: [], y: [], beats: [], error: null }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(App)
+
+    // Auto-run off: this test is about navigation, not detection.
+    await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
+    await fireEvent.click(screen.getByTestId('import-files-button'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('review-workspace')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('breadcrumb-current')).toHaveTextContent('57.txt')
+  })
+
   // Settings must be reachable from both views, since detection parameters
   // matter whether the technician is about to import/detect or is already
   // reviewing a file. These are smoke tests (button present, dialog opens) —

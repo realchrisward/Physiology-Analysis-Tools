@@ -5,12 +5,7 @@
   import Sidebar from './components/shell/Sidebar.svelte'
   import Icon from './components/shared/Icon.svelte'
   import { themeState } from './lib/stores/theme.svelte'
-
-  interface ReviewSelection {
-    path: string
-    channels: string[]
-    defaultChannel: string
-  }
+  import { autoOpenRequest, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
 
   const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
   const MIN_SIDEBAR_WIDTH = 180
@@ -72,6 +67,19 @@
       document.documentElement.setAttribute('data-theme', mode)
     }
   })
+
+  // Opens a file automatically the moment it's ready, set by
+  // importQueue.svelte.ts after an explicit import action (Import Files/
+  // Folder, or opening a Recent file) — see `autoOpenRequest`'s own
+  // comment. Consumed and cleared immediately so it only fires once per
+  // request, not on every subsequent reactive run this effect happens to see.
+  $effect(() => {
+    const pending = autoOpenRequest.value
+    if (pending) {
+      handleReview(pending)
+      autoOpenRequest.value = null
+    }
+  })
 </script>
 
 <div
@@ -99,7 +107,7 @@
           Import
         </button>
         <span class="breadcrumb-sep">/</span>
-        <span class="breadcrumb-current">{fileNameOf(selectedFile.path)}</span>
+        <span class="breadcrumb-current" data-testid="breadcrumb-current">{fileNameOf(selectedFile.path)}</span>
       </nav>
     {/if}
 

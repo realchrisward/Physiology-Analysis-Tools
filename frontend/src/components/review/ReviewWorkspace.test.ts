@@ -135,6 +135,35 @@ describe('ReviewWorkspace', () => {
     })
   })
 
+  it('re-runs detection for the current channel via the Re-run detection button', async () => {
+    const fetchMock = mockFetch(beatsOkResponse({ count: 15, mean_hr: 65, duration: 30 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
+    })
+
+    await waitFor(() => expect(screen.getByTestId('rerun-detection-button')).not.toBeDisabled())
+
+    await fireEvent.click(screen.getByTestId('rerun-detection-button'))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/beats/detect',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 1' }),
+        }),
+      )
+    })
+
+    await waitFor(() => {
+      const summary = screen.getByTestId('detection-summary')
+      expect(summary).toHaveTextContent('15')
+      expect(summary).toHaveTextContent('65')
+    })
+  })
+
   it('shows a detection-error summary when detection fails', async () => {
     const fetchMock = mockFetch({
       ok: true,

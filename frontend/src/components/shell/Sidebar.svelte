@@ -1,13 +1,15 @@
 <script lang="ts">
-  import { fileRegistry, type FileRow } from '../../lib/stores/fileRegistry.svelte'
-  import { formatEta, handleImportFiles, handleImportFolder, handleStop, importQueue } from '../../lib/stores/importQueue.svelte'
+  import { fileRegistry, type FileRow, type ReviewSelection } from '../../lib/stores/fileRegistry.svelte'
+  import {
+    formatEta,
+    handleImportFiles,
+    handleImportFolder,
+    handleStop,
+    importQueue,
+    openRecentFile,
+  } from '../../lib/stores/importQueue.svelte'
+  import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
-
-  interface ReviewSelection {
-    path: string
-    channels: string[]
-    defaultChannel: string
-  }
 
   let {
     collapsed = false,
@@ -22,11 +24,31 @@
   } = $props()
 
   let asideEl: HTMLElement | undefined = $state()
+  // Collapsed by default — this section is a secondary, quick-recall
+  // affordance (reopening something without re-importing), not the
+  // primary file list, so it starts out of the way.
+  let recentSectionOpen: boolean = $state(false)
+
+  // Files already in this session's registry are omitted here — they're
+  // already visible (and openable) in the main list above, so listing them
+  // again under "Recent files" would just be a duplicate entry.
+  let recentOnly = $derived(recentFiles.filter((f) => !fileRegistry.some((row) => row.path === f.path)))
 
   function handleReview(row: FileRow) {
     if (row.defaultChannel === null) return
     onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
   }
+
+  function toggleRecentSection() {
+    recentSectionOpen = !recentSectionOpen
+  }
+
+  // `openRecentFile` (see importQueue.svelte.ts) sets the shared
+  // `autoOpenRequest` rather than calling back into this component
+  // directly — App.svelte owns navigation and is the sole consumer of that
+  // request (see its own effect); this component doesn't need `onReview`
+  // for recent-file clicks at all, only for the main file list's Open
+  // button below.
 
   // Drag-to-resize: a thin handle on the sidebar's right edge. Reads the
   // starting width straight off the live element (rather than needing a
@@ -127,7 +149,7 @@
               data-testid="review-button"
               onclick={() => handleReview(row)}
             >
-              Review
+              Open
             </button>
           {/if}
         {/if}
@@ -137,6 +159,41 @@
       <p class="sidebar-empty text-muted">No files imported yet</p>
     {/if}
   </div>
+
+  {#if !collapsed}
+    <div class="sidebar-section">
+      <button
+        type="button"
+        class="sidebar-section-toggle"
+        data-testid="recent-files-toggle"
+        onclick={toggleRecentSection}
+        aria-expanded={recentSectionOpen}
+      >
+        <Icon name={recentSectionOpen ? 'chevron-down' : 'chevron-right'} size={14} />
+        <span>Recent files</span>
+      </button>
+      {#if recentSectionOpen}
+        <div class="sidebar-recent-list" data-testid="sidebar-recent-list">
+          {#if recentOnly.length === 0}
+            <p class="sidebar-empty text-muted">No recent files</p>
+          {:else}
+            {#each recentOnly as file (file.path)}
+              <button
+                type="button"
+                class="sidebar-recent-row"
+                data-testid="sidebar-recent-file"
+                title={file.filename}
+                onclick={() => openRecentFile(file.path)}
+              >
+                <Icon name="file-text" size={14} />
+                <span class="sidebar-recent-name">{file.filename}</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   {#if !collapsed}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -318,5 +375,60 @@
 
   .sidebar-row-review {
     flex-shrink: 0;
+  }
+
+  .sidebar-section {
+    border-top: 1px solid var(--color-border);
+  }
+
+  .sidebar-section-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+  }
+
+  .sidebar-section-toggle:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .sidebar-recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: 0 var(--space-2) var(--space-2);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .sidebar-recent-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    text-align: left;
+  }
+
+  .sidebar-recent-row:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .sidebar-recent-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

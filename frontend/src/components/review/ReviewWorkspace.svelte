@@ -402,6 +402,54 @@
       // one detection just failed for.
     }
   }
+
+  // Re-runs beat detection for the currently active channel on demand —
+  // e.g. after changing Settings' beat-detection parameters, or just to
+  // confirm a result — distinct from `handleChannelChange` above, which
+  // only fires on an actual <select> change. Always targets `activeChannel`
+  // itself, whatever the <select> currently shows.
+  //
+  // Mirrors `handleArrhythmiaComplete`'s pattern above: a fresh detection
+  // only updates the backend's in-memory `beat_cache[path]`, so the
+  // graph's markers (`refreshGraphBeats`) and any already-persisted review
+  // state (`persistChannelData`) both need an explicit refresh afterward.
+  // And since `activeChannel` isn't actually changing VALUE here, the
+  // `$effect` above that normally clears `selectedBeat` on a channel
+  // switch won't fire for this — done by hand instead, since a beat
+  // selected against the OLD detection result may not even exist in the
+  // new one.
+  async function handleRerunDetection() {
+    const channel = activeChannel
+    const requestId = ++detectionRequestId
+
+    detection = { status: 'pending', count: null, meanHr: null, duration: null, error: null }
+
+    const result = await detectBeats(path, channel)
+    if (requestId !== detectionRequestId) return // superseded by a channel switch started meanwhile
+
+    if (result.status === 'ok' && !result.error) {
+      detection = {
+        status: 'ok',
+        count: result.count,
+        meanHr: result.mean_hr,
+        duration: result.duration,
+        error: null,
+      }
+      selectedBeat = null
+      persistPending = false
+      persistError = null
+      refreshGraphBeats()
+      await persistChannelData(channel)
+    } else {
+      detection = {
+        status: 'error',
+        count: null,
+        meanHr: null,
+        duration: null,
+        error: result.error,
+      }
+    }
+  }
 </script>
 
 <div class="review-workspace" data-testid="review-workspace">
@@ -417,6 +465,16 @@
         <option value={channel}>{channel}</option>
       {/each}
     </select>
+
+    <button
+      type="button"
+      class="btn btn-sm"
+      data-testid="rerun-detection-button"
+      disabled={!hydrationChecked || detection.status === 'pending'}
+      onclick={handleRerunDetection}
+    >
+      Re-run detection
+    </button>
 
     {#if detection.status === 'pending'}
       <div class="detection-summary text-muted" data-testid="detection-summary">

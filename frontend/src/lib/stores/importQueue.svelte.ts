@@ -17,7 +17,7 @@
 import { detectBeats } from '../api/beats'
 import { importFiles } from '../api/files'
 import { estimate, recordSample } from './eta'
-import { fileRegistry, type FileRow } from './fileRegistry.svelte'
+import { autoOpenRequest, fileRegistry, type FileRow } from './fileRegistry.svelte'
 import { recordRecentFile } from './recentFiles.svelte'
 
 export const importQueue: { importing: boolean; detecting: boolean; error: string; autoRun: boolean } = $state({
@@ -52,6 +52,11 @@ async function importPaths(paths: string[]): Promise<void> {
   }
 
   const newRows: FileRow[] = []
+  // The first successfully-imported file with a channel gets opened
+  // automatically once this call finishes — see `autoOpenRequest`'s own
+  // comment. Only the first: an "Import Folder" of many files still opens
+  // just one, the rest simply appear in the sidebar as usual.
+  let autoOpenCandidate: FileRow | null = null
   for (const fileResult of result.results) {
     fileRegistry.push({
       path: fileResult.path,
@@ -67,10 +72,22 @@ async function importPaths(paths: string[]): Promise<void> {
     // Capture the reference back out of the reactive registry (rather than
     // holding onto the plain object literal above) so mutations made later
     // in the detection queue are tracked by Svelte's state proxy.
-    newRows.push(fileRegistry[fileRegistry.length - 1])
+    const row = fileRegistry[fileRegistry.length - 1]
+    newRows.push(row)
 
     if (fileResult.status === 'ok') {
       recordRecentFile(fileResult.path, fileResult.filename)
+      if (!autoOpenCandidate && row.defaultChannel !== null) {
+        autoOpenCandidate = row
+      }
+    }
+  }
+
+  if (autoOpenCandidate) {
+    autoOpenRequest.value = {
+      path: autoOpenCandidate.path,
+      channels: autoOpenCandidate.channels,
+      defaultChannel: autoOpenCandidate.defaultChannel!,
     }
   }
 
@@ -161,8 +178,33 @@ export async function handleImportFolder(): Promise<void> {
   }
 }
 
-/** Re-runs the import flow for a single known path, skipping the OS picker — used by the Welcome screen's "Recent files" cards. */
-export async function reimportPath(path: string): Promise<void> {
+/**
+ * Opens a file from Recent Files (Welcome screen or the Sidebar's own
+ * collapsible Recent Files section), skipping the OS picker.
+ *
+ * If the file is already in this session's `fileRegistry` — i.e. it was
+ * imported earlier in this same session, whether from a fresh import or a
+ * prior recent-file open — this just re-opens it directly: no re-import,
+ * no re-run of beat detection. Previously every recent-file click went
+ * through the full import+auto-detect flow unconditionally, silently
+ * re-running detection (and discarding the in-memory ETA-sample benefit of
+ * already having the file's data cached) every single time, even for a
+ * file already open moments ago. Only a file NOT in the registry — e.g.
+ * after an app restart, when `fileRegistry` is empty but `recentFiles`
+ * (localStorage-backed) still remembers it — goes through the real import.
+ */
+export async function openRecentFile(path: string): Promise<void> {
+  const existing = fileRegistry.find((row) => row.path === path)
+  if (existing && existing.status !== 'error' && existing.defaultChannel !== null) {
+    recordRecentFile(existing.path, existing.filename)
+    autoOpenRequest.value = {
+      path: existing.path,
+      channels: existing.channels,
+      defaultChannel: existing.defaultChannel,
+    }
+    return
+  }
+
   importQueue.importing = true
   try {
     await importPaths([path])

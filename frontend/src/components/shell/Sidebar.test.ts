@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fileRegistry, resetForTesting as resetFileRegistry, type FileRow } from '../../lib/stores/fileRegistry.svelte'
+import { autoOpenRequest, fileRegistry, resetForTesting as resetFileRegistry, type FileRow } from '../../lib/stores/fileRegistry.svelte'
 import { resetForTesting as resetImportQueue } from '../../lib/stores/importQueue.svelte'
+import { recordRecentFile, resetForTesting as resetRecentFiles } from '../../lib/stores/recentFiles.svelte'
 import { resetForTesting as resetEta } from '../../lib/stores/eta'
 import Sidebar from './Sidebar.svelte'
 
@@ -11,6 +12,7 @@ afterEach(() => {
   resetEta()
   resetFileRegistry()
   resetImportQueue()
+  resetRecentFiles()
 })
 
 function pushRow(overrides: Partial<FileRow> = {}): FileRow {
@@ -70,12 +72,13 @@ describe('Sidebar file list', () => {
     })
   })
 
-  it('shows a Review button for a row with a channel, firing onReview with path/channels/defaultChannel', async () => {
+  it('shows an "Open" button for a row with a channel, firing onReview with path/channels/defaultChannel', async () => {
     pushRow({ path: '/data/57.txt', filename: '57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' })
     const onReview = vi.fn()
 
     render(Sidebar, { props: { onReview } })
 
+    expect(screen.getByTestId('review-button')).toHaveTextContent('Open')
     await fireEvent.click(screen.getByTestId('review-button'))
 
     expect(onReview).toHaveBeenCalledWith({
@@ -210,5 +213,77 @@ describe('Sidebar resize', () => {
   it('hides the resize handle when collapsed', () => {
     render(Sidebar, { props: { collapsed: true } })
     expect(screen.queryByTestId('sidebar-resize-handle')).not.toBeInTheDocument()
+  })
+})
+
+describe('Sidebar recent files section', () => {
+  afterEach(() => {
+    autoOpenRequest.value = null
+  })
+
+  it('is collapsed by default and toggles open on click', async () => {
+    recordRecentFile('/data/57.txt', '57.txt')
+
+    render(Sidebar)
+
+    expect(screen.queryByTestId('sidebar-recent-list')).not.toBeInTheDocument()
+
+    await fireEvent.click(screen.getByTestId('recent-files-toggle'))
+    expect(screen.getByTestId('sidebar-recent-list')).toBeInTheDocument()
+    expect(screen.getByTestId('sidebar-recent-file')).toHaveTextContent('57.txt')
+
+    await fireEvent.click(screen.getByTestId('recent-files-toggle'))
+    expect(screen.queryByTestId('sidebar-recent-list')).not.toBeInTheDocument()
+  })
+
+  it('omits a recent file that is already in the main (this-session) list', async () => {
+    recordRecentFile('/data/57.txt', '57.txt')
+    pushRow({ path: '/data/57.txt', filename: '57.txt' })
+
+    render(Sidebar)
+    await fireEvent.click(screen.getByTestId('recent-files-toggle'))
+
+    expect(screen.getByText('No recent files')).toBeInTheDocument()
+  })
+
+  // A recent file NOT already in this session's registry (the only kind
+  // this section ever shows — see the filter test above) goes through
+  // openRecentFile's real-import path when clicked; a successful import
+  // sets autoOpenRequest the same way a fresh Import Files click does.
+  it('imports and sets autoOpenRequest when a not-yet-loaded recent file is clicked', async () => {
+    ;(window as any).api = { pickFiles: vi.fn(), pickFolder: vi.fn() }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [
+          {
+            path: '/data/57.txt',
+            filename: '57.txt',
+            status: 'ok',
+            channels: ['channel 1'],
+            time_column: 'ts',
+            size: 100,
+            modified_time: 1.0,
+            default_channel: 'channel 1',
+            default_channel_matched_rule: true,
+            error: null,
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    recordRecentFile('/data/57.txt', '57.txt')
+
+    render(Sidebar)
+    await fireEvent.click(screen.getByTestId('recent-files-toggle'))
+    await fireEvent.click(screen.getByTestId('sidebar-recent-file'))
+
+    await waitFor(() => {
+      expect(autoOpenRequest.value).toEqual({
+        path: '/data/57.txt',
+        channels: ['channel 1'],
+        defaultChannel: 'channel 1',
+      })
+    })
   })
 })

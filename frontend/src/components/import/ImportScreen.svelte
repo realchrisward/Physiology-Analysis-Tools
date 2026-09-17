@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { handleImportFiles, handleImportFolder, handleStop, importQueue, reimportPath } from '../../lib/stores/importQueue.svelte'
+  import { handleImportFiles, handleImportFolder, handleStop, importQueue, openRecentFile } from '../../lib/stores/importQueue.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
 
@@ -71,7 +71,7 @@
             type="button"
             class="recent-file-card"
             data-testid="recent-file-card"
-            onclick={() => reimportPath(file.path)}
+            onclick={() => openRecentFile(file.path)}
             disabled={importQueue.importing}
           >
             <Icon name="file-text" size={18} />

@@ -523,7 +523,10 @@ describe('ImportScreen recent files', () => {
     expect(screen.queryByTestId('recent-file-card')).not.toBeInTheDocument()
   })
 
-  it('re-imports a recent file (skipping the picker) when its card is clicked', async () => {
+  // Answers "is beat detection run every time a file from recents is
+  // opened?" — previously yes, unconditionally (a real bug: re-importing
+  // and re-running detection on a file already loaded this session).
+  it('opens an already-imported recent file directly — no re-import, no re-run of detection', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue(['/data/57.txt']),
       pickFolder: vi.fn().mockResolvedValue([]),
@@ -535,6 +538,10 @@ describe('ImportScreen recent files', () => {
 
     render(ImportScreen)
 
+    // Auto-open (see App.svelte) means the very first import already opens
+    // this file — uncheck auto-run and use the auto-open request itself
+    // (not a second click) as the signal the file is ready, so this test
+    // stays focused on the recent-file-card's own behavior.
     await fireEvent.click(screen.getByTestId('auto-run-checkbox'))
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
@@ -542,7 +549,41 @@ describe('ImportScreen recent files', () => {
       expect(screen.getByTestId('recent-file-card')).toHaveTextContent('57.txt')
     })
 
+    const { autoOpenRequest } = await import('../../lib/stores/fileRegistry.svelte')
+    autoOpenRequest.value = null // clear the initial import's own auto-open request
     fetchMock.mockClear()
+
+    await fireEvent.click(screen.getByTestId('recent-file-card'))
+
+    await waitFor(() => {
+      expect(autoOpenRequest.value).toEqual({
+        path: '/data/57.txt',
+        channels: ['channel 1'],
+        defaultChannel: 'channel 1',
+      })
+    })
+    // No new import, and therefore no re-run of detection.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect((window as any).api.pickFiles).toHaveBeenCalledTimes(1)
+
+    autoOpenRequest.value = null
+  })
+
+  it('re-imports (and re-runs detection for) a recent file no longer in this session — e.g. after a restart', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      importOkResponse([{ path: '/data/57.txt', filename: '57.txt', size: 12345, defaultChannel: 'channel 1' }]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { recordRecentFile } = await import('../../lib/stores/recentFiles.svelte')
+    recordRecentFile('/data/57.txt', '57.txt')
+
+    render(ImportScreen)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('recent-file-card')).toHaveTextContent('57.txt')
+    })
+
     await fireEvent.click(screen.getByTestId('recent-file-card'))
 
     await waitFor(() => {
@@ -551,7 +592,5 @@ describe('ImportScreen recent files', () => {
         expect.objectContaining({ body: JSON.stringify({ paths: ['/data/57.txt'] }) }),
       )
     })
-    // The picker was never invoked for the re-import.
-    expect((window as any).api.pickFiles).toHaveBeenCalledTimes(1)
   })
 })
