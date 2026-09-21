@@ -998,10 +998,24 @@ describe('buildBeatAlignedData', () => {
     expect(result.channelY).toEqual([1, 2, 3])
     expect(bucketY(result, 'normal', false)).toEqual([null, null, null])
   })
+
+  it('marks only rejected beats in rejectedY, leaving normal/unreviewed beats null', () => {
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: false, review_state: 'rejected' }),
+      beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false, review_state: 'unreviewed' }),
+      beat({ ts: 3, r_amplitude: 7, any_arrhythmia: true, prem_beat: true, review_state: 'confirmed' }),
+    ]
+    const result = buildBeatAlignedData([0, 1, 2, 3], [0, 0, 0, 0], beats)
+
+    expect(result.rejectedY).toEqual([null, 5, null, null])
+    // A rejected beat still buckets as 'normal' (reviewed) for its own
+    // color/shape marker — the overlay is additive, not a replacement.
+    expect(bucketY(result, 'normal', true)).toEqual([null, 5, null, null])
+  })
 })
 
 describe('toChartData', () => {
-  it('flattens xs/channelY/markerY/selectedY into MARKER_BUCKETS order, for uPlot.setData', async () => {
+  it('flattens xs/channelY/markerY/selectedY/rejectedY into MARKER_BUCKETS order, for uPlot.setData', async () => {
     const { MARKER_BUCKETS } = await import('../../lib/categories')
     const beats: WindowBeat[] = [beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, prem_beat: true })]
     const merged = buildBeatAlignedData([0, 1], [0, 0], beats)
@@ -1013,6 +1027,7 @@ describe('toChartData', () => {
     MARKER_BUCKETS.forEach((bucket, i) => {
       expect(data[i + 2]).toBe(merged.markerY[bucket.key])
     })
-    expect(data[data.length - 1]).toBe(merged.selectedY)
+    expect(data[data.length - 2]).toBe(merged.selectedY)
+    expect(data[data.length - 1]).toBe(merged.rejectedY)
   })
 })

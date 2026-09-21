@@ -111,13 +111,37 @@ def beat_clusterer(epochs_dict, eps=0.5, min_samples=20):
     Parameters:
         epochs_dict - Dictionary of Numpy arrays, with kets as index where heartbeat is detected and values being numpy arr of voltages. Output of beatepocher
     """
+    if len(epochs_dict) < 2:
+        raise ValueError(
+            f"Unsupervised (PCA/clustering) arrhythmia detection needs at "
+            f"least 2 usable beat epochs, got {len(epochs_dict)}. Beats too "
+            f"close to the start/end of the recording are skipped, so this "
+            f"usually means too few beats were detected overall — try the "
+            f"Heuristic method instead, or check beat detection settings."
+        )
+
     df = pd.DataFrame.from_dict(epochs_dict, orient="index")
+
+    # A flat/zero-variance epoch can make detrend_normalise divide by a
+    # near-zero norm, injecting inf/NaN — drop those rows rather than
+    # letting them crash PCA with an opaque sklearn error.
+    valid_mask = numpy.isfinite(df.to_numpy()).all(axis=1)
+    df = df.loc[valid_mask]
+
+    if len(df) < 2:
+        raise ValueError(
+            f"Unsupervised (PCA/clustering) arrhythmia detection needs at "
+            f"least 2 valid beat epochs, but only {len(df)} remained after "
+            f"discarding beats with invalid (non-finite) signal data — try "
+            f"the Heuristic method instead, or check beat detection settings."
+        )
+
     PCAobj = sklearn.decomposition.PCA(n_components=2)
     fit = PCAobj.fit_transform(df)
     fitDF = pd.DataFrame(data=fit, columns=["PC1", "PC2"])
 
     cluster = sklearn.cluster.DBSCAN(eps=eps, min_samples=min_samples).fit(fitDF)
-    cluster_dict = dict(zip(epochs_dict.keys(), cluster.labels_))
+    cluster_dict = dict(zip(df.index, cluster.labels_))
     return cluster_dict
 
 

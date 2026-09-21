@@ -17,6 +17,12 @@
     // merged structure so it always shares the exact same `xs` as
     // everything else (see `applySelectionHighlight`).
     selectedY: (number | null)[]
+    // Every rejected beat's r_amplitude at its own x, null elsewhere — a
+    // dedicated overlay series (see `rejectedOverlaySeries`) drawn on top of
+    // the 'normal' category marker a rejected beat already renders as, so
+    // "rejected" stays visually distinct from "never flagged" even though
+    // both are the same green circle underneath.
+    rejectedY: (number | null)[]
   }
 
   /**
@@ -60,6 +66,7 @@
     const markerY: Record<string, (number | null)[]> = {}
     for (const bucket of MARKER_BUCKETS) markerY[bucket.key] = []
     const selectedY: (number | null)[] = []
+    const rejectedY: (number | null)[] = []
 
     for (const x of xs) {
       channelYOut.push(channelYByX.has(x) ? (channelYByX.get(x) ?? null) : null)
@@ -74,9 +81,10 @@
       }
 
       selectedY.push(beat && selectedTs != null && beat.ts === selectedTs ? beat.r_amplitude : null)
+      rejectedY.push(beat && beat.review_state === 'rejected' ? beat.r_amplitude : null)
     }
 
-    return { xs, channelY: channelYOut, markerY, selectedY }
+    return { xs, channelY: channelYOut, markerY, selectedY, rejectedY }
   }
 
   /** Flattens a merged `BeatSeriesData` into uPlot's `data` array shape, in the exact series order the chart is constructed with. */
@@ -86,6 +94,7 @@
       merged.channelY,
       ...MARKER_BUCKETS.map((bucket) => merged.markerY[bucket.key]),
       merged.selectedY,
+      merged.rejectedY,
     ]
   }
 </script>
@@ -388,6 +397,42 @@
         width: 2.5,
         stroke: () => cssVar('--color-accent', '#2563eb'),
         paths: makeShapePathsFn('circle', size, false),
+      },
+    }
+  }
+
+  // Rejecting a beat clears every category flag (it genuinely wasn't an
+  // arrhythmia), so it correctly buckets as 'normal' just like a beat that
+  // was never flagged in the first place — but that collapses "a human
+  // reviewed and dismissed this" into the same marker as "this was never
+  // suspicious." This overlay draws a small diagonal strike on top of any
+  // rejected beat's own marker so the two stay distinguishable at a glance,
+  // without needing a whole new category/color for what is still,
+  // correctly, "not an arrhythmia."
+  function rejectedOverlaySeries(): uPlot.Series {
+    const size = 9 // matches the reviewed-marker size so the strike spans it
+    return {
+      points: {
+        show: true,
+        size,
+        width: 2,
+        stroke: () => cssVar('--color-danger', '#b91c1c'),
+        paths: (u: uPlot, seriesIdx: number, idx0: number, idx1: number) => {
+          const path = new Path2D()
+          const yData = u.data[seriesIdx] as (number | null)[]
+          const xData = u.data[0] as number[]
+          const r = size / 2
+          for (let i = idx0; i <= idx1; i++) {
+            const xVal = xData[i]
+            const yVal = yData[i]
+            if (xVal == null || yVal == null) continue
+            const cx = u.valToPos(xVal, 'x', true)
+            const cy = u.valToPos(yVal, 'y', true)
+            path.moveTo(cx - r, cy - r)
+            path.lineTo(cx + r, cy + r)
+          }
+          return { stroke: path }
+        },
       },
     }
   }
@@ -1022,6 +1067,7 @@
             { stroke: () => waveformColor(), width: 1.5, spanGaps: true },
             ...MARKER_BUCKETS.map((bucket) => categoryMarkerSeries(bucket.category, bucket.reviewed)),
             selectionHighlightSeries(),
+            rejectedOverlaySeries(),
           ],
           plugins: [panZoomPlugin()],
         },

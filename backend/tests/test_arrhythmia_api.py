@@ -146,6 +146,43 @@ def test_beats_not_detected_yet_reports_error(real_beats_txt_file):
     assert "beat detection" in result["error"].lower()
 
 
+def test_too_few_beats_for_clustering_reports_clean_error(real_beats_txt_file):
+    # window_size=3200 on 57.txt's 15 beats leaves exactly 1 beat epoch that
+    # doesn't get boundary-skipped by ml_tools.beatepocher() (verified
+    # directly against this fixture) - not enough for PCA(n_components=2),
+    # which previously surfaced as a raw, unhelpful sklearn internals error
+    # ("Input X contains NaN...") instead of a clean, actionable message.
+    client = TestClient(create_app())
+
+    settings = client.get("/settings").json()
+    settings["arrhythmia"]["window_size"] = 3200
+    put_response = client.put("/settings", json=settings)
+    assert put_response.json()["status"] == "ok"
+
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+    client.post(
+        "/beats/detect",
+        json={"path": real_beats_txt_file, "channel": "channel 1"},
+    )
+
+    response = client.post(
+        "/arrhythmia/detect",
+        json={
+            "path": real_beats_txt_file,
+            "channel": "channel 1",
+            "method": "unsupervised",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "error"
+    assert result["error"]
+    assert "NaN" not in result["error"]
+    assert "sklearn" not in result["error"]
+    assert "usable beat epochs" in result["error"]
+
+
 def test_unrecognized_method_reports_error(real_beats_txt_file):
     client = TestClient(create_app())
     client.post("/files/import", json={"paths": [real_beats_txt_file]})
