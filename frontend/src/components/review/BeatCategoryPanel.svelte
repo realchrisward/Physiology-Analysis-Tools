@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { updateBeatCategory } from '../../lib/api/persistence'
+  import { onMount } from 'svelte'
+  import { deleteBeat, updateBeatCategory } from '../../lib/api/persistence'
+  import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
   import Icon from '../shared/Icon.svelte'
 
@@ -31,10 +33,14 @@
     path,
     beat,
     onUpdated,
+    onDeleted,
   }: {
     path: string
     beat: WindowBeat
     onUpdated: (result: CategoryUpdateResult) => void
+    // Fired after a beat is deleted outright (a detection false positive),
+    // so the parent can refresh the graph and drop the selection.
+    onDeleted?: () => void
   } = $props()
 
   // `beat` is a plain prop from the parent's last fetch and never updates
@@ -111,6 +117,44 @@
     onUpdated(result)
   }
 
+  // Deleting a beat is different from rejecting it: reject says "this beat
+  // is real but isn't an arrhythmia", delete says "this isn't a beat at
+  // all" and removes it from the counts, the graph, and the export. Asks
+  // first, since unlike every other action here it cannot be undone.
+  let confirmingDelete: boolean = $state(false)
+
+  async function confirmDelete() {
+    submitting = true
+    errorMessage = null
+    const result = await deleteBeat(path, beat.ts)
+    submitting = false
+    confirmingDelete = false
+
+    if (result.status === 'ok' && !result.error) {
+      onDeleted?.()
+    } else {
+      errorMessage = result.error ?? 'Could not delete this beat'
+    }
+  }
+
+  // Confirm/reject from the keyboard, so the common case (walk to a flagged
+  // beat, judge it, move on) never needs the mouse. Mounted per selected
+  // beat, so the shortcut always acts on the beat currently shown.
+  onMount(() => {
+    function handleKeydown(event: KeyboardEvent) {
+      if (shouldIgnoreShortcut(event) || submitting) return
+      if (event.key === 'c' || event.key === 'C') {
+        event.preventDefault()
+        void submit('confirm')
+      } else if (event.key === 'r' || event.key === 'R') {
+        event.preventDefault()
+        void submit('reject')
+      }
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  })
+
   function retry() {
     if (lastAttempt === null) return
     void submit(lastAttempt.action, lastAttempt.category)
@@ -185,8 +229,9 @@
       data-testid="confirm-button"
       disabled={submitting}
       onclick={() => submit('confirm')}
+      title="Confirm this beat (C)"
     >
-      Confirm
+      Confirm <kbd>C</kbd>
     </button>
     <button
       type="button"
@@ -194,8 +239,9 @@
       data-testid="reject-button"
       disabled={submitting}
       onclick={() => submit('reject')}
+      title="Reject this beat (R)"
     >
-      Reject
+      Reject <kbd>R</kbd>
     </button>
 
     <label class="field">
@@ -216,6 +262,43 @@
     >
       Reassign
     </button>
+  </div>
+
+  <div class="danger-zone">
+    {#if confirmingDelete}
+      <span class="text-danger" data-testid="delete-beat-confirm-prompt">
+        Delete this beat entirely? It will leave the graph, the counts, and the report.
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="cancel-delete-beat-button"
+        disabled={submitting}
+        onclick={() => (confirmingDelete = false)}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm btn-danger-text"
+        data-testid="confirm-delete-beat-button"
+        disabled={submitting}
+        onclick={confirmDelete}
+      >
+        Delete beat
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="btn btn-sm btn-danger-text"
+        data-testid="delete-beat-button"
+        title="Not a real beat? Remove it from the data entirely"
+        disabled={submitting}
+        onclick={() => (confirmingDelete = true)}
+      >
+        <Icon name="trash" size={12} /> Not a beat
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -290,6 +373,30 @@
   }
   .review-state--reassigned {
     color: var(--color-warning, #b45309);
+  }
+
+  .danger-zone {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-border, #d3dae1);
+    font-size: var(--font-size-sm);
+  }
+
+  .danger-zone .text-danger {
+    flex: 1;
+  }
+
+  kbd {
+    margin-left: 4px;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-family: inherit;
+    opacity: 0.6;
   }
 
   .actions {

@@ -1312,3 +1312,135 @@ describe('EcgGraph hide-rejected filter', () => {
     expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, 6])
   })
 })
+
+describe('EcgGraph bad-data marking UX', () => {
+  async function mountMarking(fetchMock: ReturnType<typeof vi.fn>, marks: BadDataMark[] = []) {
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', initialBadDataMarks: marks },
+      }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await fireEvent.click(screen.getByTestId('bad-data-mode-button'))
+  }
+
+  // Coordinates are taken from the plot's own rendered width (jsdom does no
+  // layout, so uPlot's explicit style is the only real geometry available) —
+  // the same technique the beat-click tests above use. `fromFrac`/`toFrac`
+  // are fractions of the plotting area.
+  function dragOnPlot(fromFrac: number, toFrac: number) {
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    const plotWidthPx = parseFloat(over.style.width)
+    const fromX = plotWidthPx * fromFrac
+    const toX = plotWidthPx * toFrac
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: fromX, clientY: 50, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: toX, clientY: 50, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: toX, clientY: 50, bubbles: true }))
+  }
+
+  it('explains the mode while it is active and leaves on Escape', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountMarking(fetchMock)
+
+    expect(screen.getByTestId('bad-data-mode-banner')).toBeInTheDocument()
+
+    await fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(screen.queryByTestId('bad-data-mode-banner')).not.toBeInTheDocument()
+  })
+
+  it('confirms a newly marked range', async () => {
+    const fetchMock = routedFetch({
+      addBadData: () => badDataAddResponse({ id: 7, start: 1, stop: 3 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await mountMarking(fetchMock)
+
+    dragOnPlot(0.2, 0.6)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bad-data-toast')).toBeInTheDocument()
+    })
+    expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+  })
+
+  it('removes the mark under a click instead of creating a zero-width one', async () => {
+    const existing: BadDataMark = { id: 3, start: 0, stop: 9 }
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountMarking(fetchMock, [existing])
+
+    expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+
+    // A click (no movement) in the middle of the plot, which lies inside
+    // the existing mark's 0-9s span.
+    dragOnPlot(0.5, 0.5)
+
+    await waitFor(() => {
+      expect(screen.queryAllByTestId('bad-data-mark')).toHaveLength(0)
+    })
+    const deleteCall = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE',
+    )
+    expect(deleteCall).toBeTruthy()
+  })
+})
+
+describe('EcgGraph focus mode and shortcuts', () => {
+  it('fills the window and floats the tools, then exits on Escape', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    await fireEvent.click(screen.getByTestId('fullscreen-graph-button'))
+    expect(screen.getByTestId('ecg-graph')).toHaveClass('fullscreen')
+    // The tools become a collapsible floating panel only in focus mode.
+    expect(screen.getByTestId('toggle-graph-tools-button')).toBeInTheDocument()
+
+    await fireEvent.click(screen.getByTestId('toggle-graph-tools-button'))
+    expect(screen.queryByTestId('beat-of-interest-nav')).not.toBeInTheDocument()
+
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.getByTestId('ecg-graph')).not.toHaveClass('fullscreen')
+  })
+
+  it('steps between beats of interest from the keyboard', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
+      }),
+    )
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+
+    await fireEvent.keyDown(document, { key: 'n' })
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 2 of 3')
+
+    await fireEvent.keyDown(document, { key: 'p' })
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+  })
+
+  it('ignores shortcuts while the technician is typing', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
+      }),
+    )
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    await fireEvent.keyDown(input, { key: 'n' })
+
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+    input.remove()
+  })
+})

@@ -425,3 +425,86 @@ def test_no_persisted_record_for_file_is_an_error(tmp_path, example_txt_file):
     result = response.json()
     assert result["status"] == "error"
     assert result["error"]
+
+
+def test_delete_beat_removes_it_from_sqlite_and_the_live_cache(
+    tmp_path, real_beats_txt_file
+):
+    """Deleting a beat (a detection false positive) must actually remove the
+    data point, not just clear its flags the way reject does."""
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+
+    response = client.request(
+        "DELETE", "/files/beats/one", json={"path": real_beats_txt_file, "ts": ts}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+    # Gone from the persisted record...
+    assert _get_beat(client, real_beats_txt_file, 0.0855) is None
+    # ...and from the in-memory cache every beat-reading endpoint serves.
+    window = client.get(
+        "/beats/window",
+        params={"path": real_beats_txt_file, "start": 0, "end": 999},
+    ).json()
+    assert window["count"] == 14
+    assert all(beat["ts"] != pytest.approx(ts, abs=1e-9) for beat in window["beats"])
+
+
+def test_delete_unknown_beat_is_an_error(tmp_path, real_beats_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+
+    response = client.request(
+        "DELETE", "/files/beats/one", json={"path": real_beats_txt_file, "ts": 999.0}
+    )
+
+    assert response.json()["status"] == "error"
+
+
+def test_discard_state_clears_everything_saved_for_the_file(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    _setup_persisted_beats(client, real_beats_txt_file)
+    client.post(
+        "/files/bad-data",
+        json={"path": real_beats_txt_file, "start": 0.1, "stop": 0.2},
+    )
+    ts = _exact_ts(client, real_beats_txt_file, 0.0855)
+    client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": ts, "action": "confirm"},
+    )
+
+    response = client.request(
+        "DELETE", "/files/state", json={"path": real_beats_txt_file}
+    )
+    assert response.json()["status"] == "ok"
+
+    state = client.get("/files/state", params={"path": real_beats_txt_file}).json()
+    assert state["found"] is False
+    assert state["beats"] == []
+    assert state["bad_data_marks"] == []
+    # The in-memory cache goes too, so nothing survives in one place after
+    # being discarded from the other.
+    assert client.get(
+        "/beats/window", params={"path": real_beats_txt_file, "start": 0, "end": 999}
+    ).json()["status"] == "error"
+
+
+def test_discard_state_for_a_file_with_nothing_saved_is_a_no_op(
+    tmp_path, real_beats_txt_file
+):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+
+    response = client.request(
+        "DELETE", "/files/state", json={"path": real_beats_txt_file}
+    )
+
+    # The caller's intent ("leave me a clean slate") already holds.
+    assert response.json()["status"] == "ok"

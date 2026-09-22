@@ -2,8 +2,10 @@ import { apiGet, apiPost } from './http'
 import type {
   BadDataAddResult,
   BadDataDeleteResult,
+  BeatDeleteResult,
   CategoryUpdateResult,
   ChannelPersistResult,
+  DiscardStateResult,
   FileStateResult,
   PersistBeatsResult,
   ReportResult,
@@ -36,6 +38,18 @@ export function addBadData(path: string, start: number, stop: number): Promise<B
 
 export function deleteBadData(path: string, id: number): Promise<BadDataDeleteResult> {
   return apiPost('/files/bad-data', 'DELETE', { path, id })
+}
+
+// Removes a beat that isn't really a beat (a detection false positive) —
+// distinct from rejecting it, which keeps the beat and only clears its
+// arrhythmia flags.
+export function deleteBeat(path: string, ts: number): Promise<BeatDeleteResult> {
+  return apiPost('/files/beats/one', 'DELETE', { path, ts })
+}
+
+// Throws away everything saved for a file so detection can start clean.
+export function discardFileState(path: string): Promise<DiscardStateResult> {
+  return apiPost('/files/state', 'DELETE', { path })
 }
 
 export function generateReport(path: string, outputPath: string): Promise<ReportResult> {

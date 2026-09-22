@@ -138,6 +138,16 @@ export interface BeatWindowResult {
   error: string | null
 }
 
+export interface BeatDeleteResult {
+  status: string
+  error: string | null
+}
+
+export interface DiscardStateResult {
+  status: string
+  error: string | null
+}
+
 export interface BeatsOfInterestResult {
   status: string
   ts: number[]

@@ -3,7 +3,13 @@
   import { detectBeats } from '../../lib/api/beats'
   import { detectArrhythmias } from '../../lib/api/arrhythmia'
   import { getBeatsOfInterest } from '../../lib/api/windowing'
-  import { generateReport, getFileState, persistBeats, putChannel } from '../../lib/api/persistence'
+  import {
+    discardFileState,
+    generateReport,
+    getFileState,
+    persistBeats,
+    putChannel,
+  } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
@@ -354,6 +360,35 @@
     }
   })
 
+  // Set when mount-time hydration found prior work for this file, so the
+  // banner can say what was brought back. `null` = started fresh.
+  let restored: { reviewedBeats: number; totalBeats: number; marks: number } | null = $state(null)
+  let discarding: boolean = $state(false)
+
+  // Throws away the restored session and re-detects from scratch — the
+  // escape hatch for "this saved review is wrong, start over".
+  async function handleStartFresh() {
+    discarding = true
+    try {
+      const result = await discardFileState(path)
+      if (destroyed) return
+      if (result.status !== 'ok' || result.error) {
+        persistError = result.error ?? 'Could not discard the saved review'
+        return
+      }
+      restored = null
+      selectedBeat = null
+      beatsOfInterest = []
+      lastPersistedChannel = null
+      // Let the automatic on-load run fire again for this channel now that
+      // there is nothing persisted to inherit.
+      autoArrhythmiaChannel = null
+      await handleChannelChange()
+    } finally {
+      if (!destroyed) discarding = false
+    }
+  }
+
   // F5's report export. See `ReportState`'s own declaration above for the
   // state shape.
   let report: ReportState = $state({ status: 'idle', outputPath: null, error: null })
@@ -419,6 +454,14 @@
         activeChannel = result.channel
         initialBadDataMarks = result.bad_data_marks ?? []
         lastPersistedChannel = result.channel
+        // Restoring silently means a technician can't tell whether they're
+        // continuing prior work or starting over — and can't choose. Both
+        // are shown, and can be acted on, via the banner below.
+        restored = {
+          reviewedBeats: (result.beats ?? []).filter((b) => b.review_state !== 'unreviewed').length,
+          totalBeats: (result.beats ?? []).length,
+          marks: (result.bad_data_marks ?? []).length,
+        }
       }
     } finally {
       // Every exit path — found, not-found, or an error/rejection getFileState
@@ -482,6 +525,15 @@
     if (lastPersistedChannel !== activeChannel) {
       void ensureChannelPersisted(activeChannel)
     }
+  }
+
+  // A deleted beat is gone from beat_cache and SQLite alike, so the
+  // selection it backed is stale and the graph/navigation both need to
+  // re-read rather than patch around it.
+  function handleBeatDeleted() {
+    selectedBeat = null
+    refreshGraphBeats()
+    void refreshBeatsOfInterest()
   }
 
   function handleCategoryUpdated(result: CategoryUpdateResult) {
@@ -682,6 +734,36 @@
     <span class="toolbar-spacer"></span>
   </div>
 
+  {#if restored}
+    <div class="restore-banner" data-testid="restored-session-banner">
+      <Icon name="check-circle" size={14} />
+      <span>
+        Picked up where you left off — <strong>{restored.totalBeats}</strong> saved beats,
+        <strong>{restored.reviewedBeats}</strong> already reviewed, and
+        <strong>{restored.marks}</strong> bad-data {restored.marks === 1 ? 'range' : 'ranges'}.
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="start-fresh-button"
+        title="Discard the saved review for this file and detect again from scratch"
+        disabled={discarding}
+        onclick={handleStartFresh}
+      >
+        {discarding ? 'Starting fresh…' : 'Start fresh'}
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="dismiss-restore-banner"
+        aria-label="Dismiss"
+        onclick={() => (restored = null)}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
+
   <div class="arrhythmia-toolbar">
     <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
          own `disabled` above: `activeChannel` still holds `defaultChannel`
@@ -763,7 +845,16 @@
       {#if !beatPanelCollapsed}
       <div class="beat-panel-content">
         {#if selectedBeat === null}
-          <p class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">No beat selected</p>
+          <div class="beat-panel-placeholder text-muted" data-testid="selected-beat-summary">
+            <p>No beat selected</p>
+            <p class="placeholder-hint">
+              {#if beatsOfInterest.length > 0}
+                Press <kbd>N</kbd> to step to the next beat of interest, or click any marker on the graph.
+              {:else}
+                Click a marker on the graph to review that beat.
+              {/if}
+            </p>
+          </div>
         {:else if persistPending}
           <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
         {:else if persistError && lastPersistedChannel !== activeChannel}
@@ -780,7 +871,12 @@
           </div>
         {:else}
           {#key selectedBeat.ts}
-            <BeatCategoryPanel {path} beat={selectedBeat} onUpdated={handleCategoryUpdated} />
+            <BeatCategoryPanel
+              {path}
+              beat={selectedBeat}
+              onUpdated={handleCategoryUpdated}
+              onDeleted={handleBeatDeleted}
+            />
           {/key}
         {/if}
       </div>
@@ -819,6 +915,35 @@
     padding: var(--space-4);
     height: 100%;
     box-sizing: border-box;
+  }
+
+  .placeholder-hint {
+    margin-top: var(--space-2);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+  }
+
+  .placeholder-hint kbd {
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 0.7rem;
+  }
+
+  .restore-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-success, #15803d);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-accent-soft, #eef1f5);
+    font-size: var(--font-size-sm);
+  }
+
+  .restore-banner span {
+    flex: 1;
   }
 
   .review-toolbar {

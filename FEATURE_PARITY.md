@@ -7,7 +7,7 @@ unused by the new app) vs. the current `backend/` (FastAPI) and `frontend/`
 "not started" styling note in `FRONTEND_OVERVIEW.md` — that pass has since
 happened.
 
-**Status**: 106 backend tests passing, 193 frontend tests passing. Branch
+**Status**: 110 backend tests passing, 199 frontend tests passing. Branch
 `web-ui-redesign`, not merged to `main`. Old app still present at
 `src/physiology_analysis_tools/main.py` + `ecg_analysis_tool.ui`, untouched.
 
@@ -125,6 +125,24 @@ flagged down to 1/163. A fixed `eps` is still selectable in Settings.
   work is touched).
 - **About dialog** — reports the live backend connection rather than a
   hardcoded claim.
+
+## Review & session handling (audited)
+
+- **Removing a bad-data mark really removes it** — the SQLite row is deleted
+  (scoped to the file), and it stays gone across restarts.
+- **Rejecting a beat keeps the beat.** "Reject" means "real beat, not an
+  arrhythmia", so the row survives and still appears in the export. For a
+  beat that isn't a beat at all (a noise spike), there is now a separate
+  **"Not a beat"** delete in the beat panel, which removes it from SQLite,
+  the live cache, the graph, the counts and the report. The old PySide6 app
+  had no equivalent.
+- **Previous annotations load automatically.** Reopening a file restores the
+  channel, every beat with its flags, every review decision, and the
+  bad-data marks — across a genuine restart, with no re-detection. That was
+  already true but invisible; a banner now says what was restored, with a
+  **Start fresh** action that discards the saved review and re-detects.
+- **Caveat:** restore is keyed on `(path, size, mtime)`. If the file changes
+  on disk, prior work is orphaned and the file opens clean.
 
 ## Still not ported
 

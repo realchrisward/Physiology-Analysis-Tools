@@ -220,6 +220,34 @@ def add_bad_data_mark(
     ).fetchone()
 
 
+def delete_beat(conn: sqlite3.Connection, file_id: int, ts: float) -> bool:
+    """Delete one beat outright — for a detection false positive (a noise
+    spike picked up as a beat).
+
+    Distinct from rejecting a beat: "reject" in `update_beat_category` means
+    "this beat is real, but it is not an arrhythmia" and keeps the row,
+    whereas this means "this is not a beat at all", so it stops contributing
+    to beat counts, rate statistics, and the exported report.
+    """
+    cursor = conn.execute("DELETE FROM beats WHERE file_id=? AND ts=?", (file_id, ts))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def delete_file_state(conn: sqlite3.Connection, file_id: int) -> None:
+    """Discard everything persisted for a file — every beat, every bad-data
+    mark, and the file row itself (channel choice and settings snapshots).
+
+    Backs the "start fresh" action: detection then starts from a clean slate
+    rather than inheriting review decisions the technician has explicitly
+    chosen to abandon.
+    """
+    conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM bad_data_marks WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM files WHERE id=?", (file_id,))
+    conn.commit()
+
+
 def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -> bool:
     """Delete the bad-data mark with `mark_id`, scoped to `file_id` so one
     file's DELETE can never remove another file's mark."""

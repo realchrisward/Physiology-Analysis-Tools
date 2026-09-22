@@ -231,6 +231,25 @@ class BadDataDeleteResult(BaseModel):
     error: str | None = None
 
 
+class BeatDeleteRequest(BaseModel):
+    path: str
+    ts: float
+
+
+class BeatDeleteResult(BaseModel):
+    status: str
+    error: str | None = None
+
+
+class DiscardStateRequest(BaseModel):
+    path: str
+
+
+class DiscardStateResult(BaseModel):
+    status: str
+    error: str | None = None
+
+
 class CategoryUpdateRequest(BaseModel):
     path: str
     ts: float

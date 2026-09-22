@@ -17,11 +17,15 @@ from backend.models import (
     BadDataDeleteRequest,
     BadDataDeleteResult,
     BadDataMark,
+    BeatDeleteRequest,
+    BeatDeleteResult,
     BeatSettingsModel,
     CategoryUpdateRequest,
     CategoryUpdateResult,
     ChannelPersistRequest,
     ChannelPersistResult,
+    DiscardStateRequest,
+    DiscardStateResult,
     FileStateResult,
     PersistBeatsRequest,
     PersistBeatsResult,
@@ -294,6 +298,85 @@ def update_beat_category(
         )
     except Exception as e:
         return CategoryUpdateResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.delete("/beats/one", response_model=BeatDeleteResult)
+def delete_beat(payload: BeatDeleteRequest, request: Request) -> BeatDeleteResult:
+    """Remove a beat that isn't really a beat (a detection false positive).
+
+    Unlike rejecting a beat - which keeps the row and just says it isn't an
+    arrhythmia - this drops it from SQLite AND from the in-memory beat_cache
+    every beat-reading endpoint serves from, so it disappears from the
+    graph, the counts, and the exported report.
+    """
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return BeatDeleteResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is None:
+            return BeatDeleteResult(
+                status="error",
+                error="No persisted data for this file - run POST /files/beats first",
+            )
+
+        if not db.delete_beat(conn, file_row["id"], payload.ts):
+            return BeatDeleteResult(
+                status="error", error="No beat found at this timestamp"
+            )
+
+        cached_df = request.app.state.beat_cache.get(payload.path)
+        if cached_df is not None:
+            request.app.state.beat_cache[payload.path] = cached_df[
+                cached_df["ts"] != payload.ts
+            ].reset_index(drop=True)
+
+        return BeatDeleteResult(status="ok")
+    except Exception as e:
+        return BeatDeleteResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.delete("/state", response_model=DiscardStateResult)
+def discard_file_state(
+    payload: DiscardStateRequest, request: Request
+) -> DiscardStateResult:
+    """Throw away everything saved for this file so the next detection run
+    starts clean - the "start fresh" escape hatch from a restored session.
+
+    Also drops the in-memory beat cache, so nothing survives in one place
+    after being discarded from the other.
+    """
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return DiscardStateResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is not None:
+            db.delete_file_state(conn, file_row["id"])
+
+        request.app.state.beat_cache.pop(payload.path, None)
+
+        # Nothing persisted in the first place is a successful no-op, not an
+        # error: the caller's intent ("leave me with a clean slate") holds.
+        return DiscardStateResult(status="ok")
+    except Exception as e:
+        return DiscardStateResult(status="error", error=str(e))
     finally:
         conn.close()
 

@@ -115,6 +115,7 @@
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
   import { addBadData, deleteBadData } from '../../lib/api/persistence'
   import { themeState } from '../../lib/stores/theme.svelte'
+  import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
   import type { BadDataMark } from '../../lib/api/types'
   import {
@@ -464,6 +465,31 @@
     }
   }
 
+  // Focus mode: the graph takes over the whole window and the toolbars
+  // collapse into a floating panel in the corner, so a long review pass has
+  // the maximum possible trace on screen without losing the controls.
+  let fullscreen: boolean = $state(false)
+  // Lets that floating panel get out of the way entirely when the
+  // technician just wants to look at the trace.
+  let toolsCollapsed: boolean = $state(false)
+  // Tracked so the chart can be sized to the window while in focus mode.
+  let viewportHeight: number = $state(typeof window === 'undefined' ? 800 : window.innerHeight)
+
+  function graphHeight(): number {
+    // Leaves room for the legend and marks strip beneath the plot.
+    if (fullscreen) return Math.max(240, viewportHeight - 210)
+    return expanded ? EXPANDED_HEIGHT : HEIGHT
+  }
+
+  function toggleFullscreen() {
+    fullscreen = !fullscreen
+    if (!fullscreen) toolsCollapsed = false
+  }
+
+  function toggleTools() {
+    toolsCollapsed = !toolsCollapsed
+  }
+
   // True whenever the visible x-range differs from `fullExtent` (a pan,
   // zoom, or Reset click having happened) — drives the Reset view button's
   // highlighted state below, so it's obvious at a glance that the view has
@@ -515,20 +541,38 @@
 
   // Bad-data marking. `badDataMode` gates handleDragStart below: off (the
   // default) a drag pans the graph exactly as before; on, the same drag
-  // instead selects a range to send to `addBadData`. Marks are seeded from
-  // `initialBadDataMarks` on mount (F5's `GET /files/state` reopen flow, via
-  // ReviewWorkspace — see that prop's own comment below) and otherwise kept
-  // as session-local state, added/removed only through this component's own
-  // handlers — rendered as a small proportional strip beneath the graph
-  // (`markLeftPct`/`markWidthPct`, relative to the full file extent) rather
-  // than as a canvas overlay synced to the current pan/zoom window: it's
-  // simpler, and a technician can see/remove a mark regardless of which part
-  // of the recording is currently in view.
+  // instead selects a range to send to `addBadData`, and a plain click
+  // removes whichever mark it lands on.
+  //
+  // Marks are drawn onto the chart canvas itself (see `badDataPlugin`), so
+  // they stay aligned with the trace at any pan/zoom. The overview strip
+  // beneath the graph is kept as a whole-file minimap — useful for seeing
+  // marks that are currently off-screen — but is no longer the only place
+  // they appear.
   let badDataMode: boolean = $state(false)
   // Seeded from `initialBadDataMarks` (F5 reopen hydration) instead of
   // always starting empty — see that prop's own comment above for why this
   // is a one-time read, not an ongoing sync.
   let badDataMarks: BadDataMark[] = $state(initialBadDataMarks ?? [])
+  // The range currently being dragged out, painted live so the technician
+  // sees what they're about to mark. `null` when no drag is in progress.
+  let dragSelection: { start: number; stop: number } | null = $state(null)
+  // The mark under the cursor in bad-data mode, highlighted to show that
+  // clicking will remove it.
+  let hoveredMarkId: number | null = $state(null)
+  // Transient confirmation of the last add/remove, so an action that
+  // otherwise only changes some shading has visible feedback.
+  let badDataToast: string | null = $state(null)
+  let badDataToastTimer: ReturnType<typeof setTimeout> | undefined
+
+  function showBadDataToast(message: string) {
+    badDataToast = message
+    if (badDataToastTimer !== undefined) clearTimeout(badDataToastTimer)
+    badDataToastTimer = setTimeout(() => {
+      badDataToast = null
+      badDataToastTimer = undefined
+    }, 2400)
+  }
 
   // Plain (non-reactive) instance state: the live uPlot instance, the
   // full-extent range for "Reset view", and the pan/zoom debounce timer.
@@ -793,6 +837,8 @@
     const result = await addBadData(path, start, stop)
     if (result.status === 'ok' && result.mark && !result.error) {
       badDataMarks = [...badDataMarks, result.mark]
+      const span = Math.abs(stop - start)
+      showBadDataToast(`Marked ${span.toFixed(2)}s as bad data`)
     } else {
       error = result.error ?? 'Failed to add bad data mark'
     }
@@ -802,6 +848,8 @@
     const result = await deleteBadData(path, mark.id)
     if (result.status === 'ok' && !result.error) {
       badDataMarks = badDataMarks.filter((m) => m.id !== mark.id)
+      if (hoveredMarkId === mark.id) hoveredMarkId = null
+      showBadDataToast('Bad-data mark removed')
     } else {
       error = result.error ?? 'Failed to remove bad data mark'
     }
@@ -809,6 +857,7 @@
 
   function toggleBadDataMode() {
     badDataMode = !badDataMode
+    if (!badDataMode) hoveredMarkId = null
   }
 
   // While bad-data mode is active, a left-drag on the plot selects a range
@@ -820,28 +869,56 @@
   function handleBadDataDragStart(u: uPlot, downEvent: MouseEvent) {
     const rect = u.over.getBoundingClientRect()
     const startVal = u.posToVal(downEvent.clientX - rect.left, 'x')
+    const startPx = downEvent.clientX
 
     function detach() {
-      document.removeEventListener('mousemove', noopMove)
+      document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      dragSelection = null
       endActiveDrag = undefined
     }
 
-    // No live visual feedback during a bad-data selection drag (unlike pan,
-    // which redraws on every mousemove) — the contract is just that a mark
-    // is added on release. The listener still needs to exist so `detach()`
-    // has something to remove.
-    function noopMove() {}
-
-    function onUp(upEvent: MouseEvent) {
-      detach()
-      const stopVal = u.posToVal(upEvent.clientX - rect.left, 'x')
-      void submitBadDataMark(startVal, stopVal)
+    // Live feedback: the selection is painted on every move (see
+    // `badDataPlugin`), so the technician can see the exact range they are
+    // about to mark rather than finding out only after releasing.
+    function onMove(moveEvent: MouseEvent) {
+      dragSelection = { start: startVal, stop: u.posToVal(moveEvent.clientX - rect.left, 'x') }
+      chart?.redraw()
     }
 
-    document.addEventListener('mousemove', noopMove)
+    function onUp(upEvent: MouseEvent) {
+      const movedPx = Math.abs(upEvent.clientX - startPx)
+      detach()
+      chart?.redraw()
+
+      // A click rather than a drag: in this mode that means "remove the mark
+      // I clicked on", which is the natural inverse of drawing one, instead
+      // of silently creating a zero-width mark.
+      if (movedPx < CLICK_DRAG_THRESHOLD_PX) {
+        const existing = markAt(u.posToVal(upEvent.clientX - rect.left, 'x'))
+        if (existing) void removeBadDataMark(existing)
+        return
+      }
+
+      void submitBadDataMark(startVal, u.posToVal(upEvent.clientX - rect.left, 'x'))
+    }
+
+    document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
     endActiveDrag = detach
+  }
+
+  // Highlights whichever mark the cursor is over while in bad-data mode, so
+  // it's obvious that clicking will remove that one.
+  function handleBadDataHover(u: uPlot, event: MouseEvent) {
+    if (!badDataMode || dragSelection) return
+    const rect = u.over.getBoundingClientRect()
+    const hovered = markAt(u.posToVal(event.clientX - rect.left, 'x'))
+    const next = hovered?.id ?? null
+    if (next !== hoveredMarkId) {
+      hoveredMarkId = next
+      chart?.redraw()
+    }
   }
 
   // Finds the beat in the retained `lastBeats` (see its declaration above)
@@ -1160,9 +1237,101 @@
         ready: (u) => {
           u.over.addEventListener('mousedown', (e) => handleDragStart(u, e))
           u.over.addEventListener('wheel', (e) => handleWheel(u, e))
+          u.over.addEventListener('mousemove', (e) => handleBadDataHover(u, e))
+          u.over.addEventListener('mouseleave', () => {
+            if (hoveredMarkId !== null) {
+              hoveredMarkId = null
+              chart?.redraw()
+            }
+          })
         },
       },
     }
+  }
+
+  // Paints one time range as a shaded band across the full plot height.
+  function paintRegion(
+    u: uPlot,
+    start: number,
+    stop: number,
+    fill: string,
+    stroke: string,
+  ): void {
+    const { ctx } = u
+    const left = u.valToPos(Math.min(start, stop), 'x', true)
+    const right = u.valToPos(Math.max(start, stop), 'x', true)
+    const top = u.bbox.top
+    const height = u.bbox.height
+    // Always at least a hairline wide, so a very short mark stays visible.
+    const width = Math.max(2, right - left)
+
+    ctx.fillStyle = fill
+    ctx.fillRect(left, top, width, height)
+    ctx.strokeStyle = stroke
+    ctx.lineWidth = 1
+    ctx.strokeRect(left + 0.5, top + 0.5, width - 1, height - 1)
+  }
+
+  // Draws bad-data regions onto the chart canvas itself, rather than as a
+  // separate strip below it. This is what makes them stay aligned with the
+  // trace at any pan/zoom — the previous proportional-strip rendering was
+  // positioned against the WHOLE file, so once zoomed in it no longer told
+  // the technician anything about the range actually on screen.
+  //
+  // Painted in `drawClear` (after the canvas is cleared, before the series
+  // are drawn) so the waveform and markers stay legible on top of the
+  // shading rather than being covered by it.
+  function badDataPlugin(): uPlot.Plugin {
+    return {
+      hooks: {
+        drawClear: (u) => {
+          const { ctx } = u
+          // Shading is decoration: if the canvas context can't paint it for
+          // any reason, that must not take the surrounding interaction
+          // (drag-to-mark, click-to-remove) down with it.
+          try {
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height)
+          ctx.clip()
+
+          const markFill = cssVar('--color-bad-data-fill', 'rgba(185, 28, 28, 0.13)')
+          const markStroke = cssVar('--color-bad-data-stroke', 'rgba(185, 28, 28, 0.5)')
+          for (const mark of badDataMarks) {
+            const isHovered = mark.id === hoveredMarkId
+            paintRegion(
+              u,
+              mark.start,
+              mark.stop,
+              isHovered ? cssVar('--color-bad-data-fill-hover', 'rgba(185, 28, 28, 0.28)') : markFill,
+              markStroke,
+            )
+          }
+
+          // The range currently being dragged out, so the technician can see
+          // exactly what they're about to mark before releasing.
+          if (dragSelection) {
+            paintRegion(
+              u,
+              dragSelection.start,
+              dragSelection.stop,
+              cssVar('--color-bad-data-fill-hover', 'rgba(185, 28, 28, 0.28)'),
+              cssVar('--color-danger', '#b91c1c'),
+            )
+          }
+
+          ctx.restore()
+          } catch {
+            // ignore — see above
+          }
+        },
+      },
+    }
+  }
+
+  /** The bad-data mark covering `xVal`, if any — for click-to-remove. */
+  function markAt(xVal: number): BadDataMark | undefined {
+    return badDataMarks.find((mark) => xVal >= mark.start && xVal <= mark.stop)
   }
 
   onMount(() => {
@@ -1185,7 +1354,7 @@
       chart = new uPlot(
         {
           width,
-          height: expanded ? EXPANDED_HEIGHT : HEIGHT,
+          height: graphHeight(),
           // `y.auto: true` is uPlot's own default (implicit until now) —
           // stated explicitly since `handleResetView` toggles it back on
           // after a manual Y-zoom, and Y-zoom (`zoomYBy`/Shift+wheel) turns
@@ -1226,7 +1395,7 @@
             selectionHighlightSeries(),
             rejectedOverlaySeries(),
           ],
-          plugins: [panZoomPlugin()],
+          plugins: [panZoomPlugin(), badDataPlugin()],
         },
         toChartData(merged),
         containerEl,
@@ -1264,7 +1433,7 @@
     previousWidth = width
 
     if (!chart) return
-    chart.setSize({ width, height: expanded ? EXPANDED_HEIGHT : HEIGHT })
+    chart.setSize({ width, height: graphHeight() })
     const { min, max } = chart.scales.x
     if (min != null && max != null) scheduleRefetch(min, max)
   })
@@ -1274,9 +1443,12 @@
   // run, before `expanded` could plausibly have changed from its initial
   // `false`) rather than needing to coordinate with the async onMount setup.
   $effect(() => {
-    const isExpanded = expanded
+    // Re-read every input to graphHeight() so this re-runs for any of them.
+    expanded
+    fullscreen
+    viewportHeight
     if (!chart) return
-    chart.setSize({ width: containerWidth, height: isExpanded ? EXPANDED_HEIGHT : HEIGHT })
+    chart.setSize({ width: containerWidth, height: graphHeight() })
   })
 
   // Colors above are resolved via zero-arg functions specifically so this
@@ -1323,6 +1495,77 @@
     hiddenCategories
     reviewFilter
     applyFilters()
+  })
+
+  // Escape is the universal "get me out of this mode" key: it leaves
+  // bad-data marking first (the more modal of the two, since it changes
+  // what a drag does), then focus mode. The resize listener keeps the
+  // focus-mode chart sized to the window.
+  onMount(() => {
+    function handleKeydown(event: KeyboardEvent) {
+      // Escape works even while typing — it's the universal "get me out".
+      if (event.key === 'Escape') {
+        if (badDataMode) {
+          badDataMode = false
+          hoveredMarkId = null
+        } else if (fullscreen) {
+          fullscreen = false
+          toolsCollapsed = false
+        }
+        return
+      }
+
+      if (shouldIgnoreShortcut(event)) return
+
+      // Walking hundreds of flagged beats is the core review loop, so it
+      // shouldn't require moving the mouse between the graph and the panel
+      // for every single one.
+      switch (event.key) {
+        case 'n':
+        case 'N':
+        case 'ArrowRight':
+          if (beatsOfInterest.length === 0) return
+          event.preventDefault()
+          handleNextBeatOfInterest()
+          break
+        case 'p':
+        case 'P':
+        case 'ArrowLeft':
+          if (beatsOfInterest.length === 0) return
+          event.preventDefault()
+          handlePrevBeatOfInterest()
+          break
+        case 'f':
+        case 'F':
+          event.preventDefault()
+          toggleFullscreen()
+          break
+        case 'b':
+        case 'B':
+          event.preventDefault()
+          toggleBadDataMode()
+          break
+        default:
+          break
+      }
+    }
+    function handleResize() {
+      viewportHeight = window.innerHeight
+    }
+    document.addEventListener('keydown', handleKeydown)
+    window.addEventListener('resize', handleResize)
+    return () => {
+      document.removeEventListener('keydown', handleKeydown)
+      window.removeEventListener('resize', handleResize)
+      if (badDataToastTimer !== undefined) clearTimeout(badDataToastTimer)
+    }
+  })
+
+  // The bad-data plugin reads `badDataMarks` at draw time, so adding or
+  // removing one has to ask for a repaint explicitly.
+  $effect(() => {
+    badDataMarks
+    chart?.redraw()
   })
 
   // Hiding/showing rejected beats changes the DATA (see
@@ -1407,7 +1650,26 @@
   }
 </script>
 
-<div class="ecg-graph" data-testid="ecg-graph" data-channel={channel}>
+<div class="ecg-graph" class:fullscreen data-testid="ecg-graph" data-channel={channel}>
+  <!-- In focus mode this whole block detaches into a floating panel over
+       the trace, and can be collapsed to a single button so nothing covers
+       the signal. -->
+  <div class="graph-tools" class:floating={fullscreen} class:collapsed={fullscreen && toolsCollapsed}>
+    {#if fullscreen}
+      <button
+        type="button"
+        class="btn btn-sm tools-handle"
+        data-testid="toggle-graph-tools-button"
+        aria-expanded={!toolsCollapsed}
+        title={toolsCollapsed ? 'Show tools' : 'Hide tools'}
+        onclick={toggleTools}
+      >
+        <Icon name={toolsCollapsed ? 'chevron-down' : 'x'} size={14} />
+        {toolsCollapsed ? 'Tools' : 'Hide'}
+      </button>
+    {/if}
+
+    {#if !(fullscreen && toolsCollapsed)}
   <!-- Beat-of-interest navigation: the primary review loop. The graph opens
        focused on the first flagged beat rather than the whole file, and
        these controls walk the technician through the rest. -->
@@ -1427,7 +1689,7 @@
         type="button"
         class="btn btn-sm"
         data-testid="prev-beat-of-interest-button"
-        title="Previous beat of interest"
+        title="Previous beat of interest (P or Left arrow)"
         disabled={beatsOfInterest.length === 0}
         onclick={handlePrevBeatOfInterest}
       >
@@ -1446,7 +1708,7 @@
         type="button"
         class="btn btn-sm"
         data-testid="next-beat-of-interest-button"
-        title="Next beat of interest"
+        title="Next beat of interest (N or Right arrow)"
         disabled={beatsOfInterest.length === 0}
         onclick={handleNextBeatOfInterest}
       >
@@ -1462,6 +1724,11 @@
       >
         <Icon name="skip-forward" size={14} />
       </button>
+      {#if beatsOfInterest.length > 0}
+        <span class="nav-hint" data-testid="beat-nav-hint">
+          <kbd>N</kbd>/<kbd>P</kbd> to step · <kbd>C</kbd>/<kbd>R</kbd> to judge
+        </span>
+      {/if}
     </div>
 
     <div class="beat-nav-controls">
@@ -1563,6 +1830,7 @@
       class:btn-active={badDataMode}
       data-testid="bad-data-mode-button"
       aria-pressed={badDataMode}
+      title={badDataMode ? 'Leave bad-data marking (Esc)' : 'Mark unusable stretches of trace (B)'}
       onclick={toggleBadDataMode}
     >
       <Icon name="crop" size={14} />
@@ -1578,14 +1846,66 @@
     >
       <Icon name={expanded ? 'minimize' : 'maximize'} size={14} />
     </button>
+    <button
+      type="button"
+      class="btn btn-sm"
+      class:btn-active={fullscreen}
+      data-testid="fullscreen-graph-button"
+      title={fullscreen ? 'Leave focus mode (Esc)' : 'Focus mode — fill the window (F)'}
+      aria-pressed={fullscreen}
+      onclick={toggleFullscreen}
+    >
+      <Icon name={fullscreen ? 'minimize' : 'maximize'} size={14} />
+      {fullscreen ? 'Exit focus' : 'Focus'}
+    </button>
+  </div>
+    {/if}
   </div>
 
-  {#if error}
-    <div class="banner banner-error" data-testid="ecg-graph-error">{error}</div>
+  {#if badDataMode}
+    <div class="mode-banner" data-testid="bad-data-mode-banner">
+      <Icon name="crop" size={14} />
+      <span><strong>Marking bad data.</strong> Drag across the trace to mark a range; click a marked range to remove it.</span>
+      <button type="button" class="btn btn-sm" data-testid="exit-bad-data-mode-button" onclick={toggleBadDataMode}>
+        Done <kbd>Esc</kbd>
+      </button>
+    </div>
   {/if}
 
-  <div class="ecg-graph-container" data-testid="ecg-graph-container" bind:this={containerEl} bind:clientWidth={containerWidth}></div>
+  {#if error}
+    <div class="banner banner-error" data-testid="ecg-graph-error">
+      <Icon name="alert-circle" size={14} />
+      <span>{error}</span>
+      <button type="button" class="btn btn-sm" data-testid="dismiss-graph-error" onclick={() => (error = null)}>
+        Dismiss
+      </button>
+    </div>
+  {/if}
 
+  <div
+    class="ecg-graph-container"
+    class:marking={badDataMode}
+    class:over-mark={hoveredMarkId !== null}
+    data-testid="ecg-graph-container"
+    bind:this={containerEl}
+    bind:clientWidth={containerWidth}
+  ></div>
+
+  {#if badDataToast}
+    <div class="graph-toast" data-testid="bad-data-toast" role="status">
+      <Icon name="check-circle" size={14} />
+      {badDataToast}
+    </div>
+  {/if}
+
+  <!-- Whole-file overview of the marks: the shading on the chart itself
+       (see badDataPlugin) covers the visible range, this covers everything
+       off-screen too. -->
+  <div class="marks-strip-row">
+    <span class="marks-strip-label">
+      Bad data
+      {#if badDataMarks.length > 0}<span class="marks-count">{badDataMarks.length}</span>{/if}
+    </span>
   <div data-testid="bad-data-marks-bar" class="bad-data-marks-bar">
     {#each badDataMarks as mark (mark.id)}
       <button
@@ -1598,6 +1918,10 @@
         aria-label={`Bad data mark from ${mark.start.toFixed(2)} to ${mark.stop.toFixed(2)}, click to remove`}
       ></button>
     {/each}
+    {#if badDataMarks.length === 0}
+      <span class="marks-strip-empty">No bad-data ranges marked</span>
+    {/if}
+  </div>
   </div>
 
   <!-- Legend doubles as the marker filter: each entry toggles that
@@ -1693,7 +2017,129 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    position: relative;
   }
+
+  .graph-tools {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  /* Focus mode: the graph owns the window, the controls float over it. */
+  .ecg-graph.fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    margin: 0;
+    padding: var(--space-3);
+    background: var(--color-surface);
+    overflow: auto;
+  }
+
+  .graph-tools.floating {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    z-index: 2;
+    max-width: min(760px, calc(100% - var(--space-6)));
+    padding: var(--space-2);
+    border: 1px solid var(--color-border, #d3dae1);
+    border-radius: var(--radius-md, 8px);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-lg);
+    align-items: flex-end;
+  }
+
+  .graph-tools.collapsed {
+    padding: var(--space-1);
+  }
+
+  .tools-handle {
+    align-self: flex-end;
+  }
+
+  .mode-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--color-danger, #b91c1c);
+    background: var(--color-bad-data-fill, rgba(185, 28, 28, 0.13));
+    font-size: var(--font-size-sm);
+  }
+
+  .mode-banner span {
+    flex: 1;
+  }
+
+  .mode-banner kbd {
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    opacity: 0.8;
+  }
+
+  .graph-toast {
+    position: absolute;
+    left: 50%;
+    bottom: var(--space-6);
+    transform: translateX(-50%);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: 999px;
+    background: var(--color-text, #17222e);
+    color: var(--color-surface, #fff);
+    font-size: var(--font-size-sm);
+    box-shadow: var(--shadow-lg);
+    pointer-events: none;
+  }
+
+  .ecg-graph-container.marking {
+    cursor: crosshair;
+  }
+
+  .ecg-graph-container.over-mark {
+    cursor: pointer;
+  }
+
+  .marks-strip-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .marks-strip-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted, #5b6b7c);
+  }
+
+  .marks-count {
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--color-danger, #b91c1c);
+    color: #fff;
+    font-size: 0.65rem;
+  }
+
+  .marks-strip-empty {
+    padding-left: var(--space-2);
+    font-size: 0.7rem;
+    color: var(--color-text-muted, #5b6b7c);
+  }
+
 
   .ecg-graph-toolbar {
     display: flex;
@@ -1718,6 +2164,20 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
+  }
+
+  .nav-hint {
+    font-size: 0.7rem;
+    color: var(--color-text-muted, #5b6b7c);
+    white-space: nowrap;
+  }
+
+  .nav-hint kbd {
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 0.65rem;
   }
 
   .beat-nav-counter {

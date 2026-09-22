@@ -37,6 +37,12 @@
   --color-waveform: #15803d;
   --color-graph-grid: rgba(211, 218, 225, 0.6);
 
+  /* Bad-data ranges, shaded straight onto the chart canvas. Kept
+     translucent so the trace underneath stays readable. */
+  --color-bad-data-fill: rgba(185, 28, 28, 0.13);
+  --color-bad-data-fill-hover: rgba(185, 28, 28, 0.28);
+  --color-bad-data-stroke: rgba(185, 28, 28, 0.5);
+
   /* Color: arrhythmia categories (graph markers + legend + BeatCategoryPanel
      chips — see lib/categories.ts). Distinct hues; shape is the primary
      colorblind/bw-safe distinguisher (see CATEGORY_SHAPE), color is a
@@ -106,6 +112,10 @@
 
     --color-waveform: #4ade80;
     --color-graph-grid: rgba(51, 65, 85, 0.7);
+
+    --color-bad-data-fill: rgba(248, 113, 113, 0.16);
+    --color-bad-data-fill-hover: rgba(248, 113, 113, 0.32);
+    --color-bad-data-stroke: rgba(248, 113, 113, 0.6);
 
     --color-cat-bradycardia: #60a5fa;
     --color-cat-tachycardia: #f87171;
@@ -182,6 +192,10 @@
 
   --color-waveform: #262626;
   --color-graph-grid: rgba(0, 0, 0, 0.25);
+
+  --color-bad-data-fill: rgba(0, 0, 0, 0.12);
+  --color-bad-data-fill-hover: rgba(0, 0, 0, 0.26);
+  --color-bad-data-stroke: rgba(0, 0, 0, 0.65);
 
   /* Grayscale lightness steps — shape (see CATEGORY_SHAPE in
      lib/categories.ts) is the real distinguisher here, these just add a
