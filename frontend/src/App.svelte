@@ -3,6 +3,7 @@
   import ReviewWorkspace from './components/review/ReviewWorkspace.svelte'
   import SettingsDialog from './components/settings/SettingsDialog.svelte'
   import Sidebar from './components/shell/Sidebar.svelte'
+  import AboutDialog from './components/shell/AboutDialog.svelte'
   import Icon from './components/shared/Icon.svelte'
   import { themeState } from './lib/stores/theme.svelte'
   import { autoOpenRequest, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
@@ -26,6 +27,7 @@
   let view: 'import' | 'review' = $state('import')
   let selectedFile: ReviewSelection | null = $state(null)
   let settingsOpen: boolean = $state(false)
+  let aboutOpen: boolean = $state(false)
   let sidebarCollapsed: boolean = $state(false)
   let sidebarWidth: number = $state(loadSidebarWidth())
 
@@ -35,6 +37,14 @@
   }
 
   function handleBack() {
+    view = 'import'
+  }
+
+  // Clearing the file list while a file is open would leave the review
+  // workspace showing a file that is no longer listed anywhere, so fall back
+  // to the welcome screen.
+  function handleFilesCleared() {
+    selectedFile = null
     view = 'import'
   }
 
@@ -116,6 +126,17 @@
     <button
       type="button"
       class="icon-btn"
+      data-testid="about-button"
+      onclick={() => (aboutOpen = true)}
+      aria-label="About"
+      title="About"
+    >
+      <Icon name="info" />
+    </button>
+
+    <button
+      type="button"
+      class="icon-btn"
       data-testid="settings-button"
       onclick={() => (settingsOpen = true)}
       aria-label="Settings"
@@ -129,6 +150,7 @@
     activePath={selectedFile?.path ?? null}
     onReview={handleReview}
     onResize={handleSidebarResize}
+    onFilesCleared={handleFilesCleared}
   />
 
   <main class="main-content">
@@ -159,5 +181,9 @@
 
   {#if settingsOpen}
     <SettingsDialog onClose={() => (settingsOpen = false)} />
+  {/if}
+
+  {#if aboutOpen}
+    <AboutDialog onClose={() => (aboutOpen = false)} />
   {/if}
 </div>

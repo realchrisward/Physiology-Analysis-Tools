@@ -30,7 +30,14 @@ function settingsPayload(overrides: { beat?: object; arrhythmia?: object } = {})
       tachycardia_absolute_hr: 850,
       skipped_beat_multiple_rr: 1.8,
       premature_beat_multiple_rr: 0.8,
-      window_size: 100,
+      beat_window: 1,
+      beat_window_bias: 0,
+      beat_length: 128,
+      kde_bandwidth: 0.05,
+      min_rr: 0.1,
+      max_rr: 0.1667,
+      eps_auto: true,
+      eps_percentile: 90,
       eps: 0.3,
       min_samples: 3,
       ...overrides.arrhythmia,
@@ -72,7 +79,12 @@ describe('SettingsDialog', () => {
     expect((screen.getByTestId('beat-perc-thresh-input') as HTMLInputElement).value).toBe('97')
     expect((screen.getByTestId('arrhythmia-bradycardia-absolute-hr-input') as HTMLInputElement).value).toBe('300')
     expect((screen.getByTestId('arrhythmia-tachycardia-absolute-hr-input') as HTMLInputElement).value).toBe('850')
-    expect((screen.getByTestId('arrhythmia-window-size-input') as HTMLInputElement).value).toBe('100')
+    expect((screen.getByTestId('arrhythmia-beat-length-input') as HTMLInputElement).value).toBe('128')
+    expect((screen.getByTestId('arrhythmia-max-rr-input') as HTMLInputElement).value).toBe('0.1667')
+    // eps_auto is on, so the adaptive percentile field shows in place of the
+    // fixed cluster-radius one.
+    expect((screen.getByTestId('arrhythmia-eps-percentile-input') as HTMLInputElement).value).toBe('90')
+    expect(screen.queryByTestId('arrhythmia-eps-input')).not.toBeInTheDocument()
   })
 
   it('calls putSettings with the full edited payload on save', async () => {
@@ -215,5 +227,34 @@ describe('SettingsDialog', () => {
 
     await fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('SettingsDialog restore defaults', () => {
+  it('fills the form from the backend defaults without saving them', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ status: 'ok', settings: settingsPayload(), error: null }),
+        })
+      }
+      if (url.includes('/settings/defaults')) {
+        return Promise.resolve(getSettingsOkResponse({ arrhythmia: { bradycardia_absolute_hr: 300 } }))
+      }
+      return Promise.resolve(getSettingsOkResponse({ arrhythmia: { bradycardia_absolute_hr: 111 } }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(SettingsDialog, { props: { onClose: vi.fn() } })
+
+    const brady = () => screen.getByTestId('arrhythmia-bradycardia-absolute-hr-input') as HTMLInputElement
+    await waitFor(() => expect(brady().value).toBe('111'))
+
+    await fireEvent.click(screen.getByTestId('restore-defaults-button'))
+
+    await waitFor(() => expect(brady().value).toBe('300'))
+    // Restoring only repopulates the form — nothing is applied until Save.
+    expect(fetchMock.mock.calls.some((call) => (call[1] as RequestInit | undefined)?.method === 'PUT')).toBe(false)
   })
 })

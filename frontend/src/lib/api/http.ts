@@ -2,7 +2,7 @@ import { getBackendUrl } from '../api'
 
 type HttpMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
-function buildQuery(params?: Record<string, string | number>): string {
+function buildQuery(params?: Record<string, string | number | boolean>): string {
   if (!params) return ''
   const entries = Object.entries(params)
   if (entries.length === 0) return ''
@@ -21,7 +21,10 @@ function errorResult<T>(message: string): T {
  * non-2xx HTTP response is converted into `{status: 'error', error: <message>}`,
  * which every backend response type already supports as a shape.
  */
-export async function apiGet<T>(path: string, query?: Record<string, string | number>): Promise<T> {
+export async function apiGet<T>(
+  path: string,
+  query?: Record<string, string | number | boolean>,
+): Promise<T> {
   const backendUrl = await getBackendUrl()
   const url = `${backendUrl}${path}${buildQuery(query)}`
 

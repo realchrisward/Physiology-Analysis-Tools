@@ -61,7 +61,14 @@ class ArrhythmiaSettingsModel(BaseModel):
     tachycardia_absolute_hr: int
     skipped_beat_multiple_rr: float
     premature_beat_multiple_rr: float
-    window_size: int
+    beat_window: float
+    beat_window_bias: float
+    beat_length: int
+    kde_bandwidth: float
+    min_rr: float
+    max_rr: float
+    eps_auto: bool
+    eps_percentile: int
     eps: float
     min_samples: int
 
@@ -122,6 +129,18 @@ class WindowBeat(BaseModel):
 class BeatWindowResult(BaseModel):
     status: str
     beats: list[WindowBeat] = []
+    count: int = 0
+    error: str | None = None
+
+
+class BeatsOfInterestResult(BaseModel):
+    """Just the timestamps of every currently-flagged beat, in time order —
+    what the graph's beat-of-interest navigation steps through. Deliberately
+    not the full beat rows: the caller needs the whole file's worth of these
+    at once (unlike /beats/window, which is viewport-scoped)."""
+
+    status: str
+    ts: list[float] = []
     count: int = 0
     error: str | None = None
 

@@ -63,7 +63,14 @@ export interface ArrhythmiaSettingsModel {
   tachycardia_absolute_hr: number
   skipped_beat_multiple_rr: number
   premature_beat_multiple_rr: number
-  window_size: number
+  beat_window: number
+  beat_window_bias: number
+  beat_length: number
+  kde_bandwidth: number
+  min_rr: number
+  max_rr: number
+  eps_auto: boolean
+  eps_percentile: number
   eps: number
   min_samples: number
 }
@@ -127,6 +134,13 @@ export interface WindowBeat {
 export interface BeatWindowResult {
   status: string
   beats: WindowBeat[]
+  count: number
+  error: string | null
+}
+
+export interface BeatsOfInterestResult {
+  status: string
+  ts: number[]
   count: number
   error: string | null
 }

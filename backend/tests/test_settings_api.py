@@ -14,7 +14,24 @@ def test_get_returns_real_current_defaults():
     assert result["beat"]["perc_thresh"] == 97
     assert result["arrhythmia"]["bradycardia_absolute_hr"] == 300
     assert result["arrhythmia"]["tachycardia_absolute_hr"] == 850
-    assert result["arrhythmia"]["window_size"] == 100
+    assert result["arrhythmia"]["min_samples"] == 30
+    assert result["arrhythmia"]["eps_auto"] is True
+    assert result["arrhythmia"]["beat_length"] == 128
+    assert result["arrhythmia"]["max_rr"] == 0.1667
+
+
+def test_defaults_endpoint_returns_factory_values_without_changing_live_settings():
+    client = TestClient(create_app())
+
+    current = client.get("/settings").json()
+    current["arrhythmia"]["bradycardia_absolute_hr"] = 250
+    assert client.put("/settings", json=current).json()["status"] == "ok"
+
+    defaults = client.get("/settings/defaults").json()
+
+    assert defaults["arrhythmia"]["bradycardia_absolute_hr"] == 300
+    # Asking for the defaults must not itself revert anything.
+    assert client.get("/settings").json()["arrhythmia"]["bradycardia_absolute_hr"] == 250
 
 
 def test_put_applies_a_valid_change():

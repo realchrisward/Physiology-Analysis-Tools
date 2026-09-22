@@ -1031,3 +1031,284 @@ describe('toChartData', () => {
     expect(data[data.length - 1]).toBe(merged.rejectedY)
   })
 })
+
+describe('EcgGraph beat-of-interest navigation', () => {
+  const BEATS_OF_INTEREST = [2, 5, 8]
+
+  async function renderWithBeatsOfInterest(
+    fetchMock: ReturnType<typeof vi.fn>,
+    beatsOfInterest: number[] = BEATS_OF_INTEREST,
+  ) {
+    const result = withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest },
+      }),
+    )
+    // Mount fetches the channel window and beats; the auto-focus onto the
+    // first beat of interest then fetches its narrowed range.
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    return result
+  }
+
+  it('shows the total count in the legend', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await renderWithBeatsOfInterest(fetchMock)
+
+    expect(screen.getByTestId('legend-beats-of-interest-count')).toHaveTextContent('3 beats of interest')
+  })
+
+  it('opens focused on the first beat of interest rather than the whole recording', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await renderWithBeatsOfInterest(fetchMock)
+
+    // The mount fetch covers the full extent; the auto-focus fetch that
+    // follows must be a narrow window centred on the first flagged beat
+    // (ts=2), not the whole file again.
+    const focusCall = fetchMock.mock.calls
+      .map((call, i) => fetchedUrl(fetchMock, i))
+      .filter((url) => url.pathname === '/channels/window')
+      .at(-1)!
+    const start = Number(focusCall.searchParams.get('start'))
+    const end = Number(focusCall.searchParams.get('end'))
+
+    expect(start).toBeLessThan(2)
+    expect(end).toBeGreaterThan(2)
+    expect((start + end) / 2).toBeCloseTo(2, 5)
+    expect(end - start).toBeLessThan(10)
+
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+  })
+
+  it('steps forward, backward, and to either end of the list', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await renderWithBeatsOfInterest(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('next-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 2 of 3')
+
+    await fireEvent.click(screen.getByTestId('prev-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+
+    await fireEvent.click(screen.getByTestId('last-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 3 of 3')
+
+    await fireEvent.click(screen.getByTestId('first-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+  })
+
+  it('wraps around at both ends so a review pass never dead-ends', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await renderWithBeatsOfInterest(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('last-beat-of-interest-button'))
+    await fireEvent.click(screen.getByTestId('next-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+
+    await fireEvent.click(screen.getByTestId('prev-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 3 of 3')
+  })
+
+  it('selects the beat it jumps to, so the review panel acts on it', async () => {
+    const onBeatSelect = vi.fn()
+    const fetchMock = routedFetch({
+      beats: () =>
+        beatsWindowResponse({
+          beats: [beat({ ts: 2, r_amplitude: 5, any_arrhythmia: true, prem_beat: true })],
+          count: 1,
+        }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2], onBeatSelect },
+      }),
+    )
+
+    await waitFor(() => expect(onBeatSelect).toHaveBeenCalled())
+    expect(onBeatSelect.mock.calls[0][0]).toMatchObject({ ts: 2, prem_beat: true })
+  })
+
+  it('disables the controls and says so when nothing is flagged', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [] } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('No beats of interest')
+    expect(screen.getByTestId('next-beat-of-interest-button')).toBeDisabled()
+    expect(screen.getByTestId('first-beat-of-interest-button')).toBeDisabled()
+    expect(screen.getByTestId('legend-beats-of-interest-count')).toHaveTextContent('0 beats of interest')
+  })
+
+  it('does not yank the view back when the flagged list changes mid-review', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { rerender } = await renderWithBeatsOfInterest(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('last-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 3 of 3')
+
+    // Let that jump's own fetches finish before snapshotting, so the count
+    // below measures only what the rerender causes.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const callsBefore = fetchMock.mock.calls.length
+
+    // A reject removes a beat from the list — the auto-focus must not fire
+    // again and drag the technician back to the top of the recording.
+    await rerender({ path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5] })
+
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  })
+})
+
+describe('EcgGraph time navigation', () => {
+  async function mountGraph(fetchMock: ReturnType<typeof vi.fn>) {
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  }
+
+  function lastChannelWindowRange(fetchMock: ReturnType<typeof vi.fn>) {
+    const url = fetchMock.mock.calls
+      .map((_call, i) => fetchedUrl(fetchMock, i))
+      .filter((u) => u.pathname === '/channels/window')
+      .at(-1)!
+    return { start: Number(url.searchParams.get('start')), end: Number(url.searchParams.get('end')) }
+  }
+
+  it('pages forward and back by roughly one window at the current zoom', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountGraph(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('next-window-button'))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(2))
+    const forward = lastChannelWindowRange(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('prev-window-button'))
+    await waitFor(() => {
+      const back = lastChannelWindowRange(fetchMock)
+      // Paging back must move the window the other way, not repeat the
+      // forward jump.
+      expect(back.start).toBeLessThan(forward.start)
+    })
+  })
+
+  it('jumps to the start and end of the recording', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    await mountGraph(fetchMock)
+
+    // Zoom in first: while the whole recording is already on screen, a jump
+    // to either end is legitimately the same view, so there'd be nothing to
+    // observe. (The zoom itself needs no fetch — the mount already buffered
+    // the whole file — so this waits on the jump's fetch, not the zoom's.)
+    await fireEvent.click(screen.getByTestId('zoom-in-button'))
+
+    const beforeEnd = fetchMock.mock.calls.length
+    await fireEvent.click(screen.getByTestId('jump-to-end-button'))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(beforeEnd))
+    const atEnd = lastChannelWindowRange(fetchMock)
+
+    const beforeStart = fetchMock.mock.calls.length
+    await fireEvent.click(screen.getByTestId('jump-to-start-button'))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(beforeStart))
+    const atStart = lastChannelWindowRange(fetchMock)
+
+    // The end jump reaches the tail of the recording, the start jump the
+    // head — and they are genuinely different views.
+    expect(atEnd.end).toBeGreaterThan(atStart.end)
+    expect(atStart.start).toBeLessThan(atEnd.start)
+  })
+})
+
+describe('EcgGraph raw/filtered trace toggle', () => {
+  it('re-fetches the visible range as filtered, then back to raw', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchedUrl(fetchMock, 0).searchParams.get('filtered')).toBe('false')
+
+    await fireEvent.click(screen.getByTestId('toggle-filtered-signal-button'))
+
+    await waitFor(() => {
+      const channelCalls = fetchMock.mock.calls
+        .map((_call, i) => fetchedUrl(fetchMock, i))
+        .filter((u) => u.pathname === '/channels/window')
+      expect(channelCalls.at(-1)!.searchParams.get('filtered')).toBe('true')
+    })
+    expect(screen.getByTestId('toggle-filtered-signal-button')).toHaveTextContent('Filtered')
+
+    await fireEvent.click(screen.getByTestId('toggle-filtered-signal-button'))
+    await waitFor(() => {
+      const channelCalls = fetchMock.mock.calls
+        .map((_call, i) => fetchedUrl(fetchMock, i))
+        .filter((u) => u.pathname === '/channels/window')
+      expect(channelCalls.at(-1)!.searchParams.get('filtered')).toBe('false')
+    })
+    expect(screen.getByTestId('toggle-filtered-signal-button')).toHaveTextContent('Raw')
+  })
+})
+
+describe('EcgGraph hide-rejected filter', () => {
+  it('drops rejected beats from the merged data without a re-fetch', async () => {
+    const fetchMock = routedFetch({
+      beats: () =>
+        beatsWindowResponse({
+          beats: [
+            beat({ ts: 2, r_amplitude: 5, review_state: 'rejected' }),
+            beat({ ts: 5, r_amplitude: 6, review_state: 'unreviewed' }),
+          ],
+          count: 2,
+        }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const callsBefore = fetchMock.mock.calls.length
+    await fireEvent.click(screen.getByTestId('hide-rejected-toggle'))
+
+    expect(screen.getByTestId('hide-rejected-toggle')).toHaveTextContent('Rejected hidden')
+    // Purely a local re-merge of data already held — no network round trip.
+    expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('excludes rejected beats from every marker series when on', () => {
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, review_state: 'rejected' }),
+      beat({ ts: 2, r_amplitude: 6, review_state: 'unreviewed' }),
+    ]
+
+    const shown = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, null, false)
+    const hidden = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, null, true)
+
+    expect(shown.rejectedY).toEqual([null, 5, null])
+    expect(hidden.rejectedY).toEqual([null, null, null])
+    // The unreviewed beat is untouched either way.
+    expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, 6])
+  })
+})

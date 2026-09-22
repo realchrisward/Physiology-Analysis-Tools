@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
+  import { detectArrhythmias } from '../../lib/api/arrhythmia'
+  import { getBeatsOfInterest } from '../../lib/api/windowing'
   import { generateReport, getFileState, persistBeats, putChannel } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
@@ -206,6 +208,97 @@
   function refreshGraphBeats() {
     beatsRefreshToken += 1
   }
+
+  // Every flagged beat's timestamp for the whole file — what EcgGraph's
+  // beat-of-interest navigation steps through, and the count its legend
+  // shows. Refreshed from the backend (rather than derived from the graph's
+  // own viewport-scoped beat fetch) after anything that can change which
+  // beats are flagged: detection running, an arrhythmia re-run, or a
+  // confirm/reject/reassign.
+  let beatsOfInterest: number[] = $state([])
+  // Guards the automatic on-load arrhythmia run so it happens once per
+  // channel, not on every reactive re-run.
+  let autoArrhythmiaChannel: string | null = null
+  let autoArrhythmiaRunning: boolean = $state(false)
+  // The automatic run is a multi-step chain (check → detect → persist →
+  // refresh) that can outlive the component if the technician navigates away
+  // mid-run. Checked at every await boundary so an unmounted workspace stops
+  // issuing requests and stops writing to state instead of running to
+  // completion against a screen nobody is looking at.
+  let destroyed = false
+  onMount(() => () => {
+    destroyed = true
+  })
+
+  // Resolves to whether the backend actually has beats for this file. An
+  // error means beat detection hasn't run yet, which is NOT the same as
+  // "has beats, none flagged" — only the latter is worth auto-running
+  // arrhythmia detection for.
+  async function refreshBeatsOfInterest(): Promise<'has-beats' | 'no-beats'> {
+    const result = await getBeatsOfInterest(path)
+    if (destroyed) return 'no-beats'
+    if (result.status !== 'ok' || result.error) {
+      beatsOfInterest = []
+      return 'no-beats'
+    }
+    beatsOfInterest = result.ts ?? []
+    return 'has-beats'
+  }
+
+  // Runs arrhythmia detection automatically once a channel's beats are
+  // ready, so the graph can open focused on the first beat of interest
+  // instead of on the whole recording. The technician can still re-run any
+  // method explicitly from ArrhythmiaControls afterwards.
+  //
+  // Tries "both" first (heuristic rules plus the shape-based clustering, the
+  // fullest picture), and falls back to heuristic-only if that fails: the
+  // unsupervised method needs enough usable beat epochs to cluster, and a
+  // short or sparse recording legitimately can't provide them. On the manual
+  // buttons that failure is worth surfacing verbatim; on an automatic run it
+  // should quietly degrade to the detection that CAN run rather than leaving
+  // the technician with nothing.
+  async function autoRunArrhythmiaDetection(channel: string) {
+    autoArrhythmiaRunning = true
+    try {
+      let result = await detectArrhythmias(path, channel, 'both')
+      if (destroyed) return
+      if (result.status !== 'ok' || result.error) {
+        result = await detectArrhythmias(path, channel, 'heuristic')
+        if (destroyed) return
+      }
+      // A channel switch while this was in flight makes the result stale —
+      // same channel-identity guard every other async operation here uses.
+      if (channel !== activeChannel) return
+      if (result.status === 'ok' && !result.error) {
+        await persistChannelData(channel)
+        if (destroyed) return
+        refreshGraphBeats()
+        await refreshBeatsOfInterest()
+      }
+    } finally {
+      if (!destroyed && channel === activeChannel) autoArrhythmiaRunning = false
+    }
+  }
+
+  // Drives the automatic run above. Waits for reopen-hydration to settle
+  // (same gate as <EcgGraph>'s own mount) so it can't race the persisted
+  // state check, and skips a channel whose beats are ALREADY flagged — a
+  // reopened session has its arrhythmia results in SQLite and re-running
+  // would be wasted work over data the backend already has.
+  $effect(() => {
+    if (!hydrationChecked) return
+    const channel = activeChannel
+    if (!channel || autoArrhythmiaChannel === channel) return
+    autoArrhythmiaChannel = channel
+
+    void (async () => {
+      const state = await refreshBeatsOfInterest()
+      if (destroyed || channel !== activeChannel) return
+      if (state === 'has-beats' && beatsOfInterest.length === 0) {
+        await autoRunArrhythmiaDetection(channel)
+      }
+    })()
+  })
 
   // The same shared registry row Sidebar renders (see fileRegistry.svelte.ts)
   // — read directly here rather than threaded down as a prop, matching the
@@ -414,6 +507,10 @@
     // path.
     if (result.status === 'ok' && !result.error) {
       refreshGraphBeats()
+      // Rejecting a beat clears its flags, so it drops out of the
+      // beat-of-interest navigation; confirming or reassigning can change
+      // the set too. Re-read rather than trying to patch the list locally.
+      void refreshBeatsOfInterest()
     }
   }
 
@@ -441,6 +538,7 @@
   // applied on this channel.
   async function handleArrhythmiaComplete() {
     refreshGraphBeats()
+    await refreshBeatsOfInterest()
     await persistChannelData(activeChannel)
   }
 
@@ -600,8 +698,13 @@
       path={path}
       channel={activeChannel}
       onComplete={handleArrhythmiaComplete}
-      disabled={!hydrationChecked}
+      disabled={!hydrationChecked || autoArrhythmiaRunning}
     />
+    {#if autoArrhythmiaRunning}
+      <span class="text-muted" data-testid="auto-arrhythmia-running">
+        Finding beats of interest…
+      </span>
+    {/if}
   </div>
 
   <div class="review-main" class:beat-panel-collapsed={beatPanelCollapsed}>
@@ -635,6 +738,7 @@
             {beatsRefreshToken}
             {initialBadDataMarks}
             selectedBeatTs={selectedBeat?.ts ?? null}
+            {beatsOfInterest}
           />
         {/key}
       {/if}

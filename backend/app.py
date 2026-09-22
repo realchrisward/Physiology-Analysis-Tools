@@ -26,6 +26,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.arrhythmia_settings = arrhythmia_detection.Settings()
     app.state.beat_cache: dict[str, "pandas.DataFrame"] = {}
     app.state.window_cache: dict = {}
+    # Highpass-filtered copies of a channel, for the graph's raw/filtered
+    # view toggle. Keyed by (path, channel, order, cutoff) since the filter
+    # parameters come from the mutable beat settings. Filtering runs on the
+    # whole channel (not the visible slice) so the result matches what beat
+    # detection saw and has no per-window edge artefacts - worth caching.
+    app.state.filtered_signal_cache: dict = {}
     app.state.db_path = db_path if db_path is not None else db.default_db_path()
 
     app.add_middleware(

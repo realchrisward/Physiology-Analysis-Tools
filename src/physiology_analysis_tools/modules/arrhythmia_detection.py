@@ -80,8 +80,22 @@ class Settings:
         self.skipped_beat_multiple_rr = 1.5
         self.premature_beat_multiple_rr = 0.7
         # unsupervised settings
-        self.window_size = 100
-        self.eps = 0.03
+        # Epoch shaping (see ml_tools.beatepocher_kde_clipped_rr_smooth):
+        # the window around each beat is sized from the recording's own
+        # dominant RR interval, clipped to [min_rr, max_rr] seconds.
+        self.beat_window = 1
+        self.beat_window_bias = 0
+        self.beat_length = 128
+        self.kde_bandwidth = 0.05
+        self.min_rr = 0.1
+        self.max_rr = 0.1667
+        # Clustering (see ml_tools.beat_clusterer). eps_auto derives eps from
+        # each recording's own k-distance distribution; a fixed eps is an
+        # absolute distance in a per-recording PCA space and does not carry
+        # over between recordings.
+        self.eps_auto = True
+        self.eps_percentile = 90
+        self.eps = 0.5
         self.min_samples = 30
 
 

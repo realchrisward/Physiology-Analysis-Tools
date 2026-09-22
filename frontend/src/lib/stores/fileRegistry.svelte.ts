@@ -41,6 +41,19 @@ export interface ReviewSelection {
 // store has no dependency on App.svelte at all.
 export const autoOpenRequest: { value: ReviewSelection | null } = $state({ value: null })
 
+/**
+ * Empties this session's file list — the sidebar's "Clear files" action.
+ *
+ * Frontend-only by design: it clears what the technician is looking at, not
+ * anything on disk, not the backend's caches, and not any persisted review
+ * state. Re-importing a cleared file brings it back with its review history
+ * intact, exactly as reopening it in a new session would.
+ */
+export function clearFileRegistry(): void {
+  fileRegistry.length = 0
+  autoOpenRequest.value = null
+}
+
 /** Test-only: reset the registry so each test starts from a clean state. */
 export function resetForTesting(): void {
   fileRegistry.length = 0

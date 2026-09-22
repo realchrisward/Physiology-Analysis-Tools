@@ -21,6 +21,17 @@ def get_settings(request: Request) -> SettingsPayload:
     )
 
 
+@router.get("/settings/defaults", response_model=SettingsPayload)
+def get_default_settings() -> SettingsPayload:
+    """Factory defaults, without touching the live settings — the Settings
+    dialog's "Restore Defaults" fills its form from this and only applies
+    them if the technician then saves."""
+    return SettingsPayload(
+        beat=BeatSettingsModel(**heartbeat_detection.Settings().__dict__),
+        arrhythmia=ArrhythmiaSettingsModel(**arrhythmia_detection.Settings().__dict__),
+    )
+
+
 @router.put("/settings", response_model=SettingsResult)
 def put_settings(payload: SettingsPayload, request: Request) -> SettingsResult:
     if (

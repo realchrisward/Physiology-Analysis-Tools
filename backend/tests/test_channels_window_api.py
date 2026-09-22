@@ -22,6 +22,9 @@ def test_reimport_invalidates_stale_window_cache_entries(example_txt_file):
         params["start"],
         params["end"],
         params["resolution"],
+        # No filter parameters, since this is an unfiltered (raw) request —
+        # see get_channel_window's own cache-key construction.
+        None,
     )
 
     response = client.get("/channels/window", params=params)
@@ -197,3 +200,87 @@ def test_empty_range_outside_data_is_ok_with_zero_points(example_txt_file):
     assert result["point_count"] == 0
     assert result["x"] == []
     assert result["y"] == []
+
+
+def test_filtered_view_removes_baseline_offset_raw_view_keeps(real_beats_txt_file):
+    client = TestClient(create_app())
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+
+    params = {
+        "path": real_beats_txt_file,
+        "channel": "channel 1",
+        "start": 0,
+        "end": 999,
+        "resolution": 100000,
+    }
+    raw = client.get("/channels/window", params=params).json()
+    filtered = client.get(
+        "/channels/window", params={**params, "filtered": "true"}
+    ).json()
+
+    assert raw["status"] == "ok"
+    assert filtered["status"] == "ok"
+    # Same time base, same number of points - only the voltages differ.
+    assert filtered["x"] == raw["x"]
+    assert filtered["y"] != raw["y"]
+
+    # The highpass filter's whole purpose is removing slow baseline drift, so
+    # the filtered trace must sit much closer to zero than the raw one, which
+    # carries this recording's real DC offset (measured: raw -0.0574,
+    # filtered -0.00057, a ~100x reduction).
+    raw_mean = sum(raw["y"]) / len(raw["y"])
+    filtered_mean = sum(filtered["y"]) / len(filtered["y"])
+    assert abs(raw_mean) > 0.01
+    assert abs(filtered_mean) < abs(raw_mean) / 10
+
+
+def test_filtered_and_raw_windows_are_cached_separately(real_beats_txt_file):
+    app = create_app()
+    client = TestClient(app)
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+
+    params = {
+        "path": real_beats_txt_file,
+        "channel": "channel 1",
+        "start": 0,
+        "end": 1,
+        "resolution": 500,
+    }
+    raw = client.get("/channels/window", params=params).json()
+    filtered = client.get(
+        "/channels/window", params={**params, "filtered": "true"}
+    ).json()
+
+    assert len(app.state.window_cache) == 2
+    # A repeat of each must be served from cache, not recomputed differently.
+    assert client.get("/channels/window", params=params).json() == raw
+    assert (
+        client.get("/channels/window", params={**params, "filtered": "true"}).json()
+        == filtered
+    )
+
+
+def test_changing_filter_settings_does_not_serve_a_stale_filtered_window(
+    real_beats_txt_file,
+):
+    client = TestClient(create_app())
+    client.post("/files/import", json={"paths": [real_beats_txt_file]})
+
+    params = {
+        "path": real_beats_txt_file,
+        "channel": "channel 1",
+        "start": 0,
+        "end": 1,
+        "resolution": 500,
+        "filtered": "true",
+    }
+    before = client.get("/channels/window", params=params).json()
+
+    settings = client.get("/settings").json()
+    settings["beat"]["ecg_filt_cutoff"] = 40
+    assert client.put("/settings", json=settings).json()["status"] == "ok"
+
+    after = client.get("/channels/window", params=params).json()
+
+    assert after["status"] == "ok"
+    assert after["y"] != before["y"]

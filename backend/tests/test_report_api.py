@@ -61,7 +61,7 @@ def test_generate_report_writes_xlsx_with_three_sheets(tmp_path, real_beats_txt_
     assert len(settings_df) == 1
     assert settings_df.iloc[0]["heartbeat_version"] == "0.0.4"
     assert settings_df.iloc[0]["arrhythmia_version"] == "0.0.9"
-    assert settings_df.iloc[0]["ml_version"] == "0.0.1"
+    assert settings_df.iloc[0]["ml_version"] == "0.0.2"
 
 
 def test_generate_report_appends_xlsx_extension_if_missing(

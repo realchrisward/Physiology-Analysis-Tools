@@ -305,3 +305,35 @@ describe('Sidebar recent files section', () => {
     })
   })
 })
+
+describe('Sidebar clear files', () => {
+  it('empties the session file list and tells the shell to leave the review view', async () => {
+    fileRegistry.push({
+      path: '/data/57.txt',
+      filename: '57.txt',
+      status: 'detected',
+      channels: ['channel 1'],
+      defaultChannel: 'channel 1',
+      size: 100,
+      error: null,
+      beatCount: 15,
+      meanHr: 72,
+    })
+    const onFilesCleared = vi.fn()
+
+    render(Sidebar, { props: { onFilesCleared } })
+    expect(screen.getAllByTestId('file-row')).toHaveLength(1)
+
+    await fireEvent.click(screen.getByTestId('sidebar-clear-files-button'))
+
+    expect(fileRegistry).toHaveLength(0)
+    expect(screen.queryAllByTestId('file-row')).toHaveLength(0)
+    expect(onFilesCleared).toHaveBeenCalled()
+  })
+
+  it('offers nothing to clear when no files are imported', () => {
+    render(Sidebar, { props: {} })
+
+    expect(screen.queryByTestId('sidebar-clear-files-button')).not.toBeInTheDocument()
+  })
+})

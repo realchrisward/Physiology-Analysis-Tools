@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { getSettings, putSettings } from '../../lib/api/settings'
+  import { getDefaultSettings, getSettings, putSettings } from '../../lib/api/settings'
   import type { ArrhythmiaSettingsModel, BeatSettingsModel } from '../../lib/api/types'
   import Icon from '../shared/Icon.svelte'
   import { setTheme, themeState, type ThemeMode } from '../../lib/stores/theme.svelte'
@@ -49,7 +49,14 @@
     tachycardia_absolute_hr: 0,
     skipped_beat_multiple_rr: 0,
     premature_beat_multiple_rr: 0,
-    window_size: 0,
+    beat_window: 0,
+    beat_window_bias: 0,
+    beat_length: 0,
+    kde_bandwidth: 0,
+    min_rr: 0,
+    max_rr: 0,
+    eps_auto: true,
+    eps_percentile: 0,
     eps: 0,
     min_samples: 0,
   })
@@ -89,6 +96,20 @@
   // confirms that change went through; there's nothing further to review in
   // the dialog itself. A failed save (validation error from the backend)
   // stays open, inline, so the value can be corrected and retried.
+  // Fills the form with factory defaults WITHOUT applying them - the
+  // technician still has to Save, and can Cancel to walk away unchanged.
+  // Same semantics as the old PySide6 dialog's own Restore Defaults button.
+  async function handleRestoreDefaults() {
+    const result = await getDefaultSettings()
+    if ('error' in result) {
+      saveError = result.error
+      return
+    }
+    beat = { ...result.beat }
+    arrhythmia = { ...result.arrhythmia }
+    saveError = null
+  }
+
   async function handleSave() {
     saveState = 'saving'
     saveError = null
@@ -237,18 +258,74 @@
             />
           </label>
 
+          <p class="field-group-note">
+            Beat shape analysis — each beat is cut into an epoch sized from
+            this recording's own dominant RR interval, then compared by shape.
+          </p>
+
           <label class="field">
-            Window size
-            <input data-testid="arrhythmia-window-size-input" type="number" bind:value={arrhythmia.window_size} />
+            Beat window (multiples of RR)
+            <input data-testid="arrhythmia-beat-window-input" type="number" step="0.1" bind:value={arrhythmia.beat_window} />
           </label>
 
           <label class="field">
-            Eps
-            <input data-testid="arrhythmia-eps-input" type="number" bind:value={arrhythmia.eps} />
+            Window bias (-1 before beat … 1 after)
+            <input
+              data-testid="arrhythmia-beat-window-bias-input"
+              type="number"
+              step="0.1"
+              bind:value={arrhythmia.beat_window_bias}
+            />
           </label>
 
           <label class="field">
-            Minimum samples
+            Epoch length (samples)
+            <input data-testid="arrhythmia-beat-length-input" type="number" bind:value={arrhythmia.beat_length} />
+          </label>
+
+          <label class="field">
+            RR distribution smoothing
+            <input
+              data-testid="arrhythmia-kde-bandwidth-input"
+              type="number"
+              step="0.01"
+              bind:value={arrhythmia.kde_bandwidth}
+            />
+          </label>
+
+          <label class="field">
+            Shortest plausible RR (s)
+            <input data-testid="arrhythmia-min-rr-input" type="number" step="0.01" bind:value={arrhythmia.min_rr} />
+          </label>
+
+          <label class="field">
+            Longest plausible RR (s)
+            <input data-testid="arrhythmia-max-rr-input" type="number" step="0.01" bind:value={arrhythmia.max_rr} />
+          </label>
+
+          <label class="field field-inline">
+            <input data-testid="arrhythmia-eps-auto-input" type="checkbox" bind:checked={arrhythmia.eps_auto} />
+            Scale cluster threshold to each recording (recommended)
+          </label>
+
+          {#if arrhythmia.eps_auto}
+            <label class="field">
+              Outlier sensitivity (percentile)
+              <input
+                data-testid="arrhythmia-eps-percentile-input"
+                type="number"
+                bind:value={arrhythmia.eps_percentile}
+              />
+            </label>
+          {:else}
+            <label class="field">
+              Cluster radius (eps)
+              <input data-testid="arrhythmia-eps-input" type="number" step="0.01" bind:value={arrhythmia.eps} />
+            </label>
+          {/if}
+
+          <label class="field">
+            Minimum samples per cluster
             <input data-testid="arrhythmia-min-samples-input" type="number" bind:value={arrhythmia.min_samples} />
           </label>
         </fieldset>
@@ -261,6 +338,17 @@
           <p data-testid="settings-error" class="text-danger">{saveError}</p>
         {/if}
         <div class="settings-footer-actions">
+          <button
+            type="button"
+            class="btn"
+            data-testid="restore-defaults-button"
+            title="Fill the form with factory defaults (not saved until you press Save)"
+            disabled={saveState === 'saving'}
+            onclick={handleRestoreDefaults}
+          >
+            <Icon name="refresh-cw" size={14} /> Restore defaults
+          </button>
+          <span class="settings-footer-spacer"></span>
           <button
             type="button"
             class="btn"
@@ -338,8 +426,20 @@
     gap: var(--space-2);
   }
 
+  .settings-footer-spacer {
+    flex: 1;
+  }
+
+  .field-group-note {
+    grid-column: 1 / -1;
+    margin: var(--space-2) 0 0;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted, #5b6b7c);
+  }
+
   .settings-footer-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
     gap: var(--space-3);
   }

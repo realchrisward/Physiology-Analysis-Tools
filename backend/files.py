@@ -33,10 +33,12 @@ def import_files(payload: ImportRequest, request: Request) -> ImportResponse:
             # previously memoized /channels/window results for this path are
             # now stale and must be dropped rather than served on the next
             # matching query.
-            window_cache = request.app.state.window_cache
-            stale_keys = [key for key in window_cache if key[0] == path]
-            for key in stale_keys:
-                del window_cache[key]
+            for cache in (
+                request.app.state.window_cache,
+                request.app.state.filtered_signal_cache,
+            ):
+                for key in [k for k in cache if k[0] == path]:
+                    del cache[key]
             selection = select_default_channel(filename, channel_names)
             result = FileImportResult(
                 path=path,

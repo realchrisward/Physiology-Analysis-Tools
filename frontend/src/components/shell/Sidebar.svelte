@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { fileRegistry, type FileRow, type ReviewSelection } from '../../lib/stores/fileRegistry.svelte'
+  import {
+    clearFileRegistry,
+    fileRegistry,
+    type FileRow,
+    type ReviewSelection,
+  } from '../../lib/stores/fileRegistry.svelte'
   import {
     formatEta,
     handleImportFiles,
@@ -16,11 +21,16 @@
     activePath = null,
     onReview,
     onResize,
+    onFilesCleared,
   }: {
     collapsed?: boolean
     activePath?: string | null
     onReview?: (selection: ReviewSelection) => void
     onResize?: (width: number) => void
+    // Clearing the list while a file is open would leave the review
+    // workspace showing something no longer listed anywhere, so the app
+    // shell is told to go back to the welcome screen.
+    onFilesCleared?: () => void
   } = $props()
 
   let asideEl: HTMLElement | undefined = $state()
@@ -37,6 +47,11 @@
   function handleReview(row: FileRow) {
     if (row.defaultChannel === null) return
     onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
+  }
+
+  function handleClearFiles() {
+    clearFileRegistry()
+    onFilesCleared?.()
   }
 
   function toggleRecentSection() {
@@ -109,7 +124,21 @@
   {/if}
 
   {#if !collapsed}
-    <h3 class="sidebar-list-label">Files</h3>
+    <div class="sidebar-list-header">
+      <h3 class="sidebar-list-label">Files</h3>
+      {#if fileRegistry.length > 0}
+        <button
+          type="button"
+          class="btn btn-sm sidebar-clear-button"
+          data-testid="sidebar-clear-files-button"
+          title="Clear the file list (does not delete anything or discard saved review work)"
+          disabled={importQueue.importing || importQueue.detecting}
+          onclick={handleClearFiles}
+        >
+          <Icon name="trash" size={12} /> Clear
+        </button>
+      {/if}
+    </div>
   {/if}
   <div class="sidebar-list" data-testid="sidebar-file-list">
     {#each fileRegistry as row (row.path)}
@@ -274,6 +303,14 @@
     padding: 0;
   }
 
+  .sidebar-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding-right: var(--space-2);
+  }
+
   .sidebar-list-label {
     padding: var(--space-2) var(--space-3) 0;
     font-size: 0.75rem;
@@ -281,6 +318,11 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-muted);
+  }
+
+  .sidebar-clear-button {
+    margin-top: var(--space-2);
+    font-size: 0.7rem;
   }
 
   .sidebar-list {

@@ -79,17 +79,57 @@ function fileStateResponse(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
+// `GET /beats/of-interest` — the beat-of-interest navigation's source, and
+// also the precondition ReviewWorkspace checks before deciding whether to
+// auto-run arrhythmia detection on load.
+//
+// The DEFAULT is the backend's "beat detection has not been run for this
+// file yet" error, which is the one response that engages none of this
+// machinery: no automatic arrhythmia run, no navigation list, and therefore
+// no auto-focus fetch from the graph. That keeps every test that is about
+// something else (channel switching, persistence, category updates) reading
+// exactly as it did before this feature existed. Tests that ARE about beats
+// of interest pass explicit values via `beatsOfInterestOk`.
+function beatsOfInterestResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    ok: true,
+    json: async () => ({
+      status: 'error',
+      ts: [],
+      count: 0,
+      error: 'Beat detection has not been run for this file yet',
+      ...overrides,
+    }),
+  }
+}
+
+function beatsOfInterestOk(ts: number[]) {
+  return beatsOfInterestResponse({ status: 'ok', ts, count: ts.length, error: null })
+}
+
+// Requests a successful mount makes before settling, in order:
+//   GET /files/state        - ReviewWorkspace's reopen-hydration check
+//   GET /channels/window    - EcgGraph's initial waveform load
+//   GET /beats/window       - EcgGraph's initial marker load
+//   GET /beats/of-interest  - the beat-of-interest navigation list
+// Tests wait for exactly this many calls to know the mount has settled, and
+// then assert further calls relative to it.
+const MOUNT_FETCH_COUNT = 4
+
 // The mounted EcgGraph (see ecg-graph tests for its own coverage) fetches
 // `/channels/window` on mount independently of whatever `/beats/detect`
 // behavior a given test is exercising — so every fetch mock here has to
 // answer both endpoints, not just the one the test cares about. Also routes
 // `GET /files/state` (ReviewWorkspace's own mount-time hydration check, see
 // `fileStateResponse` above) to a "not found" default so hydration never
-// overrides `defaultChannel` for tests that aren't exercising it.
+// overrides `defaultChannel` for tests that aren't exercising it, and
+// `GET /beats/of-interest` (see above) so the automatic on-load arrhythmia
+// run doesn't fire in tests about something else.
 function mockFetch(beatsResponse: { ok: boolean; json: () => Promise<unknown> }) {
   return vi.fn().mockImplementation((url: string) => {
     if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
     if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+    if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
     return Promise.resolve(beatsResponse)
   })
 }
@@ -243,6 +283,7 @@ describe('ReviewWorkspace', () => {
       resolveFileState = resolve
     })
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
       if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
       if (url.includes('/files/state')) return pendingFileState
       return Promise.resolve(beatsOkResponse())
@@ -311,6 +352,7 @@ describe('ReviewWorkspace', () => {
     })
 
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
       if (url.includes('/beats/detect')) return detectPromise
       if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
       return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -324,7 +366,7 @@ describe('ReviewWorkspace', () => {
     // Wait for the initial mount's own files/state + channel-window + beats-window fetch
     // pair to settle before capturing the "before switch" call count, so it
     // doesn't race the assertion below.
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
     const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
 
@@ -365,6 +407,7 @@ describe('ReviewWorkspace', () => {
     })
 
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
       if (url.includes('/beats/detect')) return detectPromise
       if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
       return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -375,7 +418,7 @@ describe('ReviewWorkspace', () => {
       props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
     })
 
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
     const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
 
@@ -430,6 +473,7 @@ describe('ReviewWorkspace', () => {
       other_arrhythmia: false,
     }
     const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
       if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
       if (url.includes('/beats/window')) {
         return Promise.resolve({
@@ -456,7 +500,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       expect(screen.getByTestId('selected-beat-summary')).toHaveTextContent('No beat selected')
 
@@ -517,6 +561,7 @@ describe('ReviewWorkspace', () => {
 
     function mockFetchWithBeatsWindowAndPersist(persistResponse: () => { ok: boolean; json: () => Promise<unknown> }) {
       return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -548,7 +593,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         clickBeatMarker()
 
@@ -609,7 +654,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         clickBeatMarker()
 
@@ -646,7 +691,7 @@ describe('ReviewWorkspace', () => {
         render(ReviewWorkspace, {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         // Collapse it manually before any beat is selected.
         await fireEvent.click(screen.getByTestId('beat-panel-toggle'))
@@ -726,6 +771,7 @@ describe('ReviewWorkspace', () => {
     function mockFetchForChannelSwitch() {
       let lastDetectedChannel = 'channel 1'
       return vi.fn().mockImplementation((url: string, init?: { body?: string }) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/detect')) {
           const channel = init?.body ? JSON.parse(init.body).channel : undefined
@@ -762,7 +808,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         await clickBeatMarker()
         await waitFor(() => {
@@ -813,7 +859,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         // Select on channel 1 — persists for channel 1.
         await clickBeatMarker()
@@ -932,6 +978,7 @@ describe('ReviewWorkspace', () => {
 
       let lastDetectedChannel = 'channel 1'
       const fetchMock = vi.fn().mockImplementation((url: string, init?: { body?: string }) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/detect')) {
           const channel = init?.body ? JSON.parse(init.body).channel : undefined
@@ -964,7 +1011,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         // Select on channel 1 — dispatches persistBeats('channel 1'), held
         // pending (not yet resolved).
@@ -1065,6 +1112,7 @@ describe('ReviewWorkspace', () => {
   describe('arrhythmia re-run wiring', () => {
     function mockFetchForArrhythmiaRerun() {
       return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1098,7 +1146,7 @@ describe('ReviewWorkspace', () => {
       })
 
       // Initial mount: /files/state + /channels/window + /beats/window.
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       await fireEvent.click(screen.getByTestId('run-heuristic-button'))
 
@@ -1145,6 +1193,7 @@ describe('ReviewWorkspace', () => {
       })
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1162,7 +1211,7 @@ describe('ReviewWorkspace', () => {
       })
 
       // Initial mount: /files/state + /channels/window + /beats/window for channel 1.
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
       expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
 
       // Start an arrhythmia rerun on channel 1 — held pending, not resolved.
@@ -1239,6 +1288,8 @@ describe('ReviewWorkspace', () => {
       }
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1279,7 +1330,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         // Select a beat first — this fires the FIRST `POST /files/beats`
         // via `ensureChannelPersisted`.
@@ -1339,6 +1390,7 @@ describe('ReviewWorkspace', () => {
       opts: { onDetect?: () => unknown } = {},
     ) {
       return vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/files/state')) return Promise.resolve(fileState)
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/detect')) return Promise.resolve((opts.onDetect ?? (() => beatsOkResponse()))())
@@ -1452,6 +1504,7 @@ describe('ReviewWorkspace', () => {
       })
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/files/state')) return fileStatePromise
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -1499,6 +1552,7 @@ describe('ReviewWorkspace', () => {
       })
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/files/state')) return fileStatePromise
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -1533,6 +1587,7 @@ describe('ReviewWorkspace', () => {
       })
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/files/state')) return fileStatePromise
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -1580,6 +1635,7 @@ describe('ReviewWorkspace', () => {
 
     it('falls back to defaultChannel exactly as the not-found case when GET /files/state fails', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/files/state')) return Promise.reject(new Error('network down'))
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         return Promise.resolve(beatsOkResponse()) // /beats/window
@@ -1608,6 +1664,8 @@ describe('ReviewWorkspace', () => {
     it('persists the newly selected channel alongside the existing detectBeats call', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/files/channel')) {
           return Promise.resolve({ ok: true, json: async () => ({ status: 'ok', channel: 'channel 2', error: null }) })
@@ -1620,7 +1678,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       const select = screen.getByTestId('channel-select') as HTMLSelectElement
       await fireEvent.change(select, { target: { value: 'channel 2' } })
@@ -1649,6 +1707,8 @@ describe('ReviewWorkspace', () => {
     it('does not block the channel switch when putChannel fails', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/files/channel')) {
           return Promise.resolve({
@@ -1664,7 +1724,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       const select = screen.getByTestId('channel-select') as HTMLSelectElement
       await fireEvent.change(select, { target: { value: 'channel 2' } })
@@ -1707,6 +1767,8 @@ describe('ReviewWorkspace', () => {
     it('refreshes the graph beats after a successful confirm action', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1737,7 +1799,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         clickBeatMarker()
 
@@ -1782,6 +1844,8 @@ describe('ReviewWorkspace', () => {
     it('does not trigger an extra POST /files/beats when a category action succeeds', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1809,7 +1873,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         clickBeatMarker()
 
@@ -1844,6 +1908,8 @@ describe('ReviewWorkspace', () => {
     it('does not refresh the graph when a category update fails', async () => {
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
           return Promise.resolve({
@@ -1874,7 +1940,7 @@ describe('ReviewWorkspace', () => {
           props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
         })
 
-        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+        await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
         clickBeatMarker()
 
@@ -1918,6 +1984,8 @@ describe('ReviewWorkspace', () => {
         if (url.includes('/files/report') && reportResponse) return Promise.resolve(reportResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+        if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         return Promise.resolve(beatsOkResponse()) // /beats/window
       })
     }
@@ -1936,7 +2004,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
@@ -1963,7 +2031,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
@@ -1988,7 +2056,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
@@ -2015,7 +2083,7 @@ describe('ReviewWorkspace', () => {
         props: { path: '/data/57.txt', channels: ['channel 1', 'channel 2'], defaultChannel: 'channel 1' },
       })
 
-      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(3))
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
 
       await fireEvent.click(screen.getByTestId('generate-report-button'))
 
@@ -2026,5 +2094,191 @@ describe('ReviewWorkspace', () => {
       })
       expect(screen.getByTestId('review-workspace')).toBeInTheDocument()
     })
+  })
+})
+
+describe('ReviewWorkspace automatic beat-of-interest detection', () => {
+  function autoRunFetch(overrides: { ofInterestAfterRun?: number[]; bothFails?: boolean } = {}) {
+    let arrhythmiaRuns = 0
+    let ranSuccessfully = false
+    const methodsRequested: string[] = []
+
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: { body?: string }) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+      if (url.includes('/beats/of-interest')) {
+        // Nothing flagged until arrhythmia detection has actually run.
+        return Promise.resolve(
+          ranSuccessfully
+            ? beatsOfInterestOk(overrides.ofInterestAfterRun ?? [1.5, 2.5])
+            : beatsOfInterestOk([]),
+        )
+      }
+      if (url.includes('/arrhythmia/detect')) {
+        arrhythmiaRuns += 1
+        const method = JSON.parse(init?.body ?? '{}').method
+        methodsRequested.push(method)
+        if (method === 'both' && overrides.bothFails) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ status: 'error', error: 'not enough usable beat epochs', beats: [] }),
+          })
+        }
+        ranSuccessfully = true
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ status: 'ok', beats: [], count: 0, any_arrhythmia_count: 2, error: null }),
+        })
+      }
+      return Promise.resolve(beatsOkResponse())
+    })
+
+    return { fetchMock, methodsRequested, runCount: () => arrhythmiaRuns }
+  }
+
+  it('runs detection on load when the file has beats but nothing flagged yet', async () => {
+    const { fetchMock, methodsRequested } = autoRunFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    await waitFor(() => expect(methodsRequested).toContain('both'))
+    // The results are persisted so a later reopen/export agrees with what is
+    // on screen.
+    await waitFor(() => {
+      const posted = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/files/beats'))
+      expect(posted.length).toBeGreaterThan(0)
+    })
+  })
+
+  it('falls back to heuristic-only when the unsupervised method cannot run', async () => {
+    const { fetchMock, methodsRequested } = autoRunFetch({ bothFails: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    // A short recording legitimately can't cluster; the technician should
+    // still get the detection that CAN run rather than nothing at all.
+    await waitFor(() => expect(methodsRequested).toEqual(['both', 'heuristic']))
+  })
+
+  it('does not run detection when the file already has flagged beats', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestOk([1, 2, 3]))
+      return Promise.resolve(beatsOkResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // A reopened session already has its results in SQLite — re-running
+    // would be wasted work over data the backend already has.
+    const runs = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/arrhythmia/detect'))
+    expect(runs).toHaveLength(0)
+  })
+
+  it('does not run detection when beat detection has not produced any beats', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+      return Promise.resolve(beatsOkResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(ReviewWorkspace, {
+      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+    })
+
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    const runs = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/arrhythmia/detect'))
+    expect(runs).toHaveLength(0)
+  })
+
+  it('refreshes the beat-of-interest list after a review action changes what is flagged', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
+      if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
+      if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestOk([1, 2, 3]))
+      if (url.includes('/beats/window')) {
+        // The graph needs the real beat record at the flagged timestamp to
+        // hand it to onBeatSelect when the navigation jumps there.
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: 'ok',
+            count: 1,
+            error: null,
+            beats: [
+              {
+                ts: 1,
+                rr: 0.8,
+                r_amplitude: 1,
+                hr: 75,
+                bradycardia_absolute: false,
+                tachycardia_absolute: true,
+                skipped_beat: false,
+                prem_beat: false,
+                abn_cluster: false,
+                any_arrhythmia: true,
+                other_arrhythmia: false,
+                review_state: 'unreviewed',
+                reassigned_category: null,
+              },
+            ],
+          }),
+        })
+      }
+      if (url.includes('/files/beats/category')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ status: 'ok', ts: 1, review_state: 'rejected', reassigned_category: null, error: null }),
+        })
+      }
+      return Promise.resolve(beatsOkResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+    try {
+      render(ReviewWorkspace, {
+        props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
+      })
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(MOUNT_FETCH_COUNT))
+
+      const ofInterestCallsBefore = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/beats/of-interest'),
+      ).length
+
+      // The graph auto-selected the first beat of interest, so the review
+      // panel is acting on it.
+      await waitFor(() => expect(screen.queryByTestId('reject-button')).toBeInTheDocument())
+      await fireEvent.click(screen.getByTestId('reject-button'))
+
+      await waitFor(() => {
+        const after = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/beats/of-interest')).length
+        expect(after).toBeGreaterThan(ofInterestCallsBefore)
+      })
+    } finally {
+      if (originalClientWidth) {
+        Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+      } else {
+        delete (HTMLElement.prototype as any).clientWidth
+      }
+    }
   })
 })

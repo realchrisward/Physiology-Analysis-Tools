@@ -68,7 +68,19 @@ def test_both_methods_on_larger_real_file(long_txt_file):
 
     assert any(beat["abn_cluster"] is not None for beat in result["beats"])
 
-    assert result["any_arrhythmia_count"] == 163
+    # The shape-based clustering must actually DISCRIMINATE between beats,
+    # not label the whole recording abnormal. With a fixed eps it did exactly
+    # that (163/163 abnormal, making the flag useless); the adaptive eps
+    # scales the threshold to this recording's own beat-to-beat spread.
+    abn_count = sum(1 for beat in result["beats"] if beat["abn_cluster"] is True)
+    assert 0 <= abn_count < 163
+
+    # Heuristic rules still flag most beats of this particular recording:
+    # its median rate (~202 bpm) sits below the default 300 bpm bradycardia
+    # threshold, so bradycardia/premature-beat rules fire widely. That is a
+    # property of this fixture against the default thresholds, not of the
+    # clustering.
+    assert 0 < result["any_arrhythmia_count"] <= 163
 
     optional_columns = [
         "bradycardia_absolute",
@@ -83,20 +95,26 @@ def test_both_methods_on_larger_real_file(long_txt_file):
 
 
 def test_any_arrhythmia_survives_mixed_nan_abn_cluster_column(long_txt_file):
-    # A window_size large enough that the unsupervised method's epoch window
-    # (window_size / 2 samples on each side of the beat) extends past the
-    # start of the signal for the very first beat, but not past the end for
-    # the last beat: ml_tools.beatepocher() skips that one boundary beat,
-    # ml_tools.call_arrhythmias_PCA() left-joins its cluster labels back onto
-    # beat_df, and the skipped beat's abn_cluster comes back as a genuine NaN
-    # mixed in with real booleans for the other beats - the exact scenario
-    # that gives the column dtype=object and (pre-fix) got it silently
-    # dropped from any_arrhythmia's aggregation for every beat, not just the
-    # NaN one.
+    # A beat_window large enough that the unsupervised method's epoch window
+    # extends past the start of the signal for the very first beat, but not
+    # past the end for the last beat: the epocher skips that one boundary
+    # beat, its cluster label is therefore missing when
+    # ml_tools.call_arrhythmias_PCA() maps labels back onto beat_df by ts,
+    # and its abn_cluster comes back as a genuine NaN mixed in with real
+    # booleans for the other beats - the exact scenario that gives the column
+    # dtype=object and (pre-fix) got it silently dropped from
+    # any_arrhythmia's aggregation for every beat, not just the NaN one.
+    #
+    # eps is pinned to a fixed, deliberately tiny value here (rather than the
+    # adaptive default) so that every beat that DOES get an epoch clusters as
+    # an outlier - that makes the True side of the mixed column deterministic
+    # rather than dependent on this recording's beat shapes.
     client = TestClient(create_app())
 
     settings = client.get("/settings").json()
-    settings["arrhythmia"]["window_size"] = 6000
+    settings["arrhythmia"]["beat_window"] = 20
+    settings["arrhythmia"]["eps_auto"] = False
+    settings["arrhythmia"]["eps"] = 0.03
     put_response = client.put("/settings", json=settings)
     assert put_response.json()["status"] == "ok"
 
@@ -147,15 +165,15 @@ def test_beats_not_detected_yet_reports_error(real_beats_txt_file):
 
 
 def test_too_few_beats_for_clustering_reports_clean_error(real_beats_txt_file):
-    # window_size=3200 on 57.txt's 15 beats leaves exactly 1 beat epoch that
-    # doesn't get boundary-skipped by ml_tools.beatepocher() (verified
-    # directly against this fixture) - not enough for PCA(n_components=2),
-    # which previously surfaced as a raw, unhelpful sklearn internals error
-    # ("Input X contains NaN...") instead of a clean, actionable message.
+    # beat_window=14 on 57.txt's 15 beats leaves exactly 1 beat epoch that
+    # doesn't get boundary-skipped by the epocher (verified directly against
+    # this fixture) - not enough for PCA(n_components=2), which previously
+    # surfaced as a raw, unhelpful sklearn internals error ("Input X contains
+    # NaN...") instead of a clean, actionable message.
     client = TestClient(create_app())
 
     settings = client.get("/settings").json()
-    settings["arrhythmia"]["window_size"] = 3200
+    settings["arrhythmia"]["beat_window"] = 14
     put_response = client.put("/settings", json=settings)
     assert put_response.json()["status"] == "ok"
 

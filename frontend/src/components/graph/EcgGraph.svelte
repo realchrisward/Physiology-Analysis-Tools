@@ -51,9 +51,18 @@
     channelY: number[],
     beats: WindowBeat[],
     selectedTs?: number | null,
+    hideRejected: boolean = false,
   ): BeatSeriesData {
     const channelYByX = new Map<number, number>()
     channelX.forEach((x, i) => channelYByX.set(x, channelY[i]))
+
+    // Hiding rejected beats has to happen HERE rather than by toggling a
+    // series' visibility: a rejected beat renders in the same 'normal'
+    // marker bucket as a beat that was never flagged, so the two are only
+    // separable in the data, not at the series level.
+    if (hideRejected) {
+      beats = beats.filter((beat) => beat.review_state !== 'rejected')
+    }
 
     const beatByTs = new Map<number, WindowBeat>()
     for (const beat of beats) beatByTs.set(beat.ts, beat)
@@ -124,6 +133,7 @@
     beatsRefreshToken = 0,
     initialBadDataMarks,
     selectedBeatTs = null,
+    beatsOfInterest = [],
   }: {
     path: string
     channel: string
@@ -154,6 +164,14 @@
     // prop, not seeded-once: `applySelectionHighlight`'s effect reacts to it
     // changing for as long as this component stays mounted.
     selectedBeatTs?: number | null
+    // Every flagged beat's `ts` across the WHOLE file, in time order (from
+    // `GET /beats/of-interest` via ReviewWorkspace) — what the beat-of-
+    // interest navigation steps through. Deliberately the whole file rather
+    // than the visible window: the point of the navigation is to carry the
+    // technician to flagged beats they can't currently see. A live prop:
+    // arrhythmia detection usually resolves AFTER this component mounts, and
+    // a review action can change which beats are flagged at any time.
+    beatsOfInterest?: number[]
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -192,6 +210,15 @@
   // nearest-by-x-distance is enough to disambiguate without also comparing
   // the click's y/`r_amplitude` distance.
   const BEAT_HIT_TOLERANCE_PX = 8
+  // Width of the view when jumping to a beat of interest. The whole point of
+  // the jump is to land on a focused stretch of trace where the beat's SHAPE
+  // is readable — at a mouse's ~600bpm this is roughly 20 beats of context,
+  // enough to judge a beat against its neighbours without hunting for it.
+  const FOCUS_WINDOW_SECONDS = 2
+  // A page-forward/back step moves by slightly less than a full screen so a
+  // sliver of the previous view stays visible as a visual anchor, the same
+  // way a document reader's page-down does.
+  const PAGE_OVERLAP_RATIO = 0.9
 
   // Marker/axis/grid colors. Read from tokens.css's semantic custom
   // properties (falling back to their light-mode values — jsdom in tests
@@ -453,6 +480,31 @@
   // reviewed/unreviewed, independent of which categories are shown.
   let hiddenCategories: Set<DisplayCategory> = $state(new Set())
   let reviewFilter: 'all' | 'reviewed' | 'unreviewed' = $state('all')
+  // Hides beats the technician explicitly rejected, so a long review pass
+  // isn't cluttered by decisions already made. Unlike the category/review
+  // filters (pure series-visibility toggles), this one has to re-merge the
+  // data: a rejected beat shares the 'normal' marker bucket with beats that
+  // were never flagged, so it can't be hidden by `chart.setSeries` alone.
+  let hideRejected: boolean = $state(false)
+  // Shows the highpass-filtered trace (the signal beat detection actually
+  // runs against) instead of the raw voltage — the old PySide6 app's
+  // "plot filtered" checkbox.
+  let showFiltered: boolean = $state(false)
+
+  // Position within `beatsOfInterest`, or -1 before the technician has
+  // jumped anywhere. Tracked here rather than derived from `selectedBeatTs`
+  // so that clicking a beat directly on the graph doesn't scramble the
+  // navigation's place in the list.
+  let beatOfInterestIndex: number = $state(-1)
+  // Guards the one-time auto-focus on the first beat of interest, which has
+  // to wait for arrhythmia detection to resolve (usually after mount).
+  let hasAutoFocused = false
+  // `chart` itself is a plain (non-reactive) binding, so an effect that only
+  // read it would never re-run once the async mount finally created it.
+  // This is the reactive "the chart exists now" signal the auto-focus effect
+  // needs, since the beats of interest it waits for can arrive either before
+  // or after chart construction.
+  let chartReady: boolean = $state(false)
 
   let containerEl: HTMLDivElement | undefined = $state()
   // Tracked via `bind:clientWidth` below. Read directly off `containerEl`
@@ -518,6 +570,8 @@
   // starting value — see that `$effect` for why the first run must be a
   // no-op (same discipline as `previousWidth` above).
   let previousBeatsRefreshToken: number | undefined
+  // Same skip-the-initial-run discipline for the raw/filtered toggle.
+  let previousShowFiltered: boolean | undefined
 
   // The x-range actually LOADED into the chart right now (normally wider
   // than what's visible — see PAD_FACTOR below), and the visible-range
@@ -549,7 +603,7 @@
   }
 
   async function loadWindow(start: number, end: number, width: number): Promise<{ x: number[]; y: number[] } | null> {
-    const result = await getChannelWindow(path, channel, start, end, resolutionFor(width))
+    const result = await getChannelWindow(path, channel, start, end, resolutionFor(width), showFiltered)
     if (result.status !== 'ok' || result.error) {
       error = result.error ?? 'Failed to load channel window'
       return null
@@ -583,7 +637,10 @@
     if (!channelData) return null
     lastChannelWindow = channelData
     const beats = await loadBeats(start, end)
-    return { channel: channelData, merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs) }
+    return {
+      channel: channelData,
+      merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs, hideRejected),
+    }
   }
 
   // Re-fetches ONLY `/beats/window` for the currently visible x-scale range
@@ -599,7 +656,7 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     const beats = await loadBeats(min, max)
-    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs)
+    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs, hideRejected)
     chart.setData(toChartData(merged), false)
     applyFilters()
   }
@@ -612,7 +669,7 @@
   // fetch has resolved.
   function applySelectionHighlight() {
     if (!chart || !lastChannelWindow) return
-    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, lastBeats, selectedBeatTs)
+    const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, lastBeats, selectedBeatTs, hideRejected)
     chart.setData(toChartData(merged), false)
     applyFilters()
   }
@@ -997,6 +1054,106 @@
     expanded = !expanded
   }
 
+  // Moves the visible x-range to exactly [start, end] and loads the data for
+  // it. Shared by every jump/page control below — unlike the pan/zoom paths
+  // these are discrete, deliberate moves, so they fetch immediately rather
+  // than through the 150ms debounce (which exists to coalesce continuous
+  // gestures; there is nothing to coalesce here).
+  function setVisibleRange(start: number, end: number) {
+    if (!chart) return
+    if (debounceTimer !== undefined) {
+      clearTimeout(debounceTimer)
+      debounceTimer = undefined
+    }
+    viewChanged = true
+    chart.setScale('x', { min: start, max: end })
+    void refetch(start, end)
+  }
+
+  // Centres the view on `ts`, keeping the current zoom level if the
+  // technician has already zoomed in tighter than the default focus window.
+  function focusOnTime(ts: number) {
+    if (!chart) return
+    const { min, max } = chart.scales.x
+    const currentWidth = min != null && max != null ? max - min : FOCUS_WINDOW_SECONDS
+    const width = Math.min(currentWidth, FOCUS_WINDOW_SECONDS)
+    setVisibleRange(ts - width / 2, ts + width / 2)
+  }
+
+  // Jumping to a beat of interest also SELECTS it, so the detail panel shows
+  // that beat's categories and the confirm/reject controls act on it — the
+  // review loop the old app's next/prev-arrhythmia buttons drove.
+  function goToBeatOfInterest(index: number) {
+    if (beatsOfInterest.length === 0) return
+    const clamped = Math.max(0, Math.min(beatsOfInterest.length - 1, index))
+    beatOfInterestIndex = clamped
+    const ts = beatsOfInterest[clamped]
+    focusOnTime(ts)
+
+    const beat = lastBeats.find((b) => b.ts === ts)
+    if (beat) onBeatSelect?.(beat)
+  }
+
+  function handleFirstBeatOfInterest() {
+    goToBeatOfInterest(0)
+  }
+
+  function handlePrevBeatOfInterest() {
+    // From "nowhere yet", stepping back lands on the last one rather than
+    // doing nothing.
+    goToBeatOfInterest(beatOfInterestIndex <= 0 ? beatsOfInterest.length - 1 : beatOfInterestIndex - 1)
+  }
+
+  function handleNextBeatOfInterest() {
+    goToBeatOfInterest(beatOfInterestIndex + 1 >= beatsOfInterest.length ? 0 : beatOfInterestIndex + 1)
+  }
+
+  function handleLastBeatOfInterest() {
+    goToBeatOfInterest(beatsOfInterest.length - 1)
+  }
+
+  // Time navigation across the file at the current zoom — the old app's
+  // start-of-file / previous-window / next-window / end-of-file controls.
+  function handleJumpToStart() {
+    if (!chart || !fullExtent) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    const width = max - min
+    setVisibleRange(fullExtent.start, fullExtent.start + width)
+  }
+
+  function handleJumpToEnd() {
+    if (!chart || !fullExtent) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    const width = max - min
+    setVisibleRange(fullExtent.end - width, fullExtent.end)
+  }
+
+  function pageBy(direction: 1 | -1) {
+    if (!chart) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    const step = (max - min) * PAGE_OVERLAP_RATIO * direction
+    setVisibleRange(min + step, max + step)
+  }
+
+  function handlePrevWindow() {
+    pageBy(-1)
+  }
+
+  function handleNextWindow() {
+    pageBy(1)
+  }
+
+  function toggleFiltered() {
+    showFiltered = !showFiltered
+  }
+
+  function toggleHideRejected() {
+    hideRejected = !hideRejected
+  }
+
   function panZoomPlugin(): uPlot.Plugin {
     return {
       hooks: {
@@ -1075,6 +1232,7 @@
         containerEl,
       )
       applyFilters()
+      chartReady = true
     })()
 
     return () => {
@@ -1087,6 +1245,7 @@
       endActiveDrag?.()
       chart?.destroy()
       chart = undefined
+      chartReady = false
     }
   })
 
@@ -1166,6 +1325,48 @@
     applyFilters()
   })
 
+  // Hiding/showing rejected beats changes the DATA (see
+  // `buildBeatAlignedData`), not just series visibility, so it needs a
+  // re-merge — but no network round trip, since the beats are already held.
+  $effect(() => {
+    hideRejected
+    applySelectionHighlight()
+  })
+
+  // Switching between the raw and highpass-filtered trace DOES need a real
+  // re-fetch (the filtering happens backend-side, against the whole
+  // channel), at exactly the currently-visible range so the viewport doesn't
+  // move under the technician. Same skip-the-initial-run shape as the
+  // `containerWidth`/`beatsRefreshToken` effects above.
+  $effect(() => {
+    const filtered = showFiltered
+    if (previousShowFiltered === undefined) {
+      previousShowFiltered = filtered
+      return
+    }
+    if (filtered === previousShowFiltered) return
+    previousShowFiltered = filtered
+
+    if (!chart) return
+    const { min, max } = chart.scales.x
+    if (min == null || max == null) return
+    void refetch(min, max)
+  })
+
+  // Auto-focus the first beat of interest, once, as soon as one exists.
+  // Deliberately effect-driven rather than done inside `onMount`: arrhythmia
+  // detection normally resolves AFTER this component has mounted, so at
+  // mount time there is usually nothing to focus on yet. `hasAutoFocused`
+  // makes it strictly one-shot — re-running detection, or reviewing a beat
+  // away, must never yank the technician's view back to the top of the file.
+  $effect(() => {
+    const flagged = beatsOfInterest
+    const ready = chartReady
+    if (hasAutoFocused || flagged.length === 0 || !ready) return
+    hasAutoFocused = true
+    goToBeatOfInterest(0)
+  })
+
   function handleResetView() {
     if (!chart || !fullExtent) return
     if (debounceTimer !== undefined) {
@@ -1207,7 +1408,115 @@
 </script>
 
 <div class="ecg-graph" data-testid="ecg-graph" data-channel={channel}>
+  <!-- Beat-of-interest navigation: the primary review loop. The graph opens
+       focused on the first flagged beat rather than the whole file, and
+       these controls walk the technician through the rest. -->
+  <div class="beat-nav" data-testid="beat-of-interest-nav">
+    <div class="beat-nav-controls">
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="first-beat-of-interest-button"
+        title="First beat of interest"
+        disabled={beatsOfInterest.length === 0}
+        onclick={handleFirstBeatOfInterest}
+      >
+        <Icon name="skip-back" size={14} />
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="prev-beat-of-interest-button"
+        title="Previous beat of interest"
+        disabled={beatsOfInterest.length === 0}
+        onclick={handlePrevBeatOfInterest}
+      >
+        <Icon name="chevron-left" size={14} />
+      </button>
+      <span class="beat-nav-counter" data-testid="beat-of-interest-counter">
+        {#if beatsOfInterest.length === 0}
+          No beats of interest
+        {:else if beatOfInterestIndex < 0}
+          {beatsOfInterest.length} beats of interest
+        {:else}
+          Beat of interest {beatOfInterestIndex + 1} of {beatsOfInterest.length}
+        {/if}
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="next-beat-of-interest-button"
+        title="Next beat of interest"
+        disabled={beatsOfInterest.length === 0}
+        onclick={handleNextBeatOfInterest}
+      >
+        <Icon name="chevron-right" size={14} />
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="last-beat-of-interest-button"
+        title="Last beat of interest"
+        disabled={beatsOfInterest.length === 0}
+        onclick={handleLastBeatOfInterest}
+      >
+        <Icon name="skip-forward" size={14} />
+      </button>
+    </div>
+
+    <div class="beat-nav-controls">
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="jump-to-start-button"
+        title="Start of recording"
+        onclick={handleJumpToStart}
+      >
+        <Icon name="skip-back" size={14} /> Start
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="prev-window-button"
+        title="Previous window"
+        onclick={handlePrevWindow}
+      >
+        <Icon name="chevron-left" size={14} />
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="next-window-button"
+        title="Next window"
+        onclick={handleNextWindow}
+      >
+        <Icon name="chevron-right" size={14} />
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="jump-to-end-button"
+        title="End of recording"
+        onclick={handleJumpToEnd}
+      >
+        End <Icon name="skip-forward" size={14} />
+      </button>
+    </div>
+  </div>
+
   <div class="ecg-graph-toolbar">
+    <button
+      type="button"
+      class="btn btn-sm"
+      class:btn-active={showFiltered}
+      data-testid="toggle-filtered-signal-button"
+      aria-pressed={showFiltered}
+      title="Show the highpass-filtered trace that beat detection runs against"
+      onclick={toggleFiltered}
+    >
+      <Icon name="filter" size={14} />
+      {showFiltered ? 'Filtered' : 'Raw'}
+    </button>
     <div class="zoom-group">
       <span class="zoom-group-label">X</span>
       <button type="button" class="btn btn-sm" data-testid="zoom-in-button" title="Zoom in (X)" onclick={handleZoomIn}>
@@ -1295,6 +1604,11 @@
        category's visibility on the graph. -->
   <div class="ecg-legend" data-testid="ecg-legend">
     <div class="ecg-legend-categories">
+      <span class="legend-total" data-testid="legend-beats-of-interest-count">
+        <Icon name="activity" size={12} />
+        {beatsOfInterest.length}
+        {beatsOfInterest.length === 1 ? 'beat' : 'beats'} of interest
+      </span>
       {#each DISPLAY_CATEGORIES as cat (cat)}
         {@const active = !hiddenCategories.has(cat)}
         <button
@@ -1358,6 +1672,18 @@
       >
         Unreviewed
       </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-active={hideRejected}
+        data-testid="hide-rejected-toggle"
+        aria-pressed={hideRejected}
+        title="Hide beats you have rejected, without deleting them"
+        onclick={toggleHideRejected}
+      >
+        <Icon name="eye-off" size={14} />
+        {hideRejected ? 'Rejected hidden' : 'Hide rejected'}
+      </button>
     </div>
   </div>
 </div>
@@ -1374,6 +1700,44 @@
     flex-wrap: wrap;
     gap: var(--space-2);
     align-self: flex-end;
+  }
+
+  .beat-nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border, #d3dae1);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface-raised, #f7f9fb);
+  }
+
+  .beat-nav-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .beat-nav-counter {
+    min-width: 12rem;
+    text-align: center;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .legend-total {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: var(--space-1) var(--space-2);
+    border-radius: 999px;
+    background: var(--color-accent-soft, #eef1f5);
+    color: var(--color-accent, #2563eb);
   }
 
   .zoom-group {
