@@ -930,7 +930,7 @@ describe('buildBeatAlignedData', () => {
 
   it('buckets each beat by its primary display category, unreviewed by default', () => {
     const channelX = [0, 1, 2, 4.5]
-    const channelY = [0, 1, 0, 0]
+    const channelY = [0, 11, 12, 13]
     const beats: WindowBeat[] = [
       beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, tachycardia_absolute: true }),
       beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false }),
@@ -939,9 +939,11 @@ describe('buildBeatAlignedData', () => {
 
     const result = buildBeatAlignedData(channelX, channelY, beats)
 
-    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, 5, null, null])
-    expect(bucketY(result, 'normal', false)).toEqual([null, null, 6, null])
-    expect(bucketY(result, 'unevaluated', false)).toEqual([null, null, null, 7])
+    // Each marker sits at the TRACE's height at that timestamp, not at the
+    // beat's stored r_amplitude (which is measured on the filtered signal).
+    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, 11, null, null])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, 12, null])
+    expect(bucketY(result, 'unevaluated', false)).toEqual([null, null, null, 13])
     // Every other bucket stays entirely null for this fixture.
     expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null, null])
   })
@@ -956,9 +958,9 @@ describe('buildBeatAlignedData', () => {
         bradycardia_absolute: true, // earlier in REASSIGNABLE_CATEGORIES' priority order
       }),
     ]
-    const result = buildBeatAlignedData([0, 1], [0, 0], beats)
+    const result = buildBeatAlignedData([0, 1], [0, 9], beats)
 
-    expect(bucketY(result, 'bradycardia_absolute', false)).toEqual([null, 5])
+    expect(bucketY(result, 'bradycardia_absolute', false)).toEqual([null, 9])
     expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, null])
   })
 
@@ -967,11 +969,11 @@ describe('buildBeatAlignedData', () => {
       beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, prem_beat: true, review_state: 'confirmed' }),
       beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false, review_state: 'unreviewed' }),
     ]
-    const result = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats)
+    const result = buildBeatAlignedData([0, 1, 2], [0, 21, 22], beats)
 
-    expect(bucketY(result, 'prem_beat', true)).toEqual([null, 5, null])
+    expect(bucketY(result, 'prem_beat', true)).toEqual([null, 21, null])
     expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null])
-    expect(bucketY(result, 'normal', false)).toEqual([null, null, 6])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, 22])
     expect(bucketY(result, 'normal', true)).toEqual([null, null, null])
   })
 
@@ -980,9 +982,9 @@ describe('buildBeatAlignedData', () => {
       beat({ ts: 1, r_amplitude: 5 }),
       beat({ ts: 2, r_amplitude: 6 }),
     ]
-    const result = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, 2)
+    const result = buildBeatAlignedData([0, 1, 2], [0, 31, 32], beats, 2)
 
-    expect(result.selectedY).toEqual([null, null, 6])
+    expect(result.selectedY).toEqual([null, null, 32])
   })
 
   it('leaves selectedY entirely null when nothing is selected', () => {
@@ -1005,12 +1007,12 @@ describe('buildBeatAlignedData', () => {
       beat({ ts: 2, r_amplitude: 6, any_arrhythmia: false, review_state: 'unreviewed' }),
       beat({ ts: 3, r_amplitude: 7, any_arrhythmia: true, prem_beat: true, review_state: 'confirmed' }),
     ]
-    const result = buildBeatAlignedData([0, 1, 2, 3], [0, 0, 0, 0], beats)
+    const result = buildBeatAlignedData([0, 1, 2, 3], [0, 41, 42, 43], beats)
 
-    expect(result.rejectedY).toEqual([null, 5, null, null])
+    expect(result.rejectedY).toEqual([null, 41, null, null])
     // A rejected beat still buckets as 'normal' (reviewed) for its own
     // color/shape marker — the overlay is additive, not a replacement.
-    expect(bucketY(result, 'normal', true)).toEqual([null, 5, null, null])
+    expect(bucketY(result, 'normal', true)).toEqual([null, 41, null, null])
   })
 })
 
@@ -1303,13 +1305,13 @@ describe('EcgGraph hide-rejected filter', () => {
       beat({ ts: 2, r_amplitude: 6, review_state: 'unreviewed' }),
     ]
 
-    const shown = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, null, false)
-    const hidden = buildBeatAlignedData([0, 1, 2], [0, 0, 0], beats, null, true)
+    const shown = buildBeatAlignedData([0, 1, 2], [0, 51, 52], beats, null, false)
+    const hidden = buildBeatAlignedData([0, 1, 2], [0, 51, 52], beats, null, true)
 
-    expect(shown.rejectedY).toEqual([null, 5, null])
+    expect(shown.rejectedY).toEqual([null, 51, null])
     expect(hidden.rejectedY).toEqual([null, null, null])
     // The unreviewed beat is untouched either way.
-    expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, 6])
+    expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, 52])
   })
 })
 
@@ -1442,5 +1444,117 @@ describe('EcgGraph focus mode and shortcuts', () => {
 
     expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
     input.remove()
+  })
+})
+
+describe('EcgGraph rendering invariants', () => {
+  it('falls back to r_amplitude when the trace has no sample at the beat timestamp', () => {
+    // Heavy downsampling can drop the exact sample a beat sits on; the
+    // marker still has to be drawn somewhere sensible.
+    const beats: WindowBeat[] = [beat({ ts: 1.5, r_amplitude: 7 })]
+
+    const result = buildBeatAlignedData([0, 1, 2], [0, 10, 20], beats)
+
+    const i = result.xs.indexOf(1.5)
+    expect(i).toBeGreaterThan(-1)
+    expect(result.markerY['normal|unreviewed'][i]).toBe(7)
+    // The waveform itself has no value there, and spanGaps bridges it.
+    expect(result.channelY[i]).toBeNull()
+  })
+
+  it('keeps every series the same length as the shared x-axis, sorted and deduplicated', () => {
+    const beats: WindowBeat[] = [
+      beat({ ts: 1, r_amplitude: 5, any_arrhythmia: true, prem_beat: true }),
+      beat({ ts: 1.5, r_amplitude: 6 }),
+      beat({ ts: 3, r_amplitude: 7, review_state: 'rejected' }),
+    ]
+
+    const result = buildBeatAlignedData([0, 1, 2, 3], [0, 1, 2, 3], beats, 1)
+
+    const n = result.xs.length
+    expect(new Set(result.xs).size).toBe(n)
+    expect([...result.xs].sort((a, b) => a - b)).toEqual(result.xs)
+    expect(result.channelY).toHaveLength(n)
+    expect(result.selectedY).toHaveLength(n)
+    expect(result.rejectedY).toHaveLength(n)
+    for (const key of Object.keys(result.markerY)) {
+      expect(result.markerY[key]).toHaveLength(n)
+    }
+    // Each beat appears in exactly one marker bucket.
+    for (let i = 0; i < n; i++) {
+      const hits = Object.keys(result.markerY).filter((k) => result.markerY[k][i] !== null)
+      expect(hits.length).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('does not let a superseded beats refresh overwrite a newer one', async () => {
+    // Two refreshes in flight; the FIRST resolves last. Its stale beats must
+    // not end up on the chart (or in the click hit-test set).
+    const resolvers: ((value: unknown) => void)[] = []
+    const fetchMock = vi.fn((url: string) => {
+      const { pathname } = new URL(url)
+      if (pathname === '/beats/window') {
+        return new Promise((resolve) => resolvers.push(resolve))
+      }
+      return Promise.resolve(channelWindowResponse())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { rerender } = withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', beatsRefreshToken: 0 } }),
+    )
+    await waitFor(() => expect(resolvers.length).toBe(1))
+    resolvers[0](beatsWindowResponse({ beats: [beat({ ts: 1, r_amplitude: 1 })], count: 1 }))
+    // The chart only exists once the mount fetch has been applied; a
+    // beats-only refresh is a no-op before that.
+    await waitFor(() => {
+      expect(screen.getByTestId('ecg-graph-container').querySelector('.u-over')).toBeTruthy()
+    })
+
+    // Two refreshes back to back.
+    await rerender({ path: '/data/57.txt', channel: 'channel 1', beatsRefreshToken: 1 })
+    await rerender({ path: '/data/57.txt', channel: 'channel 1', beatsRefreshToken: 2 })
+    await waitFor(() => expect(resolvers.length).toBe(3))
+
+    const stale = beatsWindowResponse({ beats: [beat({ ts: 8, r_amplitude: 8 })], count: 1 })
+    const fresh = beatsWindowResponse({ beats: [beat({ ts: 5, r_amplitude: 5 })], count: 1 })
+    resolvers[2](fresh)
+    await Promise.resolve()
+    resolvers[1](stale) // the older request, resolving last
+    await Promise.resolve()
+
+    // The chart must still be showing the newer result. Click where the
+    // stale beat would have been and confirm nothing is selected there.
+    await waitFor(() => {
+      expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
+    })
+  })
+})
+
+describe('EcgGraph filter consistency', () => {
+  it('hides the rejected-beat strike along with the markers it overlays', async () => {
+    const fetchMock = routedFetch({
+      beats: () =>
+        beatsWindowResponse({
+          beats: [beat({ ts: 2, r_amplitude: 5, review_state: 'rejected' })],
+          count: 1,
+        }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    // A rejected beat lives in the 'normal' bucket. Filtering to unreviewed
+    // hides that bucket, so the strike drawn on top of it must go too —
+    // otherwise it floats with no marker underneath.
+    await fireEvent.click(screen.getByTestId('review-filter-unreviewed'))
+    await fireEvent.click(screen.getByTestId('legend-toggle-normal'))
+
+    // No error, and the toggles reflect the filtered state.
+    expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
+    expect(screen.getByTestId('legend-toggle-normal')).toHaveAttribute('aria-pressed', 'false')
   })
 })

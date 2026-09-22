@@ -84,13 +84,24 @@
       const category = beat ? primaryDisplayCategory(beat) : null
       const reviewed = beat ? beat.review_state !== 'unreviewed' : false
 
+      // Markers are drawn at the height of the trace ACTUALLY ON SCREEN at
+      // this timestamp, not at the beat's stored `r_amplitude`. That
+      // amplitude is measured on the highpass-filtered signal used for
+      // detection, so against the raw trace it can sit a long way from the
+      // R-peak it is supposed to be pointing at (measured at up to 27% of
+      // the chart height on a real recording with baseline drift). Using
+      // the displayed y keeps every marker on its beat in both the raw and
+      // filtered views. `r_amplitude` remains the fallback for a beat whose
+      // timestamp has no sample in the downsampled trace.
+      const markerHeight = beat ? (channelYByX.get(beat.ts) ?? beat.r_amplitude) : null
+
       for (const bucket of MARKER_BUCKETS) {
         const matches = beat !== undefined && category === bucket.category && reviewed === bucket.reviewed
-        markerY[bucket.key].push(matches ? beat!.r_amplitude : null)
+        markerY[bucket.key].push(matches ? markerHeight : null)
       }
 
-      selectedY.push(beat && selectedTs != null && beat.ts === selectedTs ? beat.r_amplitude : null)
-      rejectedY.push(beat && beat.review_state === 'rejected' ? beat.r_amplitude : null)
+      selectedY.push(beat && selectedTs != null && beat.ts === selectedTs ? markerHeight : null)
+      rejectedY.push(beat && beat.review_state === 'rejected' ? markerHeight : null)
     }
 
     return { xs, channelY: channelYOut, markerY, selectedY, rejectedY }
@@ -220,6 +231,7 @@
   // sliver of the previous view stays visible as a visual anchor, the same
   // way a document reader's page-down does.
   const PAGE_OVERLAP_RATIO = 0.9
+  const TOOLS_POS_KEY = 'pat.graphToolsPos'
 
   // Marker/axis/grid colors. Read from tokens.css's semantic custom
   // properties (falling back to their light-mode values — jsdom in tests
@@ -490,6 +502,81 @@
     toolsCollapsed = !toolsCollapsed
   }
 
+  // Where the floating tools panel sits in focus mode. `null` means "the
+  // default top-right corner"; once the technician drags it, an explicit
+  // position takes over and is remembered across sessions, since where the
+  // panel should live depends on which part of the trace they're working on.
+  let toolsPos: { x: number; y: number } | null = $state(loadToolsPos())
+  let toolsEl: HTMLDivElement | undefined = $state()
+  let draggingTools: boolean = $state(false)
+
+  function loadToolsPos(): { x: number; y: number } | null {
+    try {
+      const raw = localStorage.getItem(TOOLS_POS_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') return parsed
+    } catch {
+      // Unreadable/absent storage just means "use the default corner".
+    }
+    return null
+  }
+
+  /** Keeps the panel on screen, including after a window resize. */
+  function clampToolsPos(x: number, y: number): { x: number; y: number } {
+    const width = toolsEl?.offsetWidth ?? 320
+    const height = toolsEl?.offsetHeight ?? 120
+    // Always leave a grabbable sliver visible, even if dragged to an edge.
+    const maxX = Math.max(0, window.innerWidth - Math.min(width, 120))
+    const maxY = Math.max(0, window.innerHeight - Math.min(height, 60))
+    return { x: Math.max(0, Math.min(maxX, x)), y: Math.max(0, Math.min(maxY, y)) }
+  }
+
+  function startToolsDrag(event: MouseEvent) {
+    if (!fullscreen) return
+    event.preventDefault()
+
+    const rect = toolsEl?.getBoundingClientRect()
+    const offsetX = rect ? event.clientX - rect.left : 0
+    const offsetY = rect ? event.clientY - rect.top : 0
+    draggingTools = true
+
+    function onMove(moveEvent: MouseEvent) {
+      toolsPos = clampToolsPos(moveEvent.clientX - offsetX, moveEvent.clientY - offsetY)
+    }
+    function onUp() {
+      draggingTools = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      endToolsDrag = undefined
+      try {
+        if (toolsPos) localStorage.setItem(TOOLS_POS_KEY, JSON.stringify(toolsPos))
+      } catch {
+        // Not being able to remember the position is not worth surfacing.
+      }
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    // Same teardown discipline as the plot's own drags: a drag must never
+    // outlive the component that started it.
+    endToolsDrag = () => {
+      draggingTools = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      endToolsDrag = undefined
+    }
+  }
+
+  function resetToolsPos() {
+    toolsPos = null
+    try {
+      localStorage.removeItem(TOOLS_POS_KEY)
+    } catch {
+      // ignore
+    }
+  }
+
   // True whenever the visible x-range differs from `fullExtent` (a pan,
   // zoom, or Reset click having happened) — drives the Reset view button's
   // highlighted state below, so it's obvious at a glance that the view has
@@ -591,6 +678,8 @@
   // `{#key selectedChannel}` remount, or navigating away — the listeners
   // get removed instead of lingering on `document` forever).
   let endActiveDrag: (() => void) | undefined
+  // Teardown for an in-progress tools-panel drag, same discipline as above.
+  let endToolsDrag: (() => void) | undefined
   // The raw `WindowBeat[]` from the most recent successful `getBeatsWindow`
   // call (set in `loadBeats` below), kept alongside — not instead of —
   // `buildBeatAlignedData`'s merged series: the merged series only carries
@@ -626,7 +715,7 @@
   // Guards `maybeBufferAhead` against firing overlapping fetches for
   // (approximately) the same range on consecutive mousemove ticks during a
   // single fast drag — a request-frequency throttle, independent of
-  // `refetchRequestId` below (which guards response *correctness*, not
+  // `dataRequestId` below (which guards response *correctness*, not
   // frequency).
   let bufferFetchInFlight = false
   // Bumped at the start of every `refetch` call (pan/zoom/reset alike) and
@@ -640,7 +729,11 @@
   // only the old, much narrower range within it (the reported "reset
   // zooms out way too much" bug — fixed by a second click only because, by
   // then, no older in-flight fetch remained to race it).
-  let refetchRequestId = 0
+  // Bumped by EVERY operation that will end in a `chart.setData` — a
+  // pan/zoom/reset refetch, a beats-only refresh, or a jump. Each captures
+  // the value and only applies its result if it is still the newest, so a
+  // slow response can never overwrite a newer one's data.
+  let dataRequestId = 0
 
   function resolutionFor(width: number): number {
     return Math.max(1, Math.round(width))
@@ -662,13 +755,15 @@
   // first, beats second). A beats-fetch failure never blocks rendering the
   // waveform itself; it just means no marker overlay for that range, so it
   // doesn't set `error` the way a channel-window failure does.
+  // Deliberately does NOT write `lastBeats` itself. A response that lost a
+  // race must not become the hit-testing source for clicks, so the caller
+  // assigns it only after confirming its own request is still the current
+  // one (see `dataRequestId`).
   async function loadBeats(start: number, end: number): Promise<WindowBeat[]> {
     const result = await getBeatsWindow(path, start, end)
     if (result.status !== 'ok' || result.error || !Array.isArray(result.beats)) {
-      lastBeats = []
       return []
     }
-    lastBeats = result.beats
     return result.beats
   }
 
@@ -676,13 +771,20 @@
     start: number,
     end: number,
     width: number,
-  ): Promise<{ channel: { x: number[]; y: number[] }; merged: BeatSeriesData } | null> {
+  ): Promise<{
+    channel: { x: number[]; y: number[] }
+    beats: WindowBeat[]
+    merged: BeatSeriesData
+  } | null> {
     const channelData = await loadWindow(start, end, width)
     if (!channelData) return null
-    lastChannelWindow = channelData
     const beats = await loadBeats(start, end)
+    // `lastChannelWindow`/`lastBeats` are assigned by the caller, after its
+    // staleness check — committing them here would let a superseded fetch
+    // leave the retained state describing a window that is no longer shown.
     return {
       channel: channelData,
+      beats,
       merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs, hideRejected),
     }
   }
@@ -699,7 +801,17 @@
     if (!chart || !lastChannelWindow) return
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
+
+    // Shares ONE counter with `refetch` rather than keeping its own: these
+    // two paths both call setData, and a beats-only refresh merges against
+    // `lastChannelWindow`, which a concurrent refetch is about to replace.
+    // Without a shared guard, a slow refresh landing after a pan would
+    // paint beats from the old range over the new range's waveform.
+    const requestId = ++dataRequestId
     const beats = await loadBeats(min, max)
+    if (requestId !== dataRequestId || !chart || !lastChannelWindow) return
+
+    lastBeats = beats
     const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs, hideRejected)
     chart.setData(toChartData(merged), false)
     applyFilters()
@@ -724,13 +836,25 @@
   // still there, just not drawn.
   function applyFilters() {
     if (!chart) return
+
+    function bucketVisible(category: DisplayCategory, reviewed: boolean): boolean {
+      const categoryVisible = !hiddenCategories.has(category)
+      const reviewVisible =
+        reviewFilter === 'all' || (reviewFilter === 'reviewed' ? reviewed : !reviewed)
+      return categoryVisible && reviewVisible
+    }
+
     MARKER_BUCKETS.forEach((bucket, i) => {
       const seriesIdx = i + 2 // series[0]=x, series[1]=waveform, then MARKER_BUCKETS in order
-      const categoryVisible = !hiddenCategories.has(bucket.category)
-      const reviewVisible =
-        reviewFilter === 'all' || (reviewFilter === 'reviewed' ? bucket.reviewed : !bucket.reviewed)
-      chart!.setSeries(seriesIdx, { show: categoryVisible && reviewVisible })
+      chart!.setSeries(seriesIdx, { show: bucketVisible(bucket.category, bucket.reviewed) })
     })
+
+    // The rejected-beat strike is an overlay ON the 'normal' reviewed
+    // marker, so it has to follow that marker's visibility. Left unfiltered
+    // it painted strikes over markers that were no longer drawn — floating
+    // marks with nothing underneath them.
+    const rejectedSeriesIdx = MARKER_BUCKETS.length + 3
+    chart.setSeries(rejectedSeriesIdx, { show: bucketVisible('normal', true) })
   }
 
   function toggleCategoryFilter(cat: DisplayCategory): void {
@@ -767,7 +891,7 @@
     max: number,
     options: { pad?: boolean; resetScales?: boolean } = {},
   ) {
-    const requestId = ++refetchRequestId
+    const requestId = ++dataRequestId
     const usePad = options.pad ?? true
     const requestedWidth = max - min
     const pad = usePad ? requestedWidth * PAD_FACTOR : 0
@@ -777,13 +901,19 @@
 
     const result = await fetchMergedWindow(fetchStart, fetchEnd, fetchWidth)
     // Superseded by a newer refetch (a later pan/zoom, or a Reset) dispatched
-    // while this one was in flight — see `refetchRequestId`'s own comment
+    // while this one was in flight — see `dataRequestId`'s own comment
     // above for why applying a stale response here would be a real bug
     // (the "reset zooms out too much until a second click" report).
-    if (requestId !== refetchRequestId) return
+    if (requestId !== dataRequestId) return
 
     if (result && chart) {
-      const { merged } = result
+      const { channel: channelData, beats, merged } = result
+      // Commit the retained window/beats only now that this response is
+      // confirmed current — these drive click hit-testing and every later
+      // local re-merge, so stale values here cause silently wrong behaviour
+      // rather than a visible glitch.
+      lastChannelWindow = channelData
+      lastBeats = beats
       // `resetScales: true` (Reset View only) hands BOTH x and y back to
       // uPlot's own auto-ranging from this fresh data — the only supported
       // way to undo a manual Y-zoom's `setScale` pin; uPlot normalizes
@@ -1136,57 +1266,73 @@
   // these are discrete, deliberate moves, so they fetch immediately rather
   // than through the 150ms debounce (which exists to coalesce continuous
   // gestures; there is nothing to coalesce here).
-  function setVisibleRange(start: number, end: number) {
-    if (!chart) return
+  function setVisibleRange(start: number, end: number): Promise<void> {
+    if (!chart) return Promise.resolve()
     if (debounceTimer !== undefined) {
       clearTimeout(debounceTimer)
       debounceTimer = undefined
     }
     viewChanged = true
     chart.setScale('x', { min: start, max: end })
-    void refetch(start, end)
+    return refetch(start, end)
   }
 
   // Centres the view on `ts`, keeping the current zoom level if the
   // technician has already zoomed in tighter than the default focus window.
-  function focusOnTime(ts: number) {
-    if (!chart) return
+  function focusOnTime(ts: number): Promise<void> {
+    if (!chart) return Promise.resolve()
     const { min, max } = chart.scales.x
     const currentWidth = min != null && max != null ? max - min : FOCUS_WINDOW_SECONDS
     const width = Math.min(currentWidth, FOCUS_WINDOW_SECONDS)
-    setVisibleRange(ts - width / 2, ts + width / 2)
+    return setVisibleRange(ts - width / 2, ts + width / 2)
   }
 
   // Jumping to a beat of interest also SELECTS it, so the detail panel shows
   // that beat's categories and the confirm/reject controls act on it — the
   // review loop the old app's next/prev-arrhythmia buttons drove.
-  function goToBeatOfInterest(index: number) {
+  async function goToBeatOfInterest(index: number) {
     if (beatsOfInterest.length === 0) return
     const clamped = Math.max(0, Math.min(beatsOfInterest.length - 1, index))
     beatOfInterestIndex = clamped
     const ts = beatsOfInterest[clamped]
-    focusOnTime(ts)
 
-    const beat = lastBeats.find((b) => b.ts === ts)
-    if (beat) onBeatSelect?.(beat)
+    // Select immediately when the beat is already loaded, so the detail
+    // panel responds without waiting on the network.
+    const loaded = lastBeats.find((b) => b.ts === ts)
+    if (loaded) onBeatSelect?.(loaded)
+
+    const pending = focusOnTime(ts)
+
+    // Jumping somewhere outside the loaded buffer — a long recording, or a
+    // jump straight to the last flagged beat — means the beat isn't in
+    // `lastBeats` yet. Without this retry the view moved but nothing was
+    // selected, so the review controls silently acted on the wrong beat (or
+    // on nothing at all).
+    if (!loaded) {
+      await pending
+      const fetched = lastBeats.find((b) => b.ts === ts)
+      // Still the beat the technician asked for? A newer jump may have
+      // superseded this one while the fetch was in flight.
+      if (fetched && beatsOfInterest[beatOfInterestIndex] === ts) onBeatSelect?.(fetched)
+    }
   }
 
   function handleFirstBeatOfInterest() {
-    goToBeatOfInterest(0)
+    void goToBeatOfInterest(0)
   }
 
   function handlePrevBeatOfInterest() {
     // From "nowhere yet", stepping back lands on the last one rather than
     // doing nothing.
-    goToBeatOfInterest(beatOfInterestIndex <= 0 ? beatsOfInterest.length - 1 : beatOfInterestIndex - 1)
+    void goToBeatOfInterest(beatOfInterestIndex <= 0 ? beatsOfInterest.length - 1 : beatOfInterestIndex - 1)
   }
 
   function handleNextBeatOfInterest() {
-    goToBeatOfInterest(beatOfInterestIndex + 1 >= beatsOfInterest.length ? 0 : beatOfInterestIndex + 1)
+    void goToBeatOfInterest(beatOfInterestIndex + 1 >= beatsOfInterest.length ? 0 : beatOfInterestIndex + 1)
   }
 
   function handleLastBeatOfInterest() {
-    goToBeatOfInterest(beatsOfInterest.length - 1)
+    void goToBeatOfInterest(beatsOfInterest.length - 1)
   }
 
   // Time navigation across the file at the current zoom — the old app's
@@ -1341,7 +1487,12 @@
       const width = containerEl?.clientWidth ?? 0
       const result = await fetchMergedWindow(0, Number.MAX_SAFE_INTEGER, width)
       if (cancelled || !result || !containerEl) return
-      const { channel: data, merged } = result
+      const { channel: data, beats, merged } = result
+      // `fetchMergedWindow` deliberately leaves these to its caller (see its
+      // own comment), so the mount path has to commit them too — they are
+      // what click hit-testing and every later local re-merge read from.
+      lastChannelWindow = data
+      lastBeats = beats
 
       fullExtent = { start: data.x[0] ?? 0, end: data.x[data.x.length - 1] ?? 0 }
       // The initial mount fetch already loads the whole file's extent (see
@@ -1412,6 +1563,7 @@
       // only removes uPlot's own DOM/listeners, so an active drag must be
       // torn down separately or it outlives the component.
       endActiveDrag?.()
+      endToolsDrag?.()
       chart?.destroy()
       chart = undefined
       chartReady = false
@@ -1503,8 +1655,11 @@
   // focus-mode chart sized to the window.
   onMount(() => {
     function handleKeydown(event: KeyboardEvent) {
-      // Escape works even while typing — it's the universal "get me out".
+      // Escape works even while typing — it's the universal "get me out" —
+      // but a modal owns it while open, otherwise dismissing Settings would
+      // also drop the technician out of focus mode behind it.
       if (event.key === 'Escape') {
+        if (document.querySelector('[role="dialog"]')) return
         if (badDataMode) {
           badDataMode = false
           hoveredMarkId = null
@@ -1551,6 +1706,7 @@
     }
     function handleResize() {
       viewportHeight = window.innerHeight
+      if (toolsPos) toolsPos = clampToolsPos(toolsPos.x, toolsPos.y)
     }
     document.addEventListener('keydown', handleKeydown)
     window.addEventListener('resize', handleResize)
@@ -1607,7 +1763,7 @@
     const ready = chartReady
     if (hasAutoFocused || flagged.length === 0 || !ready) return
     hasAutoFocused = true
-    goToBeatOfInterest(0)
+    void goToBeatOfInterest(0)
   })
 
   function handleResetView() {
@@ -1654,19 +1810,44 @@
   <!-- In focus mode this whole block detaches into a floating panel over
        the trace, and can be collapsed to a single button so nothing covers
        the signal. -->
-  <div class="graph-tools" class:floating={fullscreen} class:collapsed={fullscreen && toolsCollapsed}>
+  <div
+    class="graph-tools"
+    class:floating={fullscreen}
+    class:collapsed={fullscreen && toolsCollapsed}
+    class:dragging={draggingTools}
+    bind:this={toolsEl}
+    style={fullscreen && toolsPos ? `left: ${toolsPos.x}px; top: ${toolsPos.y}px; right: auto;` : ''}
+  >
     {#if fullscreen}
-      <button
-        type="button"
-        class="btn btn-sm tools-handle"
-        data-testid="toggle-graph-tools-button"
-        aria-expanded={!toolsCollapsed}
-        title={toolsCollapsed ? 'Show tools' : 'Hide tools'}
-        onclick={toggleTools}
-      >
-        <Icon name={toolsCollapsed ? 'chevron-down' : 'x'} size={14} />
-        {toolsCollapsed ? 'Tools' : 'Hide'}
-      </button>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="tools-bar" data-testid="graph-tools-bar" onmousedown={startToolsDrag}>
+        <span class="tools-grip" title="Drag to move these tools" aria-hidden="true">
+          <Icon name="grip" size={14} />
+        </span>
+        <span class="tools-bar-label">Tools</span>
+        {#if toolsPos}
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="reset-tools-position-button"
+            title="Move back to the corner"
+            onclick={resetToolsPos}
+          >
+            Reset
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="toggle-graph-tools-button"
+          aria-expanded={!toolsCollapsed}
+          title={toolsCollapsed ? 'Show tools' : 'Hide tools'}
+          onclick={toggleTools}
+        >
+          <Icon name={toolsCollapsed ? 'chevron-down' : 'x'} size={14} />
+          {toolsCollapsed ? 'Tools' : 'Hide'}
+        </button>
+      </div>
     {/if}
 
     {#if !(fullscreen && toolsCollapsed)}
@@ -2038,7 +2219,7 @@
   }
 
   .graph-tools.floating {
-    position: absolute;
+    position: fixed;
     top: var(--space-3);
     right: var(--space-3);
     z-index: 2;
@@ -2055,8 +2236,39 @@
     padding: var(--space-1);
   }
 
-  .tools-handle {
-    align-self: flex-end;
+  .tools-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border, #d3dae1);
+    cursor: grab;
+    user-select: none;
+  }
+
+  .graph-tools.dragging .tools-bar {
+    cursor: grabbing;
+  }
+
+  .graph-tools.dragging {
+    /* No transition while dragging, so the panel tracks the cursor exactly. */
+    transition: none;
+    opacity: 0.95;
+  }
+
+  .tools-grip {
+    display: inline-flex;
+    color: var(--color-text-muted, #5b6b7c);
+  }
+
+  .tools-bar-label {
+    flex: 1;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted, #5b6b7c);
   }
 
   .mode-banner {
