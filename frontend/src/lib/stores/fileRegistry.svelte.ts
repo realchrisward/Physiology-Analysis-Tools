@@ -54,6 +54,22 @@ export function clearFileRegistry(): void {
   autoOpenRequest.value = null
 }
 
+/**
+ * Takes one file out of this session's list — the sidebar's per-file X.
+ * Like `clearFileRegistry`, frontend-only: nothing on disk, in the backend
+ * caches or in saved review work is touched, and re-importing brings the
+ * file back with its history. A file still waiting for detection is put back
+ * to 'ready' so the detection worker skips it instead of processing a file
+ * nobody can see any more.
+ */
+export function removeFile(path: string): boolean {
+  const index = fileRegistry.findIndex((row) => row.path === path)
+  if (index === -1) return false
+  if (fileRegistry[index].status === 'queued') fileRegistry[index].status = 'ready'
+  fileRegistry.splice(index, 1)
+  return true
+}
+
 /** Test-only: reset the registry so each test starts from a clean state. */
 export function resetForTesting(): void {
   fileRegistry.length = 0

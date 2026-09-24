@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
+  import { formatRelativeTime } from '../../lib/format'
   import {
     clearFileRegistry,
     fileRegistry,
+    removeFile,
     type FileRow,
     type ReviewSelection,
   } from '../../lib/stores/fileRegistry.svelte'
@@ -22,6 +25,7 @@
     onReview,
     onResize,
     onFilesCleared,
+    onFileRemoved,
   }: {
     collapsed?: boolean
     activePath?: string | null
@@ -31,7 +35,42 @@
     // workspace showing something no longer listed anywhere, so the app
     // shell is told to go back to the welcome screen.
     onFilesCleared?: () => void
+    // Removing the file that is currently open leaves the same problem, so
+    // the shell is told which one went.
+    onFileRemoved?: (path: string) => void
   } = $props()
+
+  // "Opened 5 minutes ago" would go stale on screen, so re-read the clock
+  // once a minute.
+  let now: number = $state(Date.now())
+  onMount(() => {
+    const timer = setInterval(() => (now = Date.now()), 60_000)
+    return () => clearInterval(timer)
+  })
+
+  function openedLabel(path: string): string | null {
+    const recent = recentFiles.find((f) => f.path === path)
+    return recent ? `Opened ${formatRelativeTime(recent.openedAt, now)}` : null
+  }
+
+  function canOpen(row: FileRow): boolean {
+    return row.defaultChannel !== null && row.status !== 'error'
+  }
+
+  function handleRowKeydown(event: KeyboardEvent, row: FileRow) {
+    if (event.target !== event.currentTarget) return
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      handleReview(row)
+    }
+  }
+
+  function handleRemove(event: MouseEvent, row: FileRow) {
+    // The X sits inside the clickable row; removing must not also open it.
+    event.stopPropagation()
+    removeFile(row.path)
+    onFileRemoved?.(row.path)
+  }
 
   let asideEl: HTMLElement | undefined = $state()
   // Collapsed by default — this section is a secondary, quick-recall
@@ -45,7 +84,7 @@
   let recentOnly = $derived(recentFiles.filter((f) => !fileRegistry.some((row) => row.path === f.path)))
 
   function handleReview(row: FileRow) {
-    if (row.defaultChannel === null) return
+    if (!canOpen(row) || row.defaultChannel === null) return
     onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
   }
 
@@ -142,16 +181,19 @@
   {/if}
   <div class="sidebar-list" data-testid="sidebar-file-list">
     {#each fileRegistry as row (row.path)}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <!-- The whole row opens the file: a click anywhere on it, or Enter/Space
+           when focused. The X inside it is its own button. -->
       <div
         class="sidebar-row"
         class:active={row.path === activePath}
-        class:clickable={collapsed && row.defaultChannel !== null && row.status !== 'error'}
+        class:clickable={canOpen(row)}
         data-testid="file-row"
         title={row.filename}
-        onclick={collapsed ? () => handleReview(row) : undefined}
+        role="button"
+        tabindex={canOpen(row) ? 0 : -1}
+        aria-disabled={!canOpen(row)}
+        onclick={() => handleReview(row)}
+        onkeydown={(event) => handleRowKeydown(event, row)}
       >
         <span class="sidebar-row-dot" data-status={row.status}></span>
         {#if !collapsed}
@@ -176,17 +218,20 @@
             {:else}
               <span class="sidebar-row-status text-danger">{row.error}</span>
             {/if}
+            {#if openedLabel(row.path)}
+              <span class="sidebar-row-opened text-muted" data-testid="file-row-opened">{openedLabel(row.path)}</span>
+            {/if}
           </span>
-          {#if row.defaultChannel !== null && row.status !== 'error'}
-            <button
-              type="button"
-              class="btn btn-sm sidebar-row-review"
-              data-testid="review-button"
-              onclick={() => handleReview(row)}
-            >
-              Open
-            </button>
-          {/if}
+          <button
+            type="button"
+            class="icon-btn sidebar-row-remove"
+            data-testid="remove-file-button"
+            title="Remove from this list (saved review work is kept)"
+            aria-label={`Remove ${row.filename} from the list`}
+            onclick={(event) => handleRemove(event, row)}
+          >
+            <Icon name="x" size={14} />
+          </button>
         {/if}
       </div>
     {/each}
@@ -450,8 +495,20 @@
     white-space: nowrap;
   }
 
-  .sidebar-row-review {
+  .sidebar-row-opened {
+    font-size: 0.7rem;
+  }
+
+  .sidebar-row-remove {
     flex-shrink: 0;
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+  }
+
+  /* Shown on hover and whenever the row or the X has keyboard focus. */
+  .sidebar-row:hover .sidebar-row-remove,
+  .sidebar-row:focus-within .sidebar-row-remove {
+    opacity: 1;
   }
 
   .sidebar-section {

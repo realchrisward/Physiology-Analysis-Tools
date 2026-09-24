@@ -56,10 +56,10 @@ describe('App', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      expect(screen.getByTestId('review-button')).toBeInTheDocument()
+      expect(screen.getByTestId('file-row')).toBeInTheDocument()
     })
 
-    await fireEvent.click(screen.getByTestId('review-button'))
+    await fireEvent.click(screen.getByTestId('file-row'))
 
     await waitFor(() => {
       expect(screen.getByTestId('review-workspace')).toBeInTheDocument()
@@ -195,8 +195,7 @@ describe('App', () => {
 
     // Now open the OTHER file directly from the sidebar, without going back
     // to the Welcome screen first.
-    const openButtons = screen.getAllByTestId('review-button')
-    const bRow = openButtons.find((btn) => btn.closest('[data-testid="file-row"]')?.textContent?.includes('b.txt'))
+    const bRow = screen.getAllByTestId('file-row').find((row) => row.textContent?.includes('b.txt'))
     await fireEvent.click(bRow!)
 
     await waitFor(() => {
@@ -284,9 +283,9 @@ describe('App', () => {
     await fireEvent.click(screen.getByTestId('import-files-button'))
 
     await waitFor(() => {
-      expect(screen.getByTestId('review-button')).toBeInTheDocument()
+      expect(screen.getByTestId('file-row')).toBeInTheDocument()
     })
-    await fireEvent.click(screen.getByTestId('review-button'))
+    await fireEvent.click(screen.getByTestId('file-row'))
 
     await waitFor(() => {
       expect(screen.getByTestId('review-workspace')).toBeInTheDocument()

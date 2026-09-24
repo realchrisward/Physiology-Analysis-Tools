@@ -40,7 +40,7 @@ const pendingDetection: FileRow[] = []
 let workerRunning = false
 let stopRequested = false
 
-async function importPaths(paths: string[]): Promise<void> {
+async function importPaths(paths: string[], autoOpen: boolean = true): Promise<void> {
   if (paths.length === 0) return
 
   importQueue.error = ''
@@ -83,7 +83,7 @@ async function importPaths(paths: string[]): Promise<void> {
     }
   }
 
-  if (autoOpenCandidate) {
+  if (autoOpen && autoOpenCandidate) {
     autoOpenRequest.value = {
       path: autoOpenCandidate.path,
       channels: autoOpenCandidate.channels,
@@ -210,22 +210,42 @@ export async function handleImportFolder(): Promise<void> {
  * (localStorage-backed) still remembers it — goes through the real import.
  */
 export async function openRecentFile(path: string): Promise<void> {
-  const existing = fileRegistry.find((row) => row.path === path)
-  if (existing && existing.status !== 'error' && existing.defaultChannel !== null) {
-    recordRecentFile(existing.path, existing.filename)
-    autoOpenRequest.value = {
-      path: existing.path,
-      channels: existing.channels,
-      defaultChannel: existing.defaultChannel,
+  await openFiles([path])
+}
+
+/**
+ * Loads several files into the session at once (Home's "Open all" / "Open
+ * selected") and opens the FIRST of them for review; the rest appear in the
+ * sidebar, ready to click. Files already in this session are not re-imported
+ * and their detection is not re-run. The review view shows one file at a
+ * time, so "open" for the others means "loaded and one click away".
+ */
+export async function openFiles(paths: string[]): Promise<void> {
+  if (paths.length === 0) return
+
+  const missing = paths.filter((path) => !fileRegistry.some((row) => row.path === path))
+  if (missing.length > 0) {
+    importQueue.importing = true
+    try {
+      // Not auto-opened here: the file to show is the first one REQUESTED,
+      // which is not necessarily the first one that needed importing.
+      await importPaths(missing, false)
+    } finally {
+      importQueue.importing = false
     }
-    return
   }
 
-  importQueue.importing = true
-  try {
-    await importPaths([path])
-  } finally {
-    importQueue.importing = false
+  for (const path of paths) {
+    const row = fileRegistry.find((candidate) => candidate.path === path)
+    if (row && row.status !== 'error' && row.defaultChannel !== null) {
+      recordRecentFile(row.path, row.filename)
+      autoOpenRequest.value = {
+        path: row.path,
+        channels: row.channels,
+        defaultChannel: row.defaultChannel,
+      }
+      return
+    }
   }
 }
 

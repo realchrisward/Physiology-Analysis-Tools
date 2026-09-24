@@ -17,7 +17,7 @@ workflow authority).
 | `frontend/src/lib/api/http.ts` | `apiGet`/`apiPost` — shared fetch wrapper. Never throws: network failures and non-2xx responses are caught and returned as `{status:'error', error}`. |
 | `frontend/src/lib/api/types.ts` | Hand-written TS interfaces mirroring every `backend/models.py` class the client uses, plus `ApiError` (the explicit failure-shape union member for the 3 endpoints whose success shape doesn't carry `status`/`error`). |
 | `frontend/src/lib/api/{files,beats,arrhythmia,settings,windowing,persistence}.ts` | One thin wrapper file per backend router, all 15 endpoints. |
-| `frontend/src/lib/format.ts` | `formatEditTime(iso)` — "24 Sep 2026, 14:32" in the viewer's locale, used for the manual-beat flag. |
+| `frontend/src/lib/format.ts` | `formatEditTime(iso)` — "24 Sep 2026, 14:32" for the manual-beat flag. `formatRelativeTime(ts)` — "5 minutes ago" / "yesterday at 14:32" / "3 days ago" / a date, by calendar day; used for "Opened …" on Home and in the sidebar. |
 | `frontend/src/lib/tokens.css` | Design tokens: color (neutral scale + accent + semantic success/warning/danger, WCAG AA, light+dark), spacing, type (incl. a mono scale for numeric readouts), radii, shadow. |
 | `desktop/main.js` | Electron main process. Spawns/tears down the backend subprocess; `ipcMain.handle`s: `get-backend-port`, `pick-files`, `pick-folder`, `pick-output-directory` (all dialog-based, filtered to `SUPPORTED_EXTENSIONS` — `adicht`, `txt`, `mat`, `gzip`, `edf`). |
 | `desktop/preload.js` | `contextBridge.exposeInMainWorld('api', {...})` — the only surface the renderer can call into Electron/Node through. |
@@ -59,6 +59,12 @@ All in `EcgGraph.svelte` unless noted; tests in `EcgGraph.test.ts`.
 - **Labelling.** The `N`/`P`/`C`/`R` shortcuts are a keycap legend under the
   beat navigation; the Raw/Filtered button sits under a "Trace" label, and
   the marker filters under "Show markers".
+
+## Home and sidebar file handling (added after F5)
+
+- **Home recent files** have a checkbox each, "Select all", **Open selected (n)** and **Open all (n)**. Clicking a card still opens just that file. Several files "open" by being loaded into the session (`openFiles()` in `importQueue.svelte.ts`: files already loaded are not re-imported or re-detected) with the first one shown for review, since the review view is one file at a time; the rest are one click away in the sidebar. The recent list holds 30 files.
+- **Sidebar rows** open the file on click (or Enter/Space when focused) — there is no Open button any more. Each row has an X that removes it from the list (`removeFile()`: frontend-only, saved review work is kept, a queued file is dropped from the detection queue; removing the open file returns to Home).
+- **"Opened …"** shows on Home cards and sidebar rows. It is the time the file was last opened in the app (`recentFiles.openedAt`, bumped in `App.handleReview`), not a record of when review edits were made.
 
 ## Design decisions
 

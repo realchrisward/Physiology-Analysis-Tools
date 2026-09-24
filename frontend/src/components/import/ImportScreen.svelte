@@ -1,18 +1,45 @@
 <script lang="ts">
-  import { handleImportFiles, handleImportFolder, handleStop, importQueue, openRecentFile } from '../../lib/stores/importQueue.svelte'
+  import { onMount } from 'svelte'
+  import { formatRelativeTime } from '../../lib/format'
+  import {
+    handleImportFiles,
+    handleImportFolder,
+    handleStop,
+    importQueue,
+    openFiles,
+    openRecentFile,
+  } from '../../lib/stores/importQueue.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
 
-  function formatRelativeTime(ts: number): string {
-    const diffMs = Date.now() - ts
-    const minutes = Math.round(diffMs / 60000)
-    if (minutes < 1) return 'just now'
-    if (minutes < 60) return `${minutes}m ago`
-    const hours = Math.round(minutes / 60)
-    if (hours < 24) return `${hours}h ago`
-    const days = Math.round(hours / 24)
-    if (days <= 1) return 'Yesterday'
-    return `${days}d ago`
+  // Keeps "Opened 5 minutes ago" honest while the screen stays open.
+  let now: number = $state(Date.now())
+  onMount(() => {
+    const timer = setInterval(() => (now = Date.now()), 60_000)
+    return () => clearInterval(timer)
+  })
+
+  // Files ticked for "Open selected". Kept as paths and always read through
+  // `selectedPaths` so a file that has since dropped off the list can never
+  // be opened by a stale tick.
+  let ticked: string[] = $state([])
+  let selectedPaths = $derived(recentFiles.map((f) => f.path).filter((p) => ticked.includes(p)))
+  let allSelected = $derived(recentFiles.length > 0 && selectedPaths.length === recentFiles.length)
+
+  function toggleTicked(path: string) {
+    ticked = ticked.includes(path) ? ticked.filter((p) => p !== path) : [...ticked, path]
+  }
+
+  function toggleAll() {
+    ticked = allSelected ? [] : recentFiles.map((f) => f.path)
+  }
+
+  function openAll() {
+    void openFiles(recentFiles.map((f) => f.path))
+  }
+
+  function openSelected() {
+    void openFiles(selectedPaths)
   }
 </script>
 
@@ -64,20 +91,66 @@
 
   {#if recentFiles.length > 0}
     <div class="recent-files">
-      <h2 class="recent-files-title">Recent files</h2>
+      <div class="recent-files-header">
+        <h2 class="recent-files-title">Recent files</h2>
+        <label class="select-all">
+          <input
+            type="checkbox"
+            data-testid="select-all-recent-checkbox"
+            checked={allSelected}
+            onchange={toggleAll}
+          />
+          Select all
+        </label>
+        <span class="recent-files-spacer"></span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="open-selected-button"
+          disabled={selectedPaths.length === 0 || importQueue.importing}
+          onclick={openSelected}
+        >
+          Open selected{selectedPaths.length > 0 ? ` (${selectedPaths.length})` : ''}
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-primary"
+          data-testid="open-all-button"
+          disabled={importQueue.importing}
+          onclick={openAll}
+        >
+          Open all ({recentFiles.length})
+        </button>
+      </div>
+      <p class="recent-files-hint text-muted">
+        Click a file to open just that one, or tick several and use Open selected. When more than one
+        opens, the first is shown and the others are ready in the sidebar.
+      </p>
       <div class="recent-files-grid">
         {#each recentFiles as file (file.path)}
-          <button
-            type="button"
-            class="recent-file-card"
-            data-testid="recent-file-card"
-            onclick={() => openRecentFile(file.path)}
-            disabled={importQueue.importing}
-          >
-            <Icon name="file-text" size={18} />
-            <span class="recent-file-name">{file.filename}</span>
-            <span class="recent-file-time text-muted">{formatRelativeTime(file.openedAt)}</span>
-          </button>
+          <div class="recent-file-item">
+            <input
+              type="checkbox"
+              class="recent-file-checkbox"
+              data-testid="recent-file-checkbox"
+              aria-label={`Select ${file.filename}`}
+              checked={ticked.includes(file.path)}
+              onchange={() => toggleTicked(file.path)}
+            />
+            <button
+              type="button"
+              class="recent-file-card"
+              data-testid="recent-file-card"
+              onclick={() => openRecentFile(file.path)}
+              disabled={importQueue.importing}
+            >
+              <Icon name="file-text" size={18} />
+              <span class="recent-file-name">{file.filename}</span>
+              <span class="recent-file-time text-muted" data-testid="recent-file-opened"
+                >Opened {formatRelativeTime(file.openedAt, now)}</span
+              >
+            </button>
+          </div>
         {/each}
       </div>
     </div>
@@ -145,13 +218,54 @@
     margin-top: var(--space-6);
   }
 
+  .recent-files-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+  }
+
+  .recent-files-spacer {
+    flex: 1;
+  }
+
   .recent-files-title {
     font-size: var(--font-size-sm);
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-bottom: var(--space-3);
+  }
+
+  .select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+  }
+
+  .recent-files-hint {
+    margin: var(--space-2) 0 var(--space-3);
+    font-size: 0.75rem;
+  }
+
+  .recent-file-item {
+    position: relative;
+    display: flex;
+  }
+
+  .recent-file-item .recent-file-card {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Top-right corner of the card, clear of the file icon at top-left. */
+  .recent-file-checkbox {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    z-index: 1;
   }
 
   .recent-files-grid {

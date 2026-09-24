@@ -7,6 +7,7 @@
   import Icon from './components/shared/Icon.svelte'
   import { themeState } from './lib/stores/theme.svelte'
   import { autoOpenRequest, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
+  import { recordRecentFile } from './lib/stores/recentFiles.svelte'
 
   const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
   const MIN_SIDEBAR_WIDTH = 180
@@ -34,6 +35,13 @@
   function handleReview(row: ReviewSelection) {
     selectedFile = row
     view = 'review'
+    // Every way of opening a file lands here, so this is the one place that
+    // keeps its "last opened" time current.
+    recordRecentFile(row.path, fileNameOf(row.path))
+  }
+
+  function handleFileRemoved(path: string) {
+    if (selectedFile?.path === path) handleFilesCleared()
   }
 
   function handleBack() {
@@ -151,6 +159,7 @@
     onReview={handleReview}
     onResize={handleSidebarResize}
     onFilesCleared={handleFilesCleared}
+    onFileRemoved={handleFileRemoved}
   />
 
   <main class="main-content">

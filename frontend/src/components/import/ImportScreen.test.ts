@@ -594,3 +594,111 @@ describe('ImportScreen recent files', () => {
     })
   })
 })
+
+describe('ImportScreen opening several recent files', () => {
+  async function seedRecents(...names: string[]) {
+    const { recordRecentFile } = await import('../../lib/stores/recentFiles.svelte')
+    for (const name of names) recordRecentFile(`/data/${name}.txt`, `${name}.txt`)
+  }
+
+  function importCall(fetchMock: ReturnType<typeof vi.fn>) {
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/files/import'))
+    return call ? JSON.parse((call[1] as RequestInit).body as string).paths : null
+  }
+
+  function fileInfo(name: string) {
+    return { path: `/data/${name}.txt`, filename: `${name}.txt`, size: 100, defaultChannel: 'channel 1' }
+  }
+
+  it('Open all loads every recent file in one import and opens the first one listed', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(importOkResponse(['c', 'b', 'a'].map(fileInfo)))
+    vi.stubGlobal('fetch', fetchMock)
+    await seedRecents('a', 'b', 'c') // newest first: c, b, a
+    const { autoOpenRequest } = await import('../../lib/stores/fileRegistry.svelte')
+    autoOpenRequest.value = null
+
+    render(ImportScreen)
+    expect(screen.getByTestId('open-all-button')).toHaveTextContent('Open all (3)')
+    await fireEvent.click(screen.getByTestId('open-all-button'))
+
+    await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/c.txt'))
+    expect(importCall(fetchMock)).toEqual(['/data/c.txt', '/data/b.txt', '/data/a.txt'])
+    expect(fileRegistry).toHaveLength(3)
+    autoOpenRequest.value = null
+  })
+
+  it('Open selected only loads the ticked files', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(importOkResponse([fileInfo('b')]))
+    vi.stubGlobal('fetch', fetchMock)
+    await seedRecents('a', 'b', 'c')
+    const { autoOpenRequest } = await import('../../lib/stores/fileRegistry.svelte')
+    autoOpenRequest.value = null
+
+    render(ImportScreen)
+    expect(screen.getByTestId('open-selected-button')).toBeDisabled()
+    await fireEvent.click(screen.getAllByTestId('recent-file-checkbox')[1]) // b
+    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open selected (1)')
+    await fireEvent.click(screen.getByTestId('open-selected-button'))
+
+    await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/b.txt'))
+    expect(importCall(fetchMock)).toEqual(['/data/b.txt'])
+    autoOpenRequest.value = null
+  })
+
+  it('Select all ticks every file, and unticks them when used again', async () => {
+    await seedRecents('a', 'b', 'c')
+    render(ImportScreen)
+
+    await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
+    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open selected (3)')
+
+    await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
+    expect(screen.getByTestId('open-selected-button')).toBeDisabled()
+  })
+
+  it('clicking a file card still opens only that one file', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(importOkResponse([fileInfo('a')]))
+    vi.stubGlobal('fetch', fetchMock)
+    await seedRecents('a', 'b')
+    render(ImportScreen)
+
+    await fireEvent.click(screen.getAllByTestId('recent-file-card')[1]) // a
+
+    await waitFor(() => expect(importCall(fetchMock)).toEqual(['/data/a.txt']))
+    const { autoOpenRequest } = await import('../../lib/stores/fileRegistry.svelte')
+    autoOpenRequest.value = null
+  })
+
+  it('does not re-import files already loaded this session when opening all', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(importOkResponse([fileInfo('b')]))
+    vi.stubGlobal('fetch', fetchMock)
+    await seedRecents('a', 'b')
+    fileRegistry.push({
+      path: '/data/a.txt',
+      filename: 'a.txt',
+      status: 'ready',
+      channels: ['channel 1'],
+      defaultChannel: 'channel 1',
+      size: 100,
+      error: null,
+      beatCount: null,
+      meanHr: null,
+    })
+    const { autoOpenRequest } = await import('../../lib/stores/fileRegistry.svelte')
+    autoOpenRequest.value = null
+
+    render(ImportScreen)
+    await fireEvent.click(screen.getByTestId('open-all-button'))
+
+    await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/b.txt'))
+    expect(importCall(fetchMock)).toEqual(['/data/b.txt'])
+    autoOpenRequest.value = null
+  })
+
+  it('shows when each file was last opened, in words', async () => {
+    await seedRecents('a')
+    render(ImportScreen)
+
+    expect(screen.getByTestId('recent-file-opened')).toHaveTextContent('Opened just now')
+  })
+})

@@ -10,7 +10,7 @@ export interface RecentFile {
 }
 
 const STORAGE_KEY = 'pat.recentFiles'
-const MAX_RECENT = 8
+const MAX_RECENT = 30
 
 function loadInitial(): RecentFile[] {
   try {

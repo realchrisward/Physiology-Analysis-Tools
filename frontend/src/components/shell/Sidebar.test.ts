@@ -60,14 +60,14 @@ describe('Sidebar file list', () => {
     expect(rows[1]).toHaveTextContent('No extractor succeeded')
   })
 
-  it('shows a distinct "queued" status, and still offers an Open button, for a file waiting in the detection queue', () => {
+  it('shows a distinct "queued" status, and still lets the file be opened, for a file waiting in the detection queue', () => {
     pushRow({ path: '/data/57.txt', filename: '57.txt', status: 'queued' })
 
     render(Sidebar, { props: { onReview: vi.fn() } })
 
     const row = screen.getByTestId('file-row')
     expect(row).toHaveTextContent('queued for detection')
-    expect(screen.getByTestId('review-button')).toBeInTheDocument()
+    expect(row).toHaveAttribute('aria-disabled', 'false')
   })
 
   it('shows "Calculating..." ETA for the first detecting file, then a real ETA for the next', async () => {
@@ -90,14 +90,14 @@ describe('Sidebar file list', () => {
     })
   })
 
-  it('shows an "Open" button for a row with a channel, firing onReview with path/channels/defaultChannel', async () => {
+  it('opens a file when its row is clicked, firing onReview with path/channels/defaultChannel', async () => {
     pushRow({ path: '/data/57.txt', filename: '57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' })
     const onReview = vi.fn()
 
     render(Sidebar, { props: { onReview } })
 
-    expect(screen.getByTestId('review-button')).toHaveTextContent('Open')
-    await fireEvent.click(screen.getByTestId('review-button'))
+    expect(screen.queryByTestId('review-button')).not.toBeInTheDocument()
+    await fireEvent.click(screen.getByTestId('file-row'))
 
     expect(onReview).toHaveBeenCalledWith({
       path: '/data/57.txt',
@@ -106,12 +106,68 @@ describe('Sidebar file list', () => {
     })
   })
 
-  it('shows no Review button for a row that failed to import', () => {
+  it('does not open a row that failed to import', async () => {
     pushRow({ path: '/data/bad.txt', filename: 'bad.txt', status: 'error', defaultChannel: null, channels: [] })
+    const onReview = vi.fn()
 
-    render(Sidebar, { props: { onReview: vi.fn() } })
+    render(Sidebar, { props: { onReview } })
 
-    expect(screen.queryByTestId('review-button')).not.toBeInTheDocument()
+    const row = screen.getByTestId('file-row')
+    expect(row).toHaveAttribute('aria-disabled', 'true')
+    await fireEvent.click(row)
+    expect(onReview).not.toHaveBeenCalled()
+  })
+
+  it('opens the focused row from the keyboard', async () => {
+    pushRow({ path: '/data/57.txt', filename: '57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' })
+    const onReview = vi.fn()
+    render(Sidebar, { props: { onReview } })
+
+    await fireEvent.keyDown(screen.getByTestId('file-row'), { key: 'Enter' })
+
+    expect(onReview).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes a file with its X without opening it, and tells the shell', async () => {
+    pushRow({ path: '/data/a.txt', filename: 'a.txt', channels: ['channel 1'], defaultChannel: 'channel 1' })
+    pushRow({ path: '/data/b.txt', filename: 'b.txt', channels: ['channel 1'], defaultChannel: 'channel 1' })
+    const onReview = vi.fn()
+    const onFileRemoved = vi.fn()
+    render(Sidebar, { props: { onReview, onFileRemoved } })
+
+    await fireEvent.click(screen.getAllByTestId('remove-file-button')[0])
+
+    expect(onReview).not.toHaveBeenCalled()
+    expect(onFileRemoved).toHaveBeenCalledWith('/data/a.txt')
+    await waitFor(() => expect(screen.getAllByTestId('file-row')).toHaveLength(1))
+    expect(screen.getByTestId('file-row')).toHaveTextContent('b.txt')
+  })
+
+  it('takes a queued file out of the detection queue when it is removed', async () => {
+    pushRow({ path: '/data/a.txt', filename: 'a.txt', status: 'queued' })
+    const row = fileRegistry[0]
+    render(Sidebar)
+
+    await fireEvent.click(screen.getByTestId('remove-file-button'))
+
+    expect(row.status).toBe('ready')
+  })
+
+  it('shows when a file was last opened, in words', () => {
+    pushRow({ path: '/data/57.txt', filename: '57.txt' })
+    recordRecentFile('/data/57.txt', '57.txt')
+
+    render(Sidebar)
+
+    expect(screen.getByTestId('file-row-opened')).toHaveTextContent('Opened just now')
+  })
+
+  it('shows no opened line for a file with no open history', () => {
+    pushRow({ path: '/data/57.txt', filename: '57.txt' })
+
+    render(Sidebar)
+
+    expect(screen.queryByTestId('file-row-opened')).not.toBeInTheDocument()
   })
 
   it('highlights the active file and hides row detail when collapsed', () => {
@@ -122,7 +178,7 @@ describe('Sidebar file list', () => {
     // Collapsed mode hides the filename/status/Review button — only the
     // status dot remains, with the filename reachable via the row's title.
     expect(screen.queryByText('57.txt')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('review-button')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('remove-file-button')).not.toBeInTheDocument()
     expect(container.querySelector('.sidebar.collapsed')).toBeInTheDocument()
   })
 

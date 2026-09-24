@@ -81,6 +81,9 @@ flagged down to 1/163. A fixed `eps` is still selectable in Settings.
 - **Rejected beats get a visible strike overlay**, distinguishing "reviewed
   and dismissed" from "never flagged" (fixed this session) — the original had
   no such distinction either.
+- **Multi-file Home and sidebar** — open all or a ticked selection of recent
+  files at once, click a sidebar row to open it, remove a file from the list
+  with its X, and see "opened 5 minutes ago" beside each file.
 - **Manual beat editing** — add a beat the detector missed (snapped to the
   nearest peak, then confirmed), delete a false one, and edit or delete
   bad-data ranges. Hand edits survive re-running beat detection, and an added

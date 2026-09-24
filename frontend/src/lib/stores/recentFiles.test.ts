@@ -22,12 +22,12 @@ describe('recentFiles', () => {
     expect(recentFiles[1].path).toBe('/data/b.txt')
   })
 
-  it('caps the list at 8 entries, dropping the oldest', () => {
-    for (let i = 0; i < 10; i++) {
+  it('caps the list at 30 entries, dropping the oldest', () => {
+    for (let i = 0; i < 32; i++) {
       recordRecentFile(`/data/${i}.txt`, `${i}.txt`)
     }
-    expect(recentFiles).toHaveLength(8)
-    expect(recentFiles[0].path).toBe('/data/9.txt')
+    expect(recentFiles).toHaveLength(30)
+    expect(recentFiles[0].path).toBe('/data/31.txt')
     expect(recentFiles.find((f) => f.path === '/data/0.txt')).toBeUndefined()
   })
 
