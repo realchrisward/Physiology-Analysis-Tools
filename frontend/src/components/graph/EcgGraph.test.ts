@@ -117,6 +117,25 @@ function withMockedClientWidth<T>(width: number, fn: () => T): T {
   }
 }
 
+// One wheel step zooms 25%, and the buffer loaded on mount stays adequate
+// until the view is ~3x tighter (MIN_ZOOM_RATIO_BEFORE_REFETCH) — so a
+// single step correctly needs no refetch. These tests are about what
+// happens WHEN a refetch is due, so they zoom past that threshold.
+// Must be called with fake timers already active. uPlot commits `setScale`
+// on an animation frame, so dispatching the wheel events back to back would
+// have every handler read the same pre-zoom scale and collapse into a
+// single step — the timer advance between them lets each one land. The
+// gaps stay well inside the 150ms debounce so the callers' own
+// "not yet / now" assertions still hold.
+async function zoomInPastRefetchThreshold(over: HTMLDivElement, steps = 5) {
+  for (let i = 0; i < steps; i++) {
+    over.dispatchEvent(
+      new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
+    )
+    await vi.advanceTimersByTimeAsync(20)
+  }
+}
+
 function fetchedUrl(fetchMock: ReturnType<typeof vi.fn>, callIndex: number): URL {
   const [url] = fetchMock.mock.calls[callIndex]
   return new URL(url as string)
@@ -170,9 +189,7 @@ describe('EcgGraph', () => {
 
     const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
     vi.useFakeTimers()
-    over.dispatchEvent(
-      new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
-    )
+    await zoomInPastRefetchThreshold(over)
     await vi.advanceTimersByTimeAsync(150)
     expect(fetchMock).toHaveBeenCalledTimes(4)
 
@@ -250,9 +267,7 @@ describe('EcgGraph', () => {
     expect(over).toBeTruthy()
 
     vi.useFakeTimers()
-    over.dispatchEvent(
-      new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
-    )
+    await zoomInPastRefetchThreshold(over)
 
     // Not yet — still inside the 150ms debounce window.
     await vi.advanceTimersByTimeAsync(100)
@@ -291,9 +306,7 @@ describe('EcgGraph', () => {
     const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
 
     vi.useFakeTimers()
-    over.dispatchEvent(
-      new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 100, bubbles: true, cancelable: true }),
-    )
+    await zoomInPastRefetchThreshold(over)
     await vi.advanceTimersByTimeAsync(150)
     expect(fetchMock).toHaveBeenCalledTimes(4)
     vi.useRealTimers()
@@ -1556,5 +1569,53 @@ describe('EcgGraph filter consistency', () => {
     // No error, and the toggles reflect the filtered state.
     expect(screen.queryByTestId('ecg-graph-error')).not.toBeInTheDocument()
     expect(screen.getByTestId('legend-toggle-normal')).toHaveAttribute('aria-pressed', 'false')
+  })
+})
+
+describe('EcgGraph initial load robustness', () => {
+  it('never asks for a near-empty trace when the container has not been laid out', async () => {
+    // jsdom reports clientWidth 0, exactly like a container measured before
+    // layout settles. Asking for resolution 1 made the backend flatten the
+    // whole recording to ~4 points — the "graph only partially loads" bug.
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+
+    const resolution = Number(fetchedUrl(fetchMock, 0).searchParams.get('resolution'))
+    expect(resolution).toBeGreaterThanOrEqual(400)
+  })
+
+  it('retries a failed first load instead of leaving the graph permanently blank', async () => {
+    let attempt = 0
+    const fetchMock = vi.fn((url: string) => {
+      const { pathname } = new URL(url)
+      if (pathname === '/beats/window') {
+        return Promise.resolve(beatsWindowResponse())
+      }
+      attempt += 1
+      // The backend is spawned asynchronously, so the very first request
+      // after opening a file can genuinely arrive too early.
+      return Promise.resolve(
+        attempt === 1
+          ? { ok: true, json: async () => ({ status: 'error', error: 'File not imported', x: [], y: [] }) }
+          : channelWindowResponse(),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+
+    // The automatic retry builds the chart that the failed first attempt
+    // could not.
+    await waitFor(
+      () => {
+        expect(screen.getByTestId('ecg-graph-container').querySelector('.u-over')).toBeTruthy()
+      },
+      { timeout: 3000 },
+    )
   })
 })

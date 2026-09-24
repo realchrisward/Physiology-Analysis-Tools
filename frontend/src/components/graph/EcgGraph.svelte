@@ -232,6 +232,17 @@
   // way a document reader's page-down does.
   const PAGE_OVERLAP_RATIO = 0.9
   const TOOLS_POS_KEY = 'pat.graphToolsPos'
+  // Floor for the point density we ask the backend for, and the width to
+  // assume when the container hasn't been laid out yet. Both exist so a
+  // zero-width first measurement can never produce a near-empty trace.
+  const MIN_RESOLUTION = 400
+  const FALLBACK_WIDTH = 900
+  // Refetch once the container is this much wider than the width the
+  // current data was fetched for — the data's point density is tied to
+  // pixel width, so growing the graph (sidebar collapse, window resize,
+  // focus mode) genuinely needs more points, not just a rescale.
+  const WIDTH_GROWTH_REFETCH_RATIO = 1.5
+  const RETRY_DELAY_MS = 700
 
   // Marker/axis/grid colors. Read from tokens.css's semantic custom
   // properties (falling back to their light-mode values — jsdom in tests
@@ -618,6 +629,9 @@
   // needs, since the beats of interest it waits for can arrive either before
   // or after chart construction.
   let chartReady: boolean = $state(false)
+  // True while the first load (or a retry of it) is in flight, so the graph
+  // area says "loading" rather than sitting blank.
+  let loading: boolean = $state(false)
 
   let containerEl: HTMLDivElement | undefined = $state()
   // Tracked via `bind:clientWidth` below. Read directly off `containerEl`
@@ -711,7 +725,9 @@
   // width that was requested when it was fetched (used to detect "zoomed
   // in enough since then that this buffer's point density is now too
   // coarse"). `undefined` until the first fetch (mount) completes.
-  let loadedRange: { start: number; end: number; requestedWidth: number } | undefined
+  let loadedRange:
+    | { start: number; end: number; requestedWidth: number; pixelWidth: number }
+    | undefined
   // Guards `maybeBufferAhead` against firing overlapping fetches for
   // (approximately) the same range on consecutive mousemove ticks during a
   // single fast drag — a request-frequency throttle, independent of
@@ -735,8 +751,21 @@
   // slow response can never overwrite a newer one's data.
   let dataRequestId = 0
 
+  // The requested resolution is a PIXEL count: the backend downsamples to
+  // roughly 2 points per unit of it. A container that has not been laid out
+  // yet reports clientWidth 0, which asked for resolution 1 and got the
+  // whole recording flattened to ~4 points — the "graph only partially
+  // loads" report. Flooring it means a mistimed first measurement costs a
+  // slightly coarse first paint (corrected by the width effect below)
+  // instead of an unusable one.
   function resolutionFor(width: number): number {
-    return Math.max(1, Math.round(width))
+    return Math.max(MIN_RESOLUTION, Math.round(width))
+  }
+
+  /** Container width, falling back to a sane default before layout. */
+  function measuredWidth(): number {
+    const measured = containerEl?.clientWidth ?? 0
+    return measured > 0 ? measured : FALLBACK_WIDTH
   }
 
   async function loadWindow(start: number, end: number, width: number): Promise<{ x: number[]; y: number[] } | null> {
@@ -875,6 +904,13 @@
   // range correctly — no fetch, no loading delay.
   function needsRefetch(min: number, max: number): boolean {
     if (!loadedRange) return true
+    // The graph got materially wider than when this data was fetched, so
+    // the point density it was fetched at is now too coarse for the pixels
+    // available. Checked first because it is independent of the x-range:
+    // the two checks below only compare data-space widths and would happily
+    // keep serving a 4-point trace forever.
+    if (measuredWidth() > loadedRange.pixelWidth * WIDTH_GROWTH_REFETCH_RATIO) return true
+
     const visibleWidth = max - min
     const margin = visibleWidth * BUFFER_MARGIN_RATIO
     const withinBounds = min >= loadedRange.start + margin && max <= loadedRange.end - margin
@@ -897,7 +933,8 @@
     const pad = usePad ? requestedWidth * PAD_FACTOR : 0
     const fetchStart = min - pad
     const fetchEnd = max + pad
-    const fetchWidth = usePad ? containerWidth * (1 + 2 * PAD_FACTOR) : containerWidth
+    const baseWidth = measuredWidth()
+    const fetchWidth = usePad ? baseWidth * (1 + 2 * PAD_FACTOR) : baseWidth
 
     const result = await fetchMergedWindow(fetchStart, fetchEnd, fetchWidth)
     // Superseded by a newer refetch (a later pan/zoom, or a Reset) dispatched
@@ -929,7 +966,7 @@
       if (options.resetScales) {
         chart.setScale('x', { min, max })
       }
-      loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth }
+      loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth, pixelWidth: fetchWidth }
       applyFilters() // setData resets series visibility; re-apply the active category/review filters
     }
   }
@@ -1480,13 +1517,63 @@
     return badDataMarks.find((mark) => xVal >= mark.start && xVal <= mark.stop)
   }
 
+  // The mount load, pulled out of `onMount` so it can be retried. A first
+  // load that fails used to leave the chart permanently unbuilt — no
+  // waveform, no markers, and no way back short of switching channels —
+  // which is the other half of the "graph stays empty" report: the backend
+  // is spawned asynchronously by Electron, so the very first request after
+  // opening a file can genuinely arrive too early.
+  async function initialLoad(): Promise<boolean> {
+    if (!containerEl) return false
+    loading = true
+    try {
+      const result = await fetchMergedWindow(0, Number.MAX_SAFE_INTEGER, measuredWidth())
+      if (mountCancelled || !containerEl) return false
+      if (!result) return false
+      buildChart(result)
+      return true
+    } finally {
+      if (!mountCancelled) loading = false
+    }
+  }
+
+  let mountCancelled = false
+
   onMount(() => {
-    let cancelled = false
+    mountCancelled = false
 
     void (async () => {
-      const width = containerEl?.clientWidth ?? 0
-      const result = await fetchMergedWindow(0, Number.MAX_SAFE_INTEGER, width)
-      if (cancelled || !result || !containerEl) return
+      if (await initialLoad()) return
+      if (mountCancelled) return
+      // One automatic retry covers the common transient case (the backend
+      // still coming up) without the technician having to do anything; the
+      // Retry button below covers everything else.
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
+      if (mountCancelled) return
+      void initialLoad()
+    })()
+
+    return () => {
+      mountCancelled = true
+      if (debounceTimer !== undefined) clearTimeout(debounceTimer)
+      // A drag in progress attaches its mousemove/mouseup listeners to
+      // `document`, not to uPlot's own root node — `chart.destroy()` below
+      // only removes uPlot's own DOM/listeners, so an active drag must be
+      // torn down separately or it outlives the component.
+      endActiveDrag?.()
+      endToolsDrag?.()
+      chart?.destroy()
+      chart = undefined
+      chartReady = false
+    }
+  })
+
+  function buildChart(result: {
+    channel: { x: number[]; y: number[] }
+    beats: WindowBeat[]
+    merged: BeatSeriesData
+  }): void {
+      const width = measuredWidth()
       const { channel: data, beats, merged } = result
       // `fetchMergedWindow` deliberately leaves these to its caller (see its
       // own comment), so the mount path has to commit them too — they are
@@ -1500,7 +1587,12 @@
       // from it means a subsequent zoom-in is immediately recognized as
       // needing a real fetch (via `needsRefetch`'s resolution check) with
       // no separate null-case special-casing needed.
-      loadedRange = { start: fullExtent.start, end: fullExtent.end, requestedWidth: fullExtent.end - fullExtent.start }
+      loadedRange = {
+        start: fullExtent.start,
+        end: fullExtent.end,
+        requestedWidth: fullExtent.end - fullExtent.start,
+        pixelWidth: width,
+      }
 
       chart = new uPlot(
         {
@@ -1553,22 +1645,7 @@
       )
       applyFilters()
       chartReady = true
-    })()
-
-    return () => {
-      cancelled = true
-      if (debounceTimer !== undefined) clearTimeout(debounceTimer)
-      // A drag in progress attaches its mousemove/mouseup listeners to
-      // `document`, not to uPlot's own root node — `chart.destroy()` below
-      // only removes uPlot's own DOM/listeners, so an active drag must be
-      // torn down separately or it outlives the component.
-      endActiveDrag?.()
-      endToolsDrag?.()
-      chart?.destroy()
-      chart = undefined
-      chartReady = false
-    }
-  })
+  }
 
   // Reacts to `bind:clientWidth` changes on the container (window
   // resizes/layout changes). The binding's own effect fires once
@@ -2057,9 +2134,26 @@
     <div class="banner banner-error" data-testid="ecg-graph-error">
       <Icon name="alert-circle" size={14} />
       <span>{error}</span>
+      {#if !chartReady}
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="retry-graph-load-button"
+          disabled={loading}
+          onclick={() => void initialLoad()}
+        >
+          {loading ? 'Retrying…' : 'Retry'}
+        </button>
+      {/if}
       <button type="button" class="btn btn-sm" data-testid="dismiss-graph-error" onclick={() => (error = null)}>
         Dismiss
       </button>
+    </div>
+  {/if}
+
+  {#if loading && !chartReady}
+    <div class="graph-placeholder" data-testid="ecg-graph-loading">
+      <span class="spinner" aria-hidden="true"></span> Loading trace…
     </div>
   {/if}
 
@@ -2269,6 +2363,16 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-muted, #5b6b7c);
+  }
+
+  .graph-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-height: 120px;
+    color: var(--color-text-muted, #5b6b7c);
+    font-size: var(--font-size-sm);
   }
 
   .mode-banner {
