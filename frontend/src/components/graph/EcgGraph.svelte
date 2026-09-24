@@ -3,6 +3,15 @@
   import type { WindowBeat } from '../../lib/api/types'
   import { MARKER_BUCKETS, primaryDisplayCategory } from '../../lib/categories'
 
+  // Beat markers sit on their own fixed-height lane near the top of the plot
+  // (a 0..1 scale, see MARKER_LANE_SCALE) instead of riding on the trace, so
+  // they read as one horizontal row of ticks and never hide the waveform.
+  export const MARKER_LANE_SCALE = 'lane'
+  export const MARKER_LANE_Y = 0.94
+  // Extra room the y scale leaves above the tallest trace so the lane never
+  // overlaps it, as a fraction of the trace's own span.
+  export const MARKER_LANE_HEADROOM = 0.22
+
   export interface BeatSeriesData {
     xs: number[]
     channelY: (number | null)[]
@@ -84,16 +93,12 @@
       const category = beat ? primaryDisplayCategory(beat) : null
       const reviewed = beat ? beat.review_state !== 'unreviewed' : false
 
-      // Markers are drawn at the height of the trace ACTUALLY ON SCREEN at
-      // this timestamp, not at the beat's stored `r_amplitude`. That
-      // amplitude is measured on the highpass-filtered signal used for
-      // detection, so against the raw trace it can sit a long way from the
-      // R-peak it is supposed to be pointing at (measured at up to 27% of
-      // the chart height on a real recording with baseline drift). Using
-      // the displayed y keeps every marker on its beat in both the raw and
-      // filtered views. `r_amplitude` remains the fallback for a beat whose
-      // timestamp has no sample in the downsampled trace.
-      const markerHeight = beat ? (channelYByX.get(beat.ts) ?? beat.r_amplitude) : null
+      // Every marker shares one fixed lane height. The old approach put each
+      // marker on the trace itself, which meant `r_amplitude` (measured on
+      // the highpass-filtered signal) could sit far from the R-peak on the
+      // raw view, and markers covered the very waveform being judged. On the
+      // lane only the x position carries meaning, and that is exact.
+      const markerHeight = beat ? MARKER_LANE_Y : null
 
       for (const bucket of MARKER_BUCKETS) {
         const matches = beat !== undefined && category === bucket.category && reviewed === bucket.reviewed
@@ -120,11 +125,11 @@
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, type Snippet } from 'svelte'
   import uPlot from 'uplot'
   import 'uplot/dist/uPlot.min.css'
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
-  import { addBadData, deleteBadData } from '../../lib/api/persistence'
+  import { addBadData, addBeat, deleteBadData, snapBeat, updateBadData } from '../../lib/api/persistence'
   import { themeState } from '../../lib/stores/theme.svelte'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
@@ -146,6 +151,8 @@
     initialBadDataMarks,
     selectedBeatTs = null,
     beatsOfInterest = [],
+    focusOverlay,
+    onFocusModeChange,
   }: {
     path: string
     channel: string
@@ -184,6 +191,14 @@
     // arrhythmia detection usually resolves AFTER this component mounts, and
     // a review action can change which beats are flagged at any time.
     beatsOfInterest?: number[]
+    // Rendered in a popover beside the selected beat while in focus mode,
+    // where the page's side panel is covered by the full-window graph. The
+    // parent supplies the content (it owns persistence state); this
+    // component only positions it.
+    focusOverlay?: Snippet
+    // Tells the parent focus mode toggled, so it can render its beat
+    // controls in exactly one place (their C/R shortcuts are document-level).
+    onFocusModeChange?: (on: boolean) => void
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -221,6 +236,12 @@
   // nearest-by-x-distance is enough to disambiguate without also comparing
   // the click's y/`r_amplitude` distance.
   const BEAT_HIT_TOLERANCE_PX = 8
+  // How close (px) a press must be to the selected bad-data range's edge to
+  // grab that edge and resize the range rather than draw a new one.
+  const MARK_EDGE_HIT_PX = 8
+  // Width of the view the graph zooms to around a beat being added, so the
+  // technician can judge (and correct) the suggested position.
+  const ADD_BEAT_ZOOM_SECONDS = 1
   // Width of the view when jumping to a beat of interest. The whole point of
   // the jump is to land on a focused stretch of trace where the beat's SHAPE
   // is readable — at a mouse's ~600bpm this is roughly 20 beats of context,
@@ -424,6 +445,7 @@
     const colorFn = () => displayCategoryColor(category)
     const size = reviewed ? 9 : 6
     return {
+      scale: MARKER_LANE_SCALE,
       points: {
         show: true,
         size,
@@ -441,6 +463,7 @@
   function selectionHighlightSeries(): uPlot.Series {
     const size = 18
     return {
+      scale: MARKER_LANE_SCALE,
       points: {
         show: true,
         size,
@@ -462,6 +485,7 @@
   function rejectedOverlaySeries(): uPlot.Series {
     const size = 9 // matches the reviewed-marker size so the strike spans it
     return {
+      scale: MARKER_LANE_SCALE,
       points: {
         show: true,
         size,
@@ -477,7 +501,7 @@
             const yVal = yData[i]
             if (xVal == null || yVal == null) continue
             const cx = u.valToPos(xVal, 'x', true)
-            const cy = u.valToPos(yVal, 'y', true)
+            const cy = u.valToPos(yVal, MARKER_LANE_SCALE, true)
             path.moveTo(cx - r, cy - r)
             path.lineTo(cx + r, cy + r)
           }
@@ -507,6 +531,53 @@
     fullscreen = !fullscreen
     if (!fullscreen) toolsCollapsed = false
   }
+
+  $effect(() => {
+    onFocusModeChange?.(fullscreen)
+  })
+
+  // Focus-mode beat popover: anchored beside the selected beat's x position
+  // and re-anchored whenever the chart redraws (pan, zoom, resize).
+  const OVERLAY_WIDTH_PX = 320
+  let overlayPos: { left: number; top: number } | null = $state(null)
+  let overlayDismissedFor: number | null = $state(null)
+
+  function updateOverlayPos() {
+    if (!chart || !fullscreen || selectedBeatTs === null || !containerEl) {
+      if (overlayPos !== null) overlayPos = null
+      return
+    }
+    const over = chart.over
+    const x = chart.valToPos(selectedBeatTs, 'x')
+    if (!Number.isFinite(x) || x < 0 || x > over.clientWidth) {
+      if (overlayPos !== null) overlayPos = null
+      return
+    }
+    const base = containerEl.offsetLeft + over.offsetLeft
+    const fitsRight = over.clientWidth - x > OVERLAY_WIDTH_PX + 24
+    const left = Math.max(0, fitsRight ? base + x + 16 : base + x - OVERLAY_WIDTH_PX - 16)
+    const top = containerEl.offsetTop + over.offsetTop + 8
+    if (overlayPos?.left === left && overlayPos?.top === top) return
+    overlayPos = { left, top }
+  }
+
+  function overlayAnchorPlugin(): uPlot.Plugin {
+    return { hooks: { draw: () => updateOverlayPos() } }
+  }
+
+  $effect(() => {
+    fullscreen
+    selectedBeatTs
+    updateOverlayPos()
+  })
+
+  let showFocusOverlay = $derived(
+    fullscreen &&
+      focusOverlay !== undefined &&
+      overlayPos !== null &&
+      selectedBeatTs !== null &&
+      overlayDismissedFor !== selectedBeatTs,
+  )
 
   function toggleTools() {
     toolsCollapsed = !toolsCollapsed
@@ -662,6 +733,15 @@
   // The mark under the cursor in bad-data mode, highlighted to show that
   // clicking will remove it.
   let hoveredMarkId: number | null = $state(null)
+  // The mark being edited (chosen by clicking it on the chart or the strip).
+  // Its range shows in an editor row with numeric fields, Save and Delete,
+  // and its edges can be dragged in bad-data mode.
+  let selectedMarkId: number | null = $state(null)
+  let selectedMark: BadDataMark | null = $derived(
+    badDataMarks.find((m) => m.id === selectedMarkId) ?? null,
+  )
+  let editStart: string = $state('')
+  let editStop: string = $state('')
   // Transient confirmation of the last add/remove, so an action that
   // otherwise only changes some shading has visible feedback.
   let badDataToast: string | null = $state(null)
@@ -1034,11 +1114,52 @@
     }
   }
 
+  // Moves a mark to a new range (the backend re-sorts the bounds).
+  async function updateBadDataMark(mark: BadDataMark, start: number, stop: number) {
+    const result = await updateBadData(path, mark.id, start, stop)
+    if (result.status === 'ok' && result.mark && !result.error) {
+      const updated = result.mark
+      badDataMarks = badDataMarks.map((m) => (m.id === updated.id ? updated : m))
+      chart?.redraw()
+      showBadDataToast(`Bad-data range now ${updated.start.toFixed(2)}–${updated.stop.toFixed(2)}s`)
+    } else {
+      error = result.error ?? 'Failed to update bad data mark'
+    }
+  }
+
+  function selectMark(mark: BadDataMark | null) {
+    selectedMarkId = mark?.id ?? null
+    chart?.redraw()
+  }
+
+  // Keeps the editor fields in step with whichever mark is selected (and
+  // with its saved range after an edge drag or save).
+  $effect(() => {
+    if (selectedMark) {
+      editStart = selectedMark.start.toFixed(3)
+      editStop = selectedMark.stop.toFixed(3)
+    }
+  })
+
+  let editRangeValid = $derived(
+    Number.isFinite(Number(editStart)) &&
+      Number.isFinite(Number(editStop)) &&
+      editStart.trim() !== '' &&
+      editStop.trim() !== '' &&
+      Number(editStart) !== Number(editStop),
+  )
+
+  function saveEditedRange() {
+    if (!selectedMark || !editRangeValid) return
+    void updateBadDataMark(selectedMark, Number(editStart), Number(editStop))
+  }
+
   async function removeBadDataMark(mark: BadDataMark) {
     const result = await deleteBadData(path, mark.id)
     if (result.status === 'ok' && !result.error) {
       badDataMarks = badDataMarks.filter((m) => m.id !== mark.id)
       if (hoveredMarkId === mark.id) hoveredMarkId = null
+      if (selectedMarkId === mark.id) selectedMarkId = null
       showBadDataToast('Bad-data mark removed')
     } else {
       error = result.error ?? 'Failed to remove bad data mark'
@@ -1048,7 +1169,134 @@
   function toggleBadDataMode() {
     badDataMode = !badDataMode
     if (!badDataMode) hoveredMarkId = null
+    if (badDataMode) leaveAddBeatMode()
   }
+
+  // Add-beat mode: click near a beat the detector missed. The graph asks the
+  // backend for the nearest signal peak, zooms there and shows it as a
+  // pending beat. Clicking elsewhere while it is pending moves it to exactly
+  // where you clicked (the zoomed-in override of the automatic snap); nothing
+  // is saved until the technician confirms.
+  let addBeatMode: boolean = $state(false)
+  let pendingBeat: { ts: number; source: 'snapped' | 'manual' } | null = $state(null)
+  let addBeatBusy: boolean = $state(false)
+  let addBeatError: string | null = $state(null)
+
+  function leaveAddBeatMode() {
+    addBeatMode = false
+    pendingBeat = null
+    addBeatError = null
+    chart?.redraw()
+  }
+
+  function toggleAddBeatMode() {
+    if (addBeatMode) {
+      leaveAddBeatMode()
+      return
+    }
+    addBeatMode = true
+    badDataMode = false
+    hoveredMarkId = null
+    selectedMarkId = null
+  }
+
+  async function snapPendingTo(ts: number) {
+    addBeatBusy = true
+    addBeatError = null
+    const result = await snapBeat(path, channel, ts)
+    addBeatBusy = false
+    if (result.status === 'ok' && result.ts !== null && !result.error) {
+      pendingBeat = { ts: result.ts, source: 'snapped' }
+      const { min, max } = chart?.scales.x ?? {}
+      const currentWidth = min != null && max != null ? max - min : ADD_BEAT_ZOOM_SECONDS
+      const width = Math.min(currentWidth, ADD_BEAT_ZOOM_SECONDS)
+      await setVisibleRange(result.ts - width / 2, result.ts + width / 2)
+      chart?.redraw()
+    } else {
+      addBeatError = result.error ?? 'Could not find a peak here'
+    }
+  }
+
+  async function handleAddBeatClick(u: uPlot, upEvent: MouseEvent) {
+    if (addBeatBusy) return
+    const rect = u.over.getBoundingClientRect()
+    const xVal = u.posToVal(upEvent.clientX - rect.left, 'x')
+    if (pendingBeat) {
+      pendingBeat = { ts: xVal, source: 'manual' }
+      addBeatError = null
+      chart?.redraw()
+      return
+    }
+    await snapPendingTo(xVal)
+  }
+
+  async function confirmAddBeat() {
+    if (!pendingBeat || addBeatBusy) return
+    addBeatBusy = true
+    addBeatError = null
+    const result = await addBeat(path, channel, pendingBeat.ts)
+    addBeatBusy = false
+    if (result.status === 'ok' && result.beat && !result.error) {
+      const added = result.beat
+      pendingBeat = null
+      showBadDataToast(
+        `Beat added at ${added.ts.toFixed(3)}s — re-run arrhythmia detection to include it in the flags`,
+      )
+      await refreshBeatsOnly()
+      const loaded = lastBeats.find((b) => b.ts === added.ts)
+      if (loaded) onBeatSelect?.(loaded)
+      chart?.redraw()
+    } else {
+      addBeatError = result.error ?? 'Could not add the beat'
+    }
+  }
+
+  // The pending beat, drawn as a dashed guide through the whole trace plus a
+  // ring on the marker lane, so it is obvious which peak will be added.
+  function pendingBeatPlugin(): uPlot.Plugin {
+    return {
+      hooks: {
+        draw: (u) => {
+          if (!pendingBeat) return
+          const x = u.valToPos(pendingBeat.ts, 'x', true)
+          if (!Number.isFinite(x) || x < u.bbox.left || x > u.bbox.left + u.bbox.width) return
+          const { ctx } = u
+          try {
+            const accent = cssVar('--color-accent', '#2563eb')
+            ctx.save()
+            ctx.strokeStyle = accent
+            ctx.fillStyle = accent
+            ctx.lineWidth = 2
+            ctx.setLineDash([6, 4])
+            ctx.beginPath()
+            ctx.moveTo(x, u.bbox.top)
+            ctx.lineTo(x, u.bbox.top + u.bbox.height)
+            ctx.stroke()
+            ctx.setLineDash([])
+            const y = u.valToPos(MARKER_LANE_Y, MARKER_LANE_SCALE, true)
+            ctx.beginPath()
+            ctx.arc(x, y, 10, 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(x, y - 5)
+            ctx.lineTo(x + 5, y)
+            ctx.lineTo(x, y + 5)
+            ctx.lineTo(x - 5, y)
+            ctx.closePath()
+            ctx.fill()
+            ctx.restore()
+          } catch {
+            // decoration only — never take interaction down with it
+          }
+        },
+      },
+    }
+  }
+
+  $effect(() => {
+    pendingBeat
+    chart?.redraw()
+  })
 
   // While bad-data mode is active, a left-drag on the plot selects a range
   // to mark instead of panning — the two behaviors are mutually exclusive
@@ -1058,8 +1306,23 @@
   // if the component unmounts mid-drag.
   function handleBadDataDragStart(u: uPlot, downEvent: MouseEvent) {
     const rect = u.over.getBoundingClientRect()
-    const startVal = u.posToVal(downEvent.clientX - rect.left, 'x')
+    let startVal = u.posToVal(downEvent.clientX - rect.left, 'x')
     const startPx = downEvent.clientX
+
+    // Pressing on an edge of the selected range grabs that edge: the far
+    // edge stays fixed and the drag decides the new position of this one.
+    let resizing: BadDataMark | null = null
+    if (selectedMark) {
+      const pressX = downEvent.clientX - rect.left
+      const nearStart = Math.abs(u.valToPos(selectedMark.start, 'x') - pressX) <= MARK_EDGE_HIT_PX
+      const nearStop = Math.abs(u.valToPos(selectedMark.stop, 'x') - pressX) <= MARK_EDGE_HIT_PX
+      if (nearStart || nearStop) {
+        resizing = selectedMark
+        startVal = nearStart && !(nearStop && selectedMark.start === selectedMark.stop)
+          ? selectedMark.stop
+          : selectedMark.start
+      }
+    }
 
     function detach() {
       document.removeEventListener('mousemove', onMove)
@@ -1081,16 +1344,21 @@
       detach()
       chart?.redraw()
 
-      // A click rather than a drag: in this mode that means "remove the mark
-      // I clicked on", which is the natural inverse of drawing one, instead
-      // of silently creating a zero-width mark.
+      // A click rather than a drag: in this mode that means "select the mark
+      // I clicked on" (so it can be resized, edited or deleted), or clear the
+      // selection when the click lands on empty trace, instead of silently
+      // creating a zero-width mark.
       if (movedPx < CLICK_DRAG_THRESHOLD_PX) {
-        const existing = markAt(u.posToVal(upEvent.clientX - rect.left, 'x'))
-        if (existing) void removeBadDataMark(existing)
+        if (!resizing) selectMark(markAt(u.posToVal(upEvent.clientX - rect.left, 'x')) ?? null)
         return
       }
 
-      void submitBadDataMark(startVal, u.posToVal(upEvent.clientX - rect.left, 'x'))
+      const endVal = u.posToVal(upEvent.clientX - rect.left, 'x')
+      if (resizing) {
+        void updateBadDataMark(resizing, startVal, endVal)
+      } else {
+        void submitBadDataMark(startVal, endVal)
+      }
     }
 
     document.addEventListener('mousemove', onMove)
@@ -1205,7 +1473,8 @@
     function onUp(upEvent: MouseEvent) {
       detach()
       if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) {
-        handleBeatClick(u, upEvent)
+        if (addBeatMode) void handleAddBeatClick(u, upEvent)
+        else handleBeatClick(u, upEvent)
         return
       }
       viewChanged = true
@@ -1502,14 +1771,22 @@
           const markFill = cssVar('--color-bad-data-fill', 'rgba(185, 28, 28, 0.13)')
           const markStroke = cssVar('--color-bad-data-stroke', 'rgba(185, 28, 28, 0.5)')
           for (const mark of badDataMarks) {
-            const isHovered = mark.id === hoveredMarkId
+            const isHovered = mark.id === hoveredMarkId || mark.id === selectedMarkId
             paintRegion(
               u,
               mark.start,
               mark.stop,
               isHovered ? cssVar('--color-bad-data-fill-hover', 'rgba(185, 28, 28, 0.28)') : markFill,
-              markStroke,
+              mark.id === selectedMarkId ? cssVar('--color-danger', '#b91c1c') : markStroke,
             )
+            if (mark.id === selectedMarkId) {
+              // Edge handles: thick bars showing where a drag will resize.
+              ctx.fillStyle = cssVar('--color-danger', '#b91c1c')
+              for (const edge of [mark.start, mark.stop]) {
+                const x = u.valToPos(edge, 'x', true)
+                ctx.fillRect(x - 2, u.bbox.top, 4, u.bbox.height)
+              }
+            }
           }
 
           // The range currently being dragged out, so the technician can see
@@ -1624,7 +1901,18 @@
           // after a manual Y-zoom, and Y-zoom (`zoomYBy`/Shift+wheel) turns
           // it off implicitly the same way X's own manual `setScale` always
           // has.
-          scales: { x: { time: false }, y: { auto: true } },
+          scales: {
+            x: { time: false },
+            // Leaves headroom above the trace for the marker lane (below).
+            y: {
+              auto: true,
+              range: (_u, dataMin, dataMax) => {
+                const span = dataMax - dataMin || 1
+                return [dataMin - span * 0.05, dataMax + span * MARKER_LANE_HEADROOM]
+              },
+            },
+            [MARKER_LANE_SCALE]: { auto: false, range: [0, 1] },
+          },
           // uPlot's own default cursor behavior is a click-drag rubber-band
           // select that zooms into the selected x-range on mouseup
           // (`cursor.drag` defaults to `{ setScale: true, x: true, dist: 0
@@ -1651,6 +1939,9 @@
           axes: [
             { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
             { stroke: () => axisColor(), grid: { stroke: () => gridColor(), width: 1 }, ticks: { stroke: () => axisColor() } },
+            // The marker lane has no visible axis; declaring it (hidden)
+            // just tells uPlot the scale runs vertically.
+            { scale: MARKER_LANE_SCALE, show: false, side: 1 },
           ],
           series: [
             {},
@@ -1659,7 +1950,7 @@
             selectionHighlightSeries(),
             rejectedOverlaySeries(),
           ],
-          plugins: [panZoomPlugin(), badDataPlugin()],
+          plugins: [panZoomPlugin(), badDataPlugin(), overlayAnchorPlugin(), pendingBeatPlugin()],
         },
         toChartData(merged),
         containerEl,
@@ -1757,7 +2048,16 @@
       // also drop the technician out of focus mode behind it.
       if (event.key === 'Escape') {
         if (document.querySelector('[role="dialog"]')) return
-        if (badDataMode) {
+        if (showFocusOverlay) {
+          overlayDismissedFor = selectedBeatTs
+        } else if (selectedMarkId !== null) {
+          selectMark(null)
+        } else if (pendingBeat) {
+          pendingBeat = null
+          addBeatError = null
+        } else if (addBeatMode) {
+          leaveAddBeatMode()
+        } else if (badDataMode) {
           badDataMode = false
           hoveredMarkId = null
         } else if (fullscreen) {
@@ -1792,10 +2092,27 @@
           event.preventDefault()
           toggleFullscreen()
           break
+        case 'Delete':
+          if (selectedMark) {
+            event.preventDefault()
+            void removeBadDataMark(selectedMark)
+          }
+          break
         case 'b':
         case 'B':
           event.preventDefault()
           toggleBadDataMode()
+          break
+        case 'a':
+        case 'A':
+          event.preventDefault()
+          toggleAddBeatMode()
+          break
+        case 'Enter':
+          if (pendingBeat) {
+            event.preventDefault()
+            void confirmAddBeat()
+          }
           break
         default:
           break
@@ -1818,6 +2135,7 @@
   // removing one has to ask for a repaint explicitly.
   $effect(() => {
     badDataMarks
+    selectedMarkId
     chart?.redraw()
   })
 
@@ -2001,11 +2319,6 @@
       >
         <Icon name="skip-forward" size={14} />
       </button>
-      {#if beatsOfInterest.length > 0}
-        <span class="nav-hint" data-testid="beat-nav-hint">
-          <kbd>N</kbd>/<kbd>P</kbd> to step · <kbd>C</kbd>/<kbd>R</kbd> to judge
-        </span>
-      {/if}
     </div>
 
     <div class="beat-nav-controls">
@@ -2046,21 +2359,36 @@
         End <Icon name="skip-forward" size={14} />
       </button>
     </div>
+
+    {#if beatsOfInterest.length > 0}
+      <ul class="nav-hint" data-testid="beat-nav-hint" aria-label="Keyboard shortcuts">
+        <li><kbd>N</kbd> Next</li>
+        <li><kbd>P</kbd> Previous</li>
+        <li><kbd>C</kbd> Confirm arrhythmia</li>
+        <li><kbd>R</kbd> Reject</li>
+      </ul>
+    {/if}
   </div>
 
   <div class="ecg-graph-toolbar">
-    <button
-      type="button"
-      class="btn btn-sm"
-      class:btn-active={showFiltered}
-      data-testid="toggle-filtered-signal-button"
-      aria-pressed={showFiltered}
-      title="Show the highpass-filtered trace that beat detection runs against"
-      onclick={toggleFiltered}
-    >
-      <Icon name="filter" size={14} />
-      {showFiltered ? 'Filtered' : 'Raw'}
-    </button>
+    <div class="trace-group" role="group" aria-label="Trace display">
+      <span class="trace-group-label">Trace</span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-active={showFiltered}
+        data-testid="toggle-filtered-signal-button"
+        aria-pressed={showFiltered}
+        title="Choose which waveform is drawn. Raw: the recorded signal. Filtered: the high-pass version that beat detection actually analyses (order and cutoff set in Settings). This only changes the display, not the detected beats."
+        onclick={toggleFiltered}
+      >
+        <Icon name="filter" size={14} />
+        {showFiltered ? 'Filtered' : 'Raw'}
+      </button>
+      <span class="trace-group-hint" data-testid="trace-filter-hint">
+        {showFiltered ? 'High-pass, as used by beat detection' : 'As recorded'}
+      </span>
+    </div>
     <div class="zoom-group">
       <span class="zoom-group-label">X</span>
       <button type="button" class="btn btn-sm" data-testid="zoom-in-button" title="Zoom in (X)" onclick={handleZoomIn}>
@@ -2116,6 +2444,18 @@
     <button
       type="button"
       class="btn btn-sm"
+      class:btn-active={addBeatMode}
+      data-testid="add-beat-mode-button"
+      aria-pressed={addBeatMode}
+      title={addBeatMode ? 'Leave add-beat mode (Esc)' : 'Add a beat the detector missed (A)'}
+      onclick={toggleAddBeatMode}
+    >
+      <Icon name="plus" size={14} />
+      {addBeatMode ? 'Exit add beat' : 'Add beat'}
+    </button>
+    <button
+      type="button"
+      class="btn btn-sm"
       class:btn-active={fullscreen}
       data-testid="fullscreen-graph-button"
       title={fullscreen ? 'Leave focus mode (Esc)' : 'Focus mode — fill the window (F)'}
@@ -2136,6 +2476,60 @@
       <button type="button" class="btn btn-sm" data-testid="exit-bad-data-mode-button" onclick={toggleBadDataMode}>
         Done <kbd>Esc</kbd>
       </button>
+    </div>
+  {/if}
+
+  {#if addBeatMode}
+    <div class="mode-banner" data-testid="add-beat-mode-banner">
+      <Icon name="plus" size={14} />
+      {#if pendingBeat}
+        <span data-testid="add-beat-pending">
+          <strong>New beat at {pendingBeat.ts.toFixed(3)} s</strong>
+          ({pendingBeat.source === 'snapped' ? 'snapped to the nearest peak' : 'placed exactly where you clicked'}).
+          Click elsewhere to move it, or confirm.
+        </span>
+        {#if pendingBeat.source === 'manual'}
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="add-beat-resnap-button"
+            disabled={addBeatBusy}
+            onclick={() => pendingBeat && snapPendingTo(pendingBeat.ts)}
+          >
+            Snap to peak
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="btn btn-sm btn-primary"
+          data-testid="add-beat-confirm-button"
+          disabled={addBeatBusy}
+          onclick={confirmAddBeat}
+        >
+          Add beat <kbd>Enter</kbd>
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="add-beat-cancel-button"
+          onclick={() => {
+            pendingBeat = null
+            addBeatError = null
+          }}
+        >
+          Cancel <kbd>Esc</kbd>
+        </button>
+      {:else}
+        <span>
+          <strong>Adding a beat.</strong> Click near the missing beat: it snaps to the nearest peak and the graph zooms in for you to check.
+        </span>
+        <button type="button" class="btn btn-sm" data-testid="exit-add-beat-mode-button" onclick={leaveAddBeatMode}>
+          Done <kbd>Esc</kbd>
+        </button>
+      {/if}
+      {#if addBeatError}
+        <span class="text-danger" data-testid="add-beat-error">{addBeatError}</span>
+      {/if}
     </div>
   {/if}
 
@@ -2166,14 +2560,44 @@
     </div>
   {/if}
 
+  <div class="graph-stage">
   <div
     class="ecg-graph-container"
-    class:marking={badDataMode}
+    class:marking={badDataMode || addBeatMode}
     class:over-mark={hoveredMarkId !== null}
     data-testid="ecg-graph-container"
     bind:this={containerEl}
     bind:clientWidth={containerWidth}
   ></div>
+
+  {#if showFocusOverlay && overlayPos}
+    <div
+      class="focus-overlay"
+      data-testid="focus-beat-overlay"
+      style={`left: ${overlayPos.left}px; top: ${overlayPos.top}px; width: ${OVERLAY_WIDTH_PX}px`}
+    >
+      <div class="focus-overlay-header">
+        <span class="focus-overlay-title">Beat details</span>
+        <button
+          type="button"
+          class="icon-btn"
+          data-testid="focus-overlay-close"
+          aria-label="Close beat details"
+          title="Close (Esc)"
+          onclick={() => (overlayDismissedFor = selectedBeatTs)}
+        >
+          <Icon name="x" size={14} />
+        </button>
+      </div>
+      {@render focusOverlay?.()}
+      <ul class="nav-hint focus-overlay-keys" aria-label="Keyboard shortcuts">
+        <li><kbd>C</kbd> Confirm</li>
+        <li><kbd>R</kbd> Reject</li>
+        <li><kbd>N</kbd>/<kbd>P</kbd> Next / Previous</li>
+      </ul>
+    </div>
+  {/if}
+  </div>
 
   {#if badDataToast}
     <div class="graph-toast" data-testid="bad-data-toast" role="status">
@@ -2197,9 +2621,10 @@
         data-testid="bad-data-mark"
         class="bad-data-mark"
         style={`left: ${markLeftPct(mark)}%; width: ${markWidthPct(mark)}%`}
-        onclick={() => removeBadDataMark(mark)}
-        title={`Bad data ${mark.start.toFixed(2)}–${mark.stop.toFixed(2)} (click to remove)`}
-        aria-label={`Bad data mark from ${mark.start.toFixed(2)} to ${mark.stop.toFixed(2)}, click to remove`}
+        class:selected={mark.id === selectedMarkId}
+        onclick={() => selectMark(mark)}
+        title={`Bad data ${mark.start.toFixed(2)}–${mark.stop.toFixed(2)} (click to edit or delete)`}
+        aria-label={`Bad data mark from ${mark.start.toFixed(2)} to ${mark.stop.toFixed(2)}, click to edit or delete`}
       ></button>
     {/each}
     {#if badDataMarks.length === 0}
@@ -2207,6 +2632,62 @@
     {/if}
   </div>
   </div>
+
+  {#if selectedMark}
+    <div class="mark-editor" data-testid="bad-data-editor">
+      <span class="mark-editor-title">Bad data range</span>
+      <label>
+        From
+        <input
+          type="text"
+          inputmode="decimal"
+          data-testid="bad-data-start-input"
+          bind:value={editStart}
+          onkeydown={(e) => e.key === 'Enter' && saveEditedRange()}
+        />
+      </label>
+      <label>
+        To
+        <input
+          type="text"
+          inputmode="decimal"
+          data-testid="bad-data-stop-input"
+          bind:value={editStop}
+          onkeydown={(e) => e.key === 'Enter' && saveEditedRange()}
+        />
+      </label>
+      <span class="text-muted">s</span>
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        data-testid="bad-data-save-button"
+        disabled={!editRangeValid}
+        onclick={saveEditedRange}
+      >
+        Save range
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="bad-data-delete-button"
+        onclick={() => selectedMark && removeBadDataMark(selectedMark)}
+      >
+        <Icon name="trash" size={14} /> Delete
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        data-testid="bad-data-editor-close"
+        aria-label="Close editor"
+        onclick={() => selectMark(null)}
+      >
+        <Icon name="x" size={14} />
+      </button>
+      <span class="mark-editor-hint text-muted">
+        {badDataMode ? 'Drag a red edge on the graph to resize.' : 'Turn on bad-data mode to drag its edges.'}
+      </span>
+    </div>
+  {/if}
 
   <!-- Legend doubles as the marker filter: each entry toggles that
        category's visibility on the graph. -->
@@ -2253,6 +2734,13 @@
       {/each}
     </div>
     <div class="ecg-legend-review-filter" role="radiogroup" aria-label="Filter by review status">
+      <span
+        class="legend-filter-label"
+        data-testid="marker-filter-label"
+        title="Hide or show beat markers by category, review status or rejected. This never changes the signal or the saved beats."
+      >
+        Show markers
+      </span>
       <button
         type="button"
         class="btn btn-sm"
@@ -2492,17 +2980,54 @@
   }
 
   .nav-hint {
-    font-size: 0.7rem;
-    color: var(--color-text-muted, #5b6b7c);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    flex-basis: 100%;
+    margin: 0;
+    padding: var(--space-1) 0 0;
+    border-top: 1px solid var(--color-border, #d3dae1);
+    list-style: none;
+    font-size: var(--font-size-sm, 0.875rem);
+    color: var(--color-text, #1f2933);
+  }
+
+  .nav-hint li {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
     white-space: nowrap;
   }
 
   .nav-hint kbd {
-    padding: 0 4px;
-    border: 1px solid currentColor;
-    border-radius: 3px;
-    font-family: inherit;
-    font-size: 0.65rem;
+    min-width: 1.5em;
+    padding: 1px 6px;
+    border: 1px solid var(--color-border, #d3dae1);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface, #fff);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .trace-group {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .trace-group-label,
+  .legend-filter-label {
+    font-size: var(--font-size-sm, 0.875rem);
+    font-weight: 600;
+    color: var(--color-text, #1f2933);
+  }
+
+  .trace-group-hint {
+    font-size: 0.75rem;
+    color: var(--color-text-muted, #5b6b7c);
   }
 
   .beat-nav-counter {
@@ -2549,6 +3074,72 @@
 
   .ecg-graph-container {
     width: 100%;
+  }
+
+  .mark-editor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border: 1px solid var(--color-danger, #b91c1c);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface-raised, #f7f9fb);
+    font-size: var(--font-size-sm, 0.875rem);
+  }
+
+  .mark-editor-title {
+    font-weight: 600;
+  }
+
+  .mark-editor label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .mark-editor input {
+    width: 6.5rem;
+  }
+
+  .mark-editor-hint {
+    font-size: 0.75rem;
+  }
+
+  .bad-data-mark.selected {
+    outline: 2px solid var(--color-danger, #b91c1c);
+    outline-offset: -2px;
+  }
+
+  .graph-stage {
+    position: relative;
+  }
+
+  .focus-overlay {
+    position: absolute;
+    z-index: 1;
+    max-height: calc(100% - var(--space-4, 16px));
+    overflow-y: auto;
+    padding: var(--space-2);
+    border: 1px solid var(--color-border, #d3dae1);
+    border-radius: var(--radius-md, 8px);
+    background: var(--color-surface, #fff);
+    box-shadow: var(--shadow-md);
+  }
+
+  .focus-overlay-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-1);
+  }
+
+  .focus-overlay-title {
+    font-weight: 600;
+  }
+
+  .focus-overlay-keys {
+    margin-top: var(--space-2);
   }
 
   .bad-data-marks-bar {

@@ -220,6 +220,53 @@ def add_bad_data_mark(
     ).fetchone()
 
 
+def update_bad_data_mark(
+    conn: sqlite3.Connection, file_id: int, mark_id: int, start: float, stop: float
+) -> sqlite3.Row | None:
+    """Move an existing mark to a new range (auto-sorted like an add),
+    scoped to `file_id`. Returns the updated row, or None if no such mark."""
+    lo, hi = min(start, stop), max(start, stop)
+    cursor = conn.execute(
+        "UPDATE bad_data_marks SET start=?, stop=? WHERE id=? AND file_id=?",
+        (lo, hi, mark_id, file_id),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        return None
+    return conn.execute(
+        "SELECT * FROM bad_data_marks WHERE id=?", (mark_id,)
+    ).fetchone()
+
+
+def insert_beat(
+    conn: sqlite3.Connection,
+    file_id: int,
+    ts: float,
+    rr: float,
+    r_amplitude: float,
+    hr: float,
+) -> None:
+    """Insert one manually added beat: unreviewed, with no arrhythmia flags
+    (arrhythmia detection has not seen it). Raises sqlite3.IntegrityError if
+    a beat already exists at exactly this `ts`."""
+    conn.execute(
+        "INSERT INTO beats (file_id, ts, rr, r_amplitude, hr, review_state) "
+        "VALUES (?, ?, ?, ?, ?, 'unreviewed')",
+        (file_id, ts, rr, r_amplitude, hr),
+    )
+    conn.commit()
+
+
+def update_beat_rr_hr(
+    conn: sqlite3.Connection, file_id: int, ts: float, rr: float, hr: float
+) -> None:
+    """Rewrite one beat's RR/HR after a neighbour was added or removed."""
+    conn.execute(
+        "UPDATE beats SET rr=?, hr=? WHERE file_id=? AND ts=?", (rr, hr, file_id, ts)
+    )
+    conn.commit()
+
+
 def delete_beat(conn: sqlite3.Connection, file_id: int, ts: float) -> bool:
     """Delete one beat outright — for a detection false positive (a noise
     spike picked up as a beat).

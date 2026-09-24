@@ -206,6 +206,24 @@ export interface BadDataAddResult {
   error: string | null
 }
 
+export interface BadDataUpdateResult {
+  status: string
+  mark: BadDataMark | null
+  error: string | null
+}
+
+export interface BeatSnapResult {
+  status: string
+  ts: number | null
+  error: string | null
+}
+
+export interface BeatAddResult {
+  status: string
+  beat: WindowBeat | null
+  error: string | null
+}
+
 export interface BadDataDeleteResult {
   status: string
   error: string | null

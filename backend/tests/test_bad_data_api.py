@@ -90,3 +90,51 @@ def test_delete_nonexistent_id_is_an_error(tmp_path, example_txt_file):
     result = response.json()
     assert result["status"] == "error"
     assert result["error"]
+
+
+def test_update_mark_moves_range_and_auto_sorts(tmp_path, example_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [example_txt_file]})
+    mark = client.post(
+        "/files/bad-data",
+        json={"path": example_txt_file, "start": 0.3, "stop": 0.8},
+    ).json()["mark"]
+
+    response = client.patch(
+        "/files/bad-data",
+        json={"path": example_txt_file, "id": mark["id"], "start": 1.2, "stop": 0.9},
+    )
+
+    result = response.json()
+    assert result["status"] == "ok"
+    assert result["mark"] == {"id": mark["id"], "start": 0.9, "stop": 1.2}
+    state = client.get("/files/state", params={"path": example_txt_file}).json()
+    assert state["bad_data_marks"] == [{"id": mark["id"], "start": 0.9, "stop": 1.2}]
+
+
+def test_update_unknown_mark_is_an_error(tmp_path, example_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [example_txt_file]})
+    client.post(
+        "/files/bad-data",
+        json={"path": example_txt_file, "start": 0.3, "stop": 0.8},
+    )
+
+    result = client.patch(
+        "/files/bad-data",
+        json={"path": example_txt_file, "id": 9999, "start": 0.1, "stop": 0.2},
+    ).json()
+
+    assert result["status"] == "error"
+    assert "No bad-data mark" in result["error"]
+
+
+def test_update_mark_on_never_imported_file_is_an_error(tmp_path, example_txt_file):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+
+    result = client.patch(
+        "/files/bad-data",
+        json={"path": example_txt_file, "id": 1, "start": 0.1, "stop": 0.2},
+    ).json()
+
+    assert result["status"] == "error"

@@ -221,6 +221,19 @@ class BadDataAddResult(BaseModel):
     error: str | None = None
 
 
+class BadDataUpdateRequest(BaseModel):
+    path: str
+    id: int
+    start: float
+    stop: float
+
+
+class BadDataUpdateResult(BaseModel):
+    status: str
+    mark: BadDataMark | None = None
+    error: str | None = None
+
+
 class BadDataDeleteRequest(BaseModel):
     path: str
     id: int
@@ -238,6 +251,30 @@ class BeatDeleteRequest(BaseModel):
 
 class BeatDeleteResult(BaseModel):
     status: str
+    error: str | None = None
+
+
+class BeatSnapRequest(BaseModel):
+    path: str
+    channel: str
+    ts: float
+
+
+class BeatSnapResult(BaseModel):
+    status: str
+    ts: float | None = None
+    error: str | None = None
+
+
+class BeatAddRequest(BaseModel):
+    path: str
+    channel: str
+    ts: float
+
+
+class BeatAddResult(BaseModel):
+    status: str
+    beat: WindowBeat | None = None
     error: str | None = None
 
 

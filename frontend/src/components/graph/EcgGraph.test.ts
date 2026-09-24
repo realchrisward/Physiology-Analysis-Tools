@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import EcgGraph, { buildBeatAlignedData, toChartData } from './EcgGraph.svelte'
+import { createRawSnippet } from 'svelte'
+import EcgGraph, { buildBeatAlignedData, toChartData, MARKER_LANE_Y } from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
 
 afterEach(() => {
@@ -62,6 +63,9 @@ function routedFetch(
     beats?: () => unknown
     addBadData?: () => unknown
     deleteBadData?: () => unknown
+    updateBadData?: (body: Record<string, unknown>) => unknown
+    snapBeat?: (body: Record<string, unknown>) => unknown
+    addBeat?: (body: Record<string, unknown>) => unknown
   } = {},
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
@@ -69,9 +73,41 @@ function routedFetch(
     if (pathname === '/beats/window') {
       return Promise.resolve((handlers.beats ?? (() => beatsWindowResponse()))())
     }
+    if (pathname === '/files/beats/snap') {
+      const body = JSON.parse(String(init?.body))
+      return Promise.resolve(
+        (handlers.snapBeat ?? ((b) => ({ ok: true, json: async () => ({ status: 'ok', ts: b.ts, error: null }) })))(body),
+      )
+    }
+    if (pathname === '/files/beats/one' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body))
+      return Promise.resolve(
+        (handlers.addBeat ??
+          ((b) => ({
+            ok: true,
+            json: async () => ({
+              status: 'ok',
+              beat: beat({ ts: b.ts as number, r_amplitude: 1 }),
+              error: null,
+            }),
+          })))(body),
+      )
+    }
     if (pathname === '/files/bad-data') {
       if (init?.method === 'DELETE') {
         return Promise.resolve((handlers.deleteBadData ?? (() => badDataDeleteResponse()))())
+      }
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body))
+        return Promise.resolve(
+          (handlers.updateBadData ??
+            ((b) =>
+              badDataAddResponse({
+                id: b.id as number,
+                start: Math.min(b.start as number, b.stop as number),
+                stop: Math.max(b.start as number, b.stop as number),
+              })))(body),
+        )
       }
       return Promise.resolve(
         (handlers.addBadData ?? (() => badDataAddResponse({ id: 1, start: 0, stop: 1 })))(),
@@ -725,7 +761,7 @@ describe('EcgGraph', () => {
     expect(screen.getByTestId('bad-data-mark')).toBeInTheDocument()
   })
 
-  it('removes a bad-data mark via deleteBadData when the mark is clicked', async () => {
+  it('removes a bad-data mark via deleteBadData when Delete is pressed in its editor', async () => {
     const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
     const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })
     vi.stubGlobal('fetch', fetchMock)
@@ -745,7 +781,11 @@ describe('EcgGraph', () => {
     await waitFor(() => expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1))
     expect(fetchMock).toHaveBeenCalledTimes(3)
 
+    // Clicking a mark selects it for editing; deleting is an explicit action.
     screen.getByTestId('bad-data-mark').click()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await waitFor(() => expect(screen.getByTestId('bad-data-editor')).toBeInTheDocument())
+    await fireEvent.click(screen.getByTestId('bad-data-delete-button'))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
 
@@ -758,6 +798,48 @@ describe('EcgGraph', () => {
     expect(deleteBody.id).toBe(42)
 
     await waitFor(() => expect(screen.queryByTestId('bad-data-mark')).not.toBeInTheDocument())
+  })
+
+  it('edits a bad-data mark range through the editor and PATCHes the new range', async () => {
+    const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
+    const fetchMock = routedFetch({ addBadData: () => badDataAddResponse(mark) })
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', initialBadDataMarks: [mark] } })
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    screen.getByTestId('bad-data-mark').click()
+    const stop = (await screen.findByTestId('bad-data-stop-input')) as HTMLInputElement
+    expect(stop.value).toBe('6.000')
+
+    await fireEvent.input(stop, { target: { value: '7.5' } })
+    await fireEvent.click(screen.getByTestId('bad-data-save-button'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, init] = fetchMock.mock.calls[2]
+    expect((init as RequestInit).method).toBe('PATCH')
+    expect(fetchedBody(fetchMock, 2)).toEqual({ path: '/data/57.txt', id: 42, start: 2, stop: 7.5 })
+    await waitFor(() =>
+      expect((screen.getByTestId('bad-data-stop-input') as HTMLInputElement).value).toBe('7.500'),
+    )
+  })
+
+  it('disables Save when the edited range is empty or not a number', async () => {
+    const mark: BadDataMark = { id: 42, start: 2, stop: 6 }
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () => {
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1', initialBadDataMarks: [mark] } })
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    screen.getByTestId('bad-data-mark').click()
+    const start = (await screen.findByTestId('bad-data-start-input')) as HTMLInputElement
+    await fireEvent.input(start, { target: { value: 'abc' } })
+    expect(screen.getByTestId('bad-data-save-button')).toBeDisabled()
+    await fireEvent.input(start, { target: { value: '6' } })
+    expect(screen.getByTestId('bad-data-save-button')).toBeDisabled()
   })
 
   describe('Y-axis zoom', () => {
@@ -931,11 +1013,12 @@ describe('buildBeatAlignedData', () => {
 
     const result = buildBeatAlignedData(channelX, channelY, beats)
 
-    // Each marker sits at the TRACE's height at that timestamp, not at the
-    // beat's stored r_amplitude (which is measured on the filtered signal).
-    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, 11, null, null])
-    expect(bucketY(result, 'normal', false)).toEqual([null, null, 12, null])
-    expect(bucketY(result, 'unevaluated', false)).toEqual([null, null, null, 13])
+    // Every marker sits on the shared lane height, whatever the trace does
+    // at that timestamp.
+    const L = MARKER_LANE_Y
+    expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, L, null, null])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, L, null])
+    expect(bucketY(result, 'unevaluated', false)).toEqual([null, null, null, L])
     // Every other bucket stays entirely null for this fixture.
     expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null, null])
   })
@@ -952,7 +1035,7 @@ describe('buildBeatAlignedData', () => {
     ]
     const result = buildBeatAlignedData([0, 1], [0, 9], beats)
 
-    expect(bucketY(result, 'bradycardia_absolute', false)).toEqual([null, 9])
+    expect(bucketY(result, 'bradycardia_absolute', false)).toEqual([null, MARKER_LANE_Y])
     expect(bucketY(result, 'tachycardia_absolute', false)).toEqual([null, null])
   })
 
@@ -963,9 +1046,9 @@ describe('buildBeatAlignedData', () => {
     ]
     const result = buildBeatAlignedData([0, 1, 2], [0, 21, 22], beats)
 
-    expect(bucketY(result, 'prem_beat', true)).toEqual([null, 21, null])
+    expect(bucketY(result, 'prem_beat', true)).toEqual([null, MARKER_LANE_Y, null])
     expect(bucketY(result, 'prem_beat', false)).toEqual([null, null, null])
-    expect(bucketY(result, 'normal', false)).toEqual([null, null, 22])
+    expect(bucketY(result, 'normal', false)).toEqual([null, null, MARKER_LANE_Y])
     expect(bucketY(result, 'normal', true)).toEqual([null, null, null])
   })
 
@@ -976,7 +1059,7 @@ describe('buildBeatAlignedData', () => {
     ]
     const result = buildBeatAlignedData([0, 1, 2], [0, 31, 32], beats, 2)
 
-    expect(result.selectedY).toEqual([null, null, 32])
+    expect(result.selectedY).toEqual([null, null, MARKER_LANE_Y])
   })
 
   it('leaves selectedY entirely null when nothing is selected', () => {
@@ -1001,10 +1084,10 @@ describe('buildBeatAlignedData', () => {
     ]
     const result = buildBeatAlignedData([0, 1, 2, 3], [0, 41, 42, 43], beats)
 
-    expect(result.rejectedY).toEqual([null, 41, null, null])
+    expect(result.rejectedY).toEqual([null, MARKER_LANE_Y, null, null])
     // A rejected beat still buckets as 'normal' (reviewed) for its own
     // color/shape marker — the overlay is additive, not a replacement.
-    expect(bucketY(result, 'normal', true)).toEqual([null, 41, null, null])
+    expect(bucketY(result, 'normal', true)).toEqual([null, MARKER_LANE_Y, null, null])
   })
 })
 
@@ -1300,10 +1383,10 @@ describe('EcgGraph hide-rejected filter', () => {
     const shown = buildBeatAlignedData([0, 1, 2], [0, 51, 52], beats, null, false)
     const hidden = buildBeatAlignedData([0, 1, 2], [0, 51, 52], beats, null, true)
 
-    expect(shown.rejectedY).toEqual([null, 51, null])
+    expect(shown.rejectedY).toEqual([null, MARKER_LANE_Y, null])
     expect(hidden.rejectedY).toEqual([null, null, null])
     // The unreviewed beat is untouched either way.
-    expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, 52])
+    expect(hidden.markerY['normal|unreviewed']).toEqual([null, null, MARKER_LANE_Y])
   })
 })
 
@@ -1359,17 +1442,25 @@ describe('EcgGraph bad-data marking UX', () => {
     expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
   })
 
-  it('removes the mark under a click instead of creating a zero-width one', async () => {
+  it('selects the mark under a click instead of creating a zero-width one, and Delete removes it', async () => {
     const existing: BadDataMark = { id: 3, start: 0, stop: 9 }
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
     await mountMarking(fetchMock, [existing])
 
     expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+    const callsBefore = fetchMock.mock.calls.length
 
     // A click (no movement) in the middle of the plot, which lies inside
     // the existing mark's 0-9s span.
     dragOnPlot(0.5, 0.5)
+
+    await waitFor(() => expect(screen.getByTestId('bad-data-editor')).toBeInTheDocument())
+    // Selecting must not hit the backend: no add, no delete.
+    expect(fetchMock.mock.calls.length).toBe(callsBefore)
+    expect(screen.getAllByTestId('bad-data-mark')).toHaveLength(1)
+
+    await fireEvent.keyDown(document, { key: 'Delete' })
 
     await waitFor(() => {
       expect(screen.queryAllByTestId('bad-data-mark')).toHaveLength(0)
@@ -1378,6 +1469,128 @@ describe('EcgGraph bad-data marking UX', () => {
       (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE',
     )
     expect(deleteCall).toBeTruthy()
+  })
+})
+
+describe('EcgGraph add-beat flow', () => {
+  function postsTo(fetchMock: ReturnType<typeof vi.fn>, pathname: string) {
+    return fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        new URL(url as string).pathname === pathname && (init as RequestInit | undefined)?.method === 'POST',
+    )
+  }
+
+  function clickPlot(frac: number) {
+    const over = screen.getByTestId('ecg-graph-container').querySelector('.u-over') as HTMLDivElement
+    const x = parseFloat(over.style.width) * frac
+    over.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: x, clientY: 50, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: x, clientY: 50, bubbles: true }))
+  }
+
+  async function mountAdding(fetchMock: ReturnType<typeof vi.fn>) {
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await fireEvent.click(screen.getByTestId('add-beat-mode-button'))
+  }
+
+  it('snaps a click to the suggested peak, shows it as pending, and saves nothing yet', async () => {
+    const fetchMock = routedFetch({
+      snapBeat: () => ({ ok: true, json: async () => ({ status: 'ok', ts: 4.2, error: null }) }),
+    })
+    await mountAdding(fetchMock)
+    expect(screen.getByTestId('add-beat-mode-banner')).toBeInTheDocument()
+
+    clickPlot(0.5)
+
+    await waitFor(() => expect(screen.getByTestId('add-beat-pending')).toHaveTextContent('4.200'))
+    expect(screen.getByTestId('add-beat-pending')).toHaveTextContent('snapped to the nearest peak')
+    expect(postsTo(fetchMock, '/files/beats/snap')).toHaveLength(1)
+    expect(fetchedBody(fetchMock, fetchMock.mock.calls.findIndex(([u]) => String(u).includes('/snap')))).toMatchObject({
+      path: '/data/57.txt',
+      channel: 'channel 1',
+    })
+    expect(postsTo(fetchMock, '/files/beats/one')).toHaveLength(0)
+  })
+
+  it('a second click overrides the snap with the exact clicked position, without asking the server to snap again', async () => {
+    const fetchMock = routedFetch({
+      snapBeat: () => ({ ok: true, json: async () => ({ status: 'ok', ts: 4.2, error: null }) }),
+    })
+    await mountAdding(fetchMock)
+    clickPlot(0.5)
+    await screen.findByTestId('add-beat-pending')
+
+    clickPlot(0.8)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('add-beat-pending')).toHaveTextContent('placed exactly where you clicked'),
+    )
+    expect(postsTo(fetchMock, '/files/beats/snap')).toHaveLength(1)
+    expect(screen.getByTestId('add-beat-resnap-button')).toBeInTheDocument()
+  })
+
+  it('adds the beat only after Add beat is confirmed', async () => {
+    const fetchMock = routedFetch({
+      snapBeat: () => ({ ok: true, json: async () => ({ status: 'ok', ts: 4.2, error: null }) }),
+    })
+    await mountAdding(fetchMock)
+    clickPlot(0.5)
+    await screen.findByTestId('add-beat-pending')
+
+    await fireEvent.click(screen.getByTestId('add-beat-confirm-button'))
+
+    await waitFor(() => expect(postsTo(fetchMock, '/files/beats/one')).toHaveLength(1))
+    const call = fetchMock.mock.calls.findIndex(
+      ([u, init]) => String(u).includes('/files/beats/one') && (init as RequestInit).method === 'POST',
+    )
+    expect(fetchedBody(fetchMock, call)).toEqual({ path: '/data/57.txt', channel: 'channel 1', ts: 4.2 })
+    await waitFor(() => expect(screen.queryByTestId('add-beat-pending')).not.toBeInTheDocument())
+    expect(screen.getByTestId('bad-data-toast')).toHaveTextContent('Beat added at 4.200s')
+  })
+
+  it('Escape cancels a pending beat first, then leaves add-beat mode; nothing is added', async () => {
+    const fetchMock = routedFetch({
+      snapBeat: () => ({ ok: true, json: async () => ({ status: 'ok', ts: 4.2, error: null }) }),
+    })
+    await mountAdding(fetchMock)
+    clickPlot(0.5)
+    await screen.findByTestId('add-beat-pending')
+
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('add-beat-pending')).not.toBeInTheDocument()
+    expect(screen.getByTestId('add-beat-mode-banner')).toBeInTheDocument()
+
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('add-beat-mode-banner')).not.toBeInTheDocument()
+    expect(postsTo(fetchMock, '/files/beats/one')).toHaveLength(0)
+  })
+
+  it('shows the server reason when there is no peak to snap to', async () => {
+    const fetchMock = routedFetch({
+      snapBeat: () => ({
+        ok: true,
+        json: async () => ({ status: 'error', ts: null, error: 'There is already a beat here (t=4.000s)' }),
+      }),
+    })
+    await mountAdding(fetchMock)
+
+    clickPlot(0.5)
+
+    await waitFor(() => expect(screen.getByTestId('add-beat-error')).toHaveTextContent('already a beat'))
+    expect(screen.queryByTestId('add-beat-pending')).not.toBeInTheDocument()
+  })
+
+  it('is exclusive with bad-data mode', async () => {
+    const fetchMock = routedFetch()
+    await mountAdding(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('bad-data-mode-button'))
+
+    expect(screen.queryByTestId('add-beat-mode-banner')).not.toBeInTheDocument()
+    expect(screen.getByTestId('bad-data-mode-banner')).toBeInTheDocument()
   })
 })
 
@@ -1419,6 +1632,77 @@ describe('EcgGraph focus mode and shortcuts', () => {
     expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
   })
 
+  it('shows the parent-supplied beat controls beside the selected beat in focus mode only', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    const focusOverlay = createRawSnippet(() => ({
+      render: () => '<span data-testid="overlay-content">controls</span>',
+    }))
+    const modes: boolean[] = []
+    // Held for the whole test (not just render): the popover anchors from
+    // the plot area's live clientWidth, which jsdom reports as 0.
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+    try {
+    render(EcgGraph, {
+      props: {
+        path: '/data/57.txt',
+        channel: 'channel 1',
+        selectedBeatTs: 5,
+        focusOverlay,
+        onFocusModeChange: (on: boolean) => modes.push(on),
+      },
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.queryByTestId('focus-beat-overlay')).not.toBeInTheDocument()
+
+    await fireEvent.click(screen.getByTestId('fullscreen-graph-button'))
+    await waitFor(() => expect(screen.getByTestId('overlay-content')).toBeInTheDocument())
+    expect(modes.at(-1)).toBe(true)
+
+    // Escape closes the popover first, and only a second Escape leaves focus mode.
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('focus-beat-overlay')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ecg-graph')).toHaveClass('fullscreen')
+    await fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.getByTestId('ecg-graph')).not.toHaveClass('fullscreen')
+    } finally {
+      delete (HTMLElement.prototype as any).clientWidth
+    }
+  })
+
+  it('spells out what each review shortcut key does', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
+      }),
+    )
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+
+    const hint = screen.getByTestId('beat-nav-hint')
+    expect(hint).toHaveTextContent('N Next')
+    expect(hint).toHaveTextContent('P Previous')
+    expect(hint).toHaveTextContent('C Confirm arrhythmia')
+    expect(hint).toHaveTextContent('R Reject')
+  })
+
+  it('labels the trace toggle and the marker filters', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByTestId('trace-filter-hint')).toHaveTextContent('As recorded')
+    expect(screen.getByTestId('toggle-filtered-signal-button')).toHaveAttribute(
+      'title',
+      expect.stringContaining('only changes the display'),
+    )
+    expect(screen.getByTestId('marker-filter-label')).toHaveTextContent('Show markers')
+  })
+
   it('ignores shortcuts while the technician is typing', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
@@ -1440,16 +1724,16 @@ describe('EcgGraph focus mode and shortcuts', () => {
 })
 
 describe('EcgGraph rendering invariants', () => {
-  it('falls back to r_amplitude when the trace has no sample at the beat timestamp', () => {
+  it('still places the marker on the lane when the trace has no sample at the beat timestamp', () => {
     // Heavy downsampling can drop the exact sample a beat sits on; the
-    // marker still has to be drawn somewhere sensible.
+    // lane height does not depend on the trace, so the marker is unaffected.
     const beats: WindowBeat[] = [beat({ ts: 1.5, r_amplitude: 7 })]
 
     const result = buildBeatAlignedData([0, 1, 2], [0, 10, 20], beats)
 
     const i = result.xs.indexOf(1.5)
     expect(i).toBeGreaterThan(-1)
-    expect(result.markerY['normal|unreviewed'][i]).toBe(7)
+    expect(result.markerY['normal|unreviewed'][i]).toBe(MARKER_LANE_Y)
     // The waveform itself has no value there, and spanGaps bridges it.
     expect(result.channelY[i]).toBeNull()
   })

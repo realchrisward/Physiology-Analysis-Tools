@@ -92,6 +92,10 @@
   // The beat most recently selected via a click on EcgGraph's marker (see
   // `onBeatSelect` below), driving the real `BeatCategoryPanel` below.
   let selectedBeat: WindowBeat | null = $state(null)
+  // True while the graph is in focus mode and shows the beat controls in its
+  // own popover; the side panel then renders none, so there is only ever one
+  // BeatCategoryPanel (and one set of C/R key listeners) mounted.
+  let focusMode: boolean = $state(false)
 
   // Collapsible beat-detail side panel — collapsed, it shrinks to a slim
   // icon rail so the graph gets the full width; a technician can collapse
@@ -821,10 +825,27 @@
             {initialBadDataMarks}
             selectedBeatTs={selectedBeat?.ts ?? null}
             {beatsOfInterest}
+            {focusOverlay}
+            onFocusModeChange={(on) => (focusMode = on)}
           />
         {/key}
       {/if}
     </div>
+
+    {#snippet focusOverlay()}
+      {#if selectedBeat && !persistPending && !(persistError && lastPersistedChannel !== activeChannel)}
+        {#key selectedBeat.ts}
+          <BeatCategoryPanel
+            {path}
+            beat={selectedBeat}
+            onUpdated={handleCategoryUpdated}
+            onDeleted={handleBeatDeleted}
+          />
+        {/key}
+      {:else}
+        <p class="text-muted">Preparing review data…</p>
+      {/if}
+    {/snippet}
 
     <div class="beat-panel" class:collapsed={beatPanelCollapsed} data-testid="selected-beat-panel">
       <div class="beat-panel-header">
@@ -869,6 +890,8 @@
               Retry
             </button>
           </div>
+        {:else if focusMode}
+          <p class="text-muted" data-testid="beat-panel-in-focus">Beat details are shown on the graph in focus mode.</p>
         {:else}
           {#key selectedBeat.ts}
             <BeatCategoryPanel

@@ -4,6 +4,7 @@ from physiology_analysis_tools.modules import arrhythmia_detection, heartbeat_de
 
 from backend import db
 from backend.arrhythmia import router as arrhythmia_router
+from backend.beat_editing import router as beat_editing_router
 from backend.beats import router as beats_router
 from backend.beats_window import router as beats_window_router
 from backend.db_routes import router as db_router
@@ -52,6 +53,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.include_router(arrhythmia_router)
     app.include_router(windowing_router)
     app.include_router(db_router)
+    app.include_router(beat_editing_router)
 
     return app
 

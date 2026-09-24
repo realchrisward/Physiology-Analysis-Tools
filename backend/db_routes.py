@@ -9,7 +9,7 @@ from physiology_analysis_tools.modules import (
     ml_tools,
 )
 
-from backend import categories, db
+from backend import beat_editing, categories, db
 from backend.models import (
     ArrhythmiaSettingsModel,
     BadDataAddRequest,
@@ -17,6 +17,8 @@ from backend.models import (
     BadDataDeleteRequest,
     BadDataDeleteResult,
     BadDataMark,
+    BadDataUpdateRequest,
+    BadDataUpdateResult,
     BeatDeleteRequest,
     BeatDeleteResult,
     BeatSettingsModel,
@@ -335,9 +337,16 @@ def delete_beat(payload: BeatDeleteRequest, request: Request) -> BeatDeleteResul
 
         cached_df = request.app.state.beat_cache.get(payload.path)
         if cached_df is not None:
-            request.app.state.beat_cache[payload.path] = cached_df[
-                cached_df["ts"] != payload.ts
-            ].reset_index(drop=True)
+            remaining = cached_df[cached_df["ts"] != payload.ts].reset_index(drop=True)
+            # The beat after the gap measures its RR from the one before it
+            # now, so its RR/HR change too.
+            fix = beat_editing.rr_hr_for_successor(remaining, payload.ts)
+            if fix is not None:
+                fix_ts, fix_rr, fix_hr = fix
+                remaining.loc[remaining["ts"] == fix_ts, "RR"] = fix_rr
+                remaining.loc[remaining["ts"] == fix_ts, "HR"] = fix_hr
+                db.update_beat_rr_hr(conn, file_row["id"], fix_ts, fix_rr, fix_hr)
+            request.app.state.beat_cache[payload.path] = remaining
 
         return BeatDeleteResult(status="ok")
     except Exception as e:
@@ -401,6 +410,44 @@ def add_bad_data(payload: BadDataAddRequest, request: Request) -> BadDataAddResu
         )
     except Exception as e:
         return BadDataAddResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.patch("/bad-data", response_model=BadDataUpdateResult)
+def update_bad_data(
+    payload: BadDataUpdateRequest, request: Request
+) -> BadDataUpdateResult:
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is None or imported.status != "ok":
+        return BadDataUpdateResult(
+            status="error", error=f"File not imported: {payload.path}"
+        )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        file_row = db.get_file_row(
+            conn, payload.path, imported.size, imported.modified_time
+        )
+        if file_row is None:
+            return BadDataUpdateResult(
+                status="error", error="No persisted data for this file"
+            )
+
+        row = db.update_bad_data_mark(
+            conn, file_row["id"], payload.id, payload.start, payload.stop
+        )
+        if row is None:
+            return BadDataUpdateResult(
+                status="error", error="No bad-data mark with this id"
+            )
+
+        return BadDataUpdateResult(
+            status="ok",
+            mark=BadDataMark(id=row["id"], start=row["start"], stop=row["stop"]),
+        )
+    except Exception as e:
+        return BadDataUpdateResult(status="error", error=str(e))
     finally:
         conn.close()
 
