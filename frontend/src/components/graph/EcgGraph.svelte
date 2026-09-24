@@ -153,8 +153,8 @@
     // Bumped by a parent (ReviewWorkspace, after a successful arrhythmia
     // re-run) to request a beats-ONLY re-fetch at the currently visible
     // range — no channel-window re-fetch, no viewport change. See the
-    // `$effect` below (mirrors the `containerWidth`/`previousWidth`
-    // skip-the-initial-run pattern already used in this file) and
+    // `$effect` below (mirrors the skip-the-initial-run pattern already
+    // used in this file) and
     // `refreshBeatsOnly`. Plain increment rather than a boolean/event so a
     // rapid second re-run request while the graph is still applying the
     // first one is never silently swallowed — each distinct value the
@@ -188,7 +188,6 @@
 
   const DEBOUNCE_MS = 150
   const HEIGHT = 380
-  const EXPANDED_HEIGHT = 640
   const ZOOM_FACTOR = 0.75
   // A pan/zoom re-fetch loads a window PAD_FACTOR times wider on EACH side
   // than what's actually visible (so 1 = 3x the visible width total), at a
@@ -501,7 +500,7 @@
   function graphHeight(): number {
     // Leaves room for the legend and marks strip beneath the plot.
     if (fullscreen) return Math.max(240, viewportHeight - 210)
-    return expanded ? EXPANDED_HEIGHT : HEIGHT
+    return HEIGHT
   }
 
   function toggleFullscreen() {
@@ -593,10 +592,12 @@
   // highlighted state below, so it's obvious at a glance that the view has
   // moved from the default and a reset is available.
   let viewChanged: boolean = $state(false)
+  // Set once the technician zooms Y by hand, so a later data refetch does
+  // not silently re-range Y underneath them. Cleared by Reset view.
+  let yManuallyZoomed = false
   // Toggled by the maximize/minimize button in the toolbar; taller chart
   // height for a closer look at dense waveforms. See the `$effect` below
   // that applies it to the live chart.
-  let expanded: boolean = $state(false)
 
   // Legend/filter state — see the legend template below and
   // `applyFilters`. Categories in this set are hidden (`chart.setSeries`);
@@ -682,9 +683,6 @@
   let chart: uPlot | undefined
   let fullExtent: { start: number; end: number } | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
-  // Set on the first `containerWidth` effect run (the binding's own initial
-  // read), so later effect runs can tell an actual resize apart from that.
-  let previousWidth: number | undefined
   // Teardown for the currently-active drag's `document`-level listeners, if
   // any drag is in progress. Reachable from both the drag's own `onUp`
   // completion path and the component's onMount/onDestroy cleanup, so a
@@ -715,7 +713,7 @@
   let lastChannelWindow: { x: number[]; y: number[] } | undefined
   // Set once the first `beatsRefreshToken` effect run has captured its
   // starting value — see that `$effect` for why the first run must be a
-  // no-op (same discipline as `previousWidth` above).
+  // no-op (same discipline as the other skip-the-initial-run guards).
   let previousBeatsRefreshToken: number | undefined
   // Same skip-the-initial-run discipline for the raw/filtered toggle.
   let previousShowFiltered: boolean | undefined
@@ -745,11 +743,22 @@
   // only the old, much narrower range within it (the reported "reset
   // zooms out way too much" bug — fixed by a second click only because, by
   // then, no older in-flight fetch remained to race it).
-  // Bumped by EVERY operation that will end in a `chart.setData` — a
-  // pan/zoom/reset refetch, a beats-only refresh, or a jump. Each captures
-  // the value and only applies its result if it is still the newest, so a
-  // slow response can never overwrite a newer one's data.
+  // Ordering guard for channel refetches: each captures the value and only
+  // applies its result if it is still the newest, so a slow response can
+  // never overwrite a newer one's data.
   let dataRequestId = 0
+  // How many channel refetches are in flight. A beats-only refresh and the
+  // selection-highlight re-merge both rebuild the chart from
+  // `lastChannelWindow`, which a pending refetch is about to replace — so
+  // while one is running they stand aside rather than painting the previous
+  // window's waveform underneath the new scale. Nothing is lost: a refetch
+  // fetches beats as well, and re-reads the current selection when it
+  // merges.
+  let channelFetchInFlight = 0
+  // Separate ordering guard for beats-only refreshes, so one can never
+  // cancel a channel refetch (they are not interchangeable — only the
+  // refetch carries waveform data for the new range).
+  let beatsRefreshId = 0
 
   // The requested resolution is a PIXEL count: the backend downsamples to
   // roughly 2 points per unit of it. A container that has not been laid out
@@ -831,14 +840,14 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
 
-    // Shares ONE counter with `refetch` rather than keeping its own: these
-    // two paths both call setData, and a beats-only refresh merges against
-    // `lastChannelWindow`, which a concurrent refetch is about to replace.
-    // Without a shared guard, a slow refresh landing after a pan would
-    // paint beats from the old range over the new range's waveform.
-    const requestId = ++dataRequestId
+    // A refetch already on its way will deliver fresh beats along with the
+    // waveform for the range actually being shown, so stand aside.
+    if (channelFetchInFlight > 0) return
+
+    const requestId = ++beatsRefreshId
     const beats = await loadBeats(min, max)
-    if (requestId !== dataRequestId || !chart || !lastChannelWindow) return
+    if (requestId !== beatsRefreshId || channelFetchInFlight > 0) return
+    if (!chart || !lastChannelWindow) return
 
     lastBeats = beats
     const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs, hideRejected)
@@ -854,6 +863,9 @@
   // fetch has resolved.
   function applySelectionHighlight() {
     if (!chart || !lastChannelWindow) return
+    // See `channelFetchInFlight`: the pending refetch re-reads the current
+    // selection when it merges, so it will paint this anyway.
+    if (channelFetchInFlight > 0) return
     const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, lastBeats, selectedBeatTs, hideRejected)
     chart.setData(toChartData(merged), false)
     applyFilters()
@@ -925,9 +937,10 @@
   async function refetch(
     min: number,
     max: number,
-    options: { pad?: boolean; resetScales?: boolean } = {},
+    options: { pad?: boolean; reRange?: boolean } = {},
   ) {
     const requestId = ++dataRequestId
+    channelFetchInFlight += 1
     const usePad = options.pad ?? true
     const requestedWidth = max - min
     const pad = usePad ? requestedWidth * PAD_FACTOR : 0
@@ -936,7 +949,12 @@
     const baseWidth = measuredWidth()
     const fetchWidth = usePad ? baseWidth * (1 + 2 * PAD_FACTOR) : baseWidth
 
-    const result = await fetchMergedWindow(fetchStart, fetchEnd, fetchWidth)
+    let result
+    try {
+      result = await fetchMergedWindow(fetchStart, fetchEnd, fetchWidth)
+    } finally {
+      channelFetchInFlight -= 1
+    }
     // Superseded by a newer refetch (a later pan/zoom, or a Reset) dispatched
     // while this one was in flight — see `dataRequestId`'s own comment
     // above for why applying a stale response here would be a real bug
@@ -951,19 +969,24 @@
       // rather than a visible glitch.
       lastChannelWindow = channelData
       lastBeats = beats
-      // `resetScales: true` (Reset View only) hands BOTH x and y back to
-      // uPlot's own auto-ranging from this fresh data — the only supported
-      // way to undo a manual Y-zoom's `setScale` pin; uPlot normalizes
-      // `Scale.auto` into an internal function at construction time, so
-      // directly reassigning `chart.scales.y.auto = true` afterward corrupts
-      // it (throws `sc.auto is not a function` on the next commit) rather
-      // than re-enabling auto-ranging. X is re-pinned to the exact requested
-      // range right after regardless, since resetScales' own x auto-range
-      // depends on this fetch's returned data matching `[min, max]` exactly,
-      // which is true for Reset View's own unpadded call but is never
-      // assumed here.
-      chart.setData(toChartData(merged), options.resetScales ?? false)
-      if (options.resetScales) {
+      // uPlot derives the y range from the data it holds AT THE MOMENT the
+      // x scale changes. Every jump/zoom sets x first and only then fetches
+      // that window's data, so y ends up ranged against the PREVIOUS
+      // window — and handing setData `false` (don't touch scales) meant it
+      // was never revisited. The new trace then drew outside the visible y
+      // range: a plot that looks empty or half-drawn until some later
+      // interaction happens to re-range it. Re-ranging here and re-pinning
+      // x to the exact requested window is the supported way to fix it
+      // (uPlot normalises `Scale.auto` into an internal function at
+      // construction, so assigning `chart.scales.y.auto = true` corrupts it
+      // instead of re-enabling auto-ranging).
+      //
+      // Skipped while the technician has taken manual control of the y zoom,
+      // and during a live pan drag (`maybeBufferAhead`), where re-pinning x
+      // would fight the drag's own scale updates.
+      const reRange = (options.reRange ?? true) && !yManuallyZoomed
+      chart.setData(toChartData(merged), reRange)
+      if (reRange) {
         chart.setScale('x', { min, max })
       }
       loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth, pixelWidth: fetchWidth }
@@ -995,7 +1018,7 @@
   function maybeBufferAhead(min: number, max: number) {
     if (bufferFetchInFlight || !needsRefetch(min, max)) return
     bufferFetchInFlight = true
-    void refetch(min, max).finally(() => {
+    void refetch(min, max, { reRange: false }).finally(() => {
       bufferFetchInFlight = false
     })
   }
@@ -1215,6 +1238,7 @@
       const newRange = wheelEvent.deltaY < 0 ? oldRange * ZOOM_FACTOR : oldRange / ZOOM_FACTOR
       const mid = (oldMin + oldMax) / 2
       viewChanged = true
+      yManuallyZoomed = true
       u.setScale('y', { min: mid - newRange / 2, max: mid + newRange / 2 })
       return
     }
@@ -1275,6 +1299,7 @@
     const mid = (min + max) / 2
     const newRange = (max - min) * factor
     viewChanged = true
+    yManuallyZoomed = true
     chart.setScale('y', { min: mid - newRange / 2, max: mid + newRange / 2 })
   }
 
@@ -1292,10 +1317,6 @@
 
   function handleZoomOutY() {
     zoomYBy(1 / ZOOM_FACTOR)
-  }
-
-  function toggleExpanded() {
-    expanded = !expanded
   }
 
   // Moves the visible x-range to exactly [start, end] and loads the data for
@@ -1647,37 +1668,36 @@
       chartReady = true
   }
 
-  // Reacts to `bind:clientWidth` changes on the container (window
-  // resizes/layout changes). The binding's own effect fires once
-  // synchronously on mount with the starting width — recorded via
-  // `previousWidth` but not treated as a resize, since the initial chart
-  // construction above already used that same width.
+  // Reacts to `bind:clientWidth` changes on the container (window resizes,
+  // layout settling, sidebar collapse, entering focus mode).
   $effect(() => {
-    const width = containerWidth
-    if (previousWidth === undefined) {
-      previousWidth = width
-      return
-    }
-    if (width === previousWidth) return
-    previousWidth = width
-
+    containerWidth // the binding is the change signal; the live measurement below is the truth
     if (!chart) return
+
+    // Compared against the chart's OWN width rather than a remembered
+    // previous value: the chart can be constructed at the fallback width
+    // (container not yet laid out), and a "skip the first observation"
+    // guard would then never correct it, leaving the canvas wider than its
+    // container for the rest of the session.
+    const width = measuredWidth()
+    if (width === chart.width) return
+
     chart.setSize({ width, height: graphHeight() })
+    // Point density is tied to pixel width, so a wider graph needs a
+    // denser fetch — `needsRefetch` checks exactly that.
     const { min, max } = chart.scales.x
     if (min != null && max != null) scheduleRefetch(min, max)
   })
 
-  // Applies the maximize/minimize toggle to the live chart. Guarded on
-  // `chart` existing (it may still be mid-construction on the very first
-  // run, before `expanded` could plausibly have changed from its initial
-  // `false`) rather than needing to coordinate with the async onMount setup.
+  // Keeps the live chart sized to its container and the current mode.
+  // Guarded on `chart` existing rather than coordinating with the async
+  // mount setup.
   $effect(() => {
     // Re-read every input to graphHeight() so this re-runs for any of them.
-    expanded
     fullscreen
     viewportHeight
     if (!chart) return
-    chart.setSize({ width: containerWidth, height: graphHeight() })
+    chart.setSize({ width: measuredWidth(), height: graphHeight() })
   })
 
   // Colors above are resolved via zero-arg functions specifically so this
@@ -1691,7 +1711,7 @@
     chart?.redraw(true, true)
   })
 
-  // Mirrors the `containerWidth`/`previousWidth` effect above: the binding
+  // Mirrors the `containerWidth` effect above: the binding
   // this reads (`beatsRefreshToken`, a prop) fires once synchronously on
   // mount with its starting value — recorded via `previousBeatsRefreshToken`
   // but not treated as a refresh request, since the initial chart
@@ -1851,11 +1871,10 @@
     }
     viewChanged = false
     chart.setScale('x', { min: fullExtent.start, max: fullExtent.end })
-    // `resetScales: true` also hands Y back to uPlot's own auto-ranging,
-    // undoing any manual Y-zoom — see `refetch`'s own comment on why that
-    // option (not a direct `chart.scales.y.auto` mutation) is the correct
-    // way to do this.
-    void refetch(fullExtent.start, fullExtent.end, { pad: false, resetScales: true })
+    // Reset View also hands Y back to auto-ranging, undoing any manual
+    // Y-zoom — see `refetch`'s own comment on how.
+    yManuallyZoomed = false
+    void refetch(fullExtent.start, fullExtent.end, { pad: false })
   }
 
   // Positions a bad-data mark within the marks bar as a percentage of the
@@ -2093,16 +2112,6 @@
     >
       <Icon name="crop" size={14} />
       {badDataMode ? 'Exit bad data mode' : 'Mark bad data'}
-    </button>
-    <button
-      type="button"
-      class="btn btn-sm"
-      data-testid="expand-graph-button"
-      title={expanded ? 'Restore graph size' : 'Enlarge graph'}
-      aria-pressed={expanded}
-      onclick={toggleExpanded}
-    >
-      <Icon name={expanded ? 'minimize' : 'maximize'} size={14} />
     </button>
     <button
       type="button"

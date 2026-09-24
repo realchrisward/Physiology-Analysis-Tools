@@ -430,27 +430,6 @@ describe('EcgGraph', () => {
     vi.useRealTimers()
   })
 
-  it('expand-graph-button toggles a taller chart height', async () => {
-    const fetchMock = routedFetch()
-    vi.stubGlobal('fetch', fetchMock)
-
-    withMockedClientWidth(800, () => {
-      render(EcgGraph, { props: { path: '/data/57.txt', channel: 'channel 1' } })
-    })
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-
-    const canvas = screen.getByTestId('ecg-graph-container').querySelector('canvas') as HTMLCanvasElement
-    const initialHeight = canvas.height
-
-    const expandButton = screen.getByTestId('expand-graph-button')
-    expandButton.click()
-    await waitFor(() => expect(canvas.height).toBeGreaterThan(initialHeight))
-
-    expandButton.click()
-    await waitFor(() => expect(canvas.height).toBe(initialHeight))
-  })
-
   it('removes document-level drag listeners on unmount, so a stale mid-drag mouseup fetches nothing', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
