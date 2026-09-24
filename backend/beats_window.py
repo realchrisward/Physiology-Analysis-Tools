@@ -29,6 +29,9 @@ def get_beat_window(
             "r_amplitude": row.R_amplitude,
             "hr": row.HR,
         }
+        if "manual_added_at" in df.columns:
+            value = row.manual_added_at
+            kwargs["manual_added_at"] = None if pd.isna(value) else str(value)
         for col in OPTIONAL_COLUMNS:
             if col in df.columns:
                 value = getattr(row, col)

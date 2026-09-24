@@ -53,6 +53,10 @@ record but this file is the fast path to understanding current backend state.
   Confirm/reject/reassign a beat's classification (fixes the old app's
   unreliable "Confirm Arrhythmia" button and a real reject-cascade bug).
   Bad-data range marking. Excel report export matching the old app's shape.
+- **M8 — Manual beat editing.** Add a beat the detector missed (with a
+  snap-to-nearest-peak suggestion), delete a false one, and edit or delete
+  bad-data ranges. Hand edits are remembered per file and re-applied when
+  beats are re-detected, and added beats carry the time they were added.
 
 ## Files
 
@@ -66,6 +70,7 @@ record but this file is the fast path to understanding current backend state.
 | `backend/settings.py` | `GET`/`PUT /settings` — reads/writes `beat_settings`/`arrhythmia_settings`. `PUT` validates before mutating (reject whole request on failure, no partial-apply). |
 | `backend/arrhythmia.py` | `POST /arrhythmia/detect` — wraps `arrhythmia_detection.call_arrhythmias()`. Defensively recomputes `any_arrhythmia` (see Design decisions) before caching the merged result back into `beat_cache`. |
 | `backend/windowing.py` | `GET /channels/window` — downsampled signal data. Unchanged port of the old app's min-max-per-bin algorithm. Memoized by `(path, channel, start, end, resolution)` in `window_cache`. |
+| `backend/beat_editing.py` | `POST /files/beats/snap` (read-only: the signal peak nearest a rough click) and `POST /files/beats/one` (insert a beat at the nearest sample, recompute the neighbour's RR/HR, record it as a manual edit). Also `apply_manual_edits()` (re-applies a file's hand edits to a fresh detection result) and `rr_hr_for_successor()` (RR/HR fix-up after a delete). |
 | `backend/beats_window.py` | `GET /beats/window` — range-filters `beat_cache[path]` by `ts`. Arrhythmia category fields all optional (a file may only have had beat detection run). |
 | `backend/categories.py` | Single source of truth for arrhythmia category column names: `BASE_CATEGORIES` (5), `REASSIGNABLE_CATEGORIES` (+`other_arrhythmia`, 6), `ALL_OPTIONAL_COLUMNS` (+`any_arrhythmia`, 7). Consumed by `arrhythmia.py`, `beats_window.py`, `db.py`, `db_routes.py`. |
 | `backend/db.py` | SQLite persistence layer. `connect()`, `default_db_path()`, `get_file_row`, `upsert_file` (partial-update via an `_UNSET` sentinel, optional `commit=False` for transactions), `replace_beats`, `update_beat_category` (confirm/reject/reassign), `add_bad_data_mark`/`delete_bad_data_mark`. Schema below. |
@@ -96,6 +101,11 @@ spaces, colons) don't round-trip safely as a raw URL segment.
 | `POST /files/beats` | `{path, channel}` | `PersistBeatsResult` | Wholesale delete-then-reinsert from `beat_cache[path]`, atomic with the channel/settings-snapshot update. **Safe to call repeatedly on the same channel** — `replace_beats()` preserves any beat's existing non-`"unreviewed"` `review_state`/`reassigned_category` across the reinsert, by exact `ts` match (see Design decisions). |
 | `PATCH /files/beats/category` | `{path, ts, action, category?}` (`action`: `"confirm"\|"reject"\|"reassign"`) | `CategoryUpdateResult` | `reject` clears all 6 category columns + `any_arrhythmia`. `reassign` needs `category` in `REASSIGNABLE_CATEGORIES`. Also syncs `app.state.beat_cache[path]` in place if present. |
 | `POST /files/bad-data` | `{path, start, stop}` | `BadDataAddResult` | Always auto-sorted (`min`/`max`), regardless of input order. |
+| `PATCH /files/bad-data` | `{path, id, start, stop}` | `BadDataUpdateResult` | Moves an existing mark; auto-sorted like an add. Error if the id does not exist for this file. |
+| `POST /files/beats/snap` | `{path, channel, ts}` | `BeatSnapResult` | Read-only. Searches about ±60 ms (the larger of `min_RR` and 50 ms) around `ts` on the signal detection used, ignoring samples on existing beats, and returns the highest peak as `ts`. Error if a beat is already there. |
+| `POST /files/beats/one` | `{path, channel, ts}` | `BeatAddResult` | Adds a beat at the sample nearest `ts` to SQLite and `beat_cache`. Needs beats already saved for the file (`POST /files/beats`). Refuses a spot within `min_RR` of an existing beat or outside the recording. Returns the new `WindowBeat` including `manual_added_at`. Arrhythmia flags are left empty until arrhythmia detection is re-run. |
+| `DELETE /files/beats/one` | `{path, ts}` | `BeatDeleteResult` | Removes a beat from SQLite and `beat_cache`, recomputes the following beat's RR/HR, and remembers the removal. |
+| `DELETE /files/state` | `{path}` | `DiscardStateResult` | "Start fresh": drops everything saved for the file, including manual edits. |
 | `DELETE /files/bad-data` | `{path, id}` | `BadDataDeleteResult` | Scoped to `(id, file_id)`. |
 | `POST /files/report` | `{path, output_dir}` | `ReportResult` | Writes `<output_dir>/<basename>.xlsx`, 3 sheets (`beats`, `bad_data_marks`, `settings`), via `xlsxwriter`. |
 
@@ -110,10 +120,25 @@ beats (id, file_id, ts, rr, r_amplitude, hr, <7 category columns>,
        review_state DEFAULT 'unreviewed', reassigned_category,
        UNIQUE(file_id, ts))
 bad_data_marks (id, file_id, start, stop)
+manual_beat_edits (id, file_id, ts, kind 'add'|'delete', r_amplitude,
+                   created_at)   -- ISO UTC time of the edit
 ```
+
+`beats` also has `manual_added_at` (NULL for detected beats). Databases from
+before this column existed are upgraded by `connect()` with an `ALTER TABLE`.
 
 ## Design decisions
 
+- **Manual beat edits outlive re-detection.** `beats` is rewritten wholesale
+  on every persist, so hand edits live in their own `manual_beat_edits`
+  table. `POST /beats/detect` re-applies them to the fresh result *before*
+  arrhythmia detection runs, so the new beats are analysed and saved like
+  any other: removals drop any detected beat within `min_RR` of the removed
+  one, additions are restored at their original time with their original
+  `manual_added_at`, and RR/HR are recomputed. Deleting a hand-added beat
+  forgets the addition instead of recording a removal; adding a beat where
+  one was removed cancels the removal. If detection now finds an added beat
+  itself, the detected one is kept (no duplicate) and loses its manual flag.
 - **`create_app()` factory + `app.state`**, not a module singleton —
   isolated state per test/instance. `create_app(db_path: str | None = None)`:
   tests always pass an isolated `tmp_path`-backed DB, never the real
@@ -243,7 +268,8 @@ bad_data_marks (id, file_id, start, stop)
   review mutations, Excel export). F5 additions: `GET /files/state`
   restores `beat_cache` on reopen; `PATCH /files/beats/category` keeps it
   synced; `replace_beats()` preserves review state across repeated
-  persists. **77 tests passing, 1 correctly skipped.** Every milestone
+  persists. Manual beat editing (M8) followed. **126 tests passing, 1
+  correctly skipped** as of M8. Every milestone
   and fix wave reviewed (Sonnet, per-task + whole-branch), every finding
   fix-waved and re-reviewed clean — several with real fail-before/
   pass-after verification against the pre-fix commit.

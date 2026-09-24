@@ -12,6 +12,18 @@
   // overlaps it, as a fraction of the trace's own span.
   export const MARKER_LANE_HEADROOM = 0.22
 
+  // Markers grow as the view zooms in, so they stay easy to see when only a
+  // second or two is on screen. 1x at or beyond the reference span, rising by
+  // half a step per halving of the visible time, up to MAX.
+  const MARKER_ZOOM_REFERENCE_SECONDS = 8
+  const MARKER_ZOOM_MAX = 2.5
+
+  export function markerZoomScale(visibleSeconds: number): number {
+    if (!Number.isFinite(visibleSeconds) || visibleSeconds <= 0) return 1
+    const scale = 1 + 0.5 * Math.log2(MARKER_ZOOM_REFERENCE_SECONDS / visibleSeconds)
+    return Math.min(MARKER_ZOOM_MAX, Math.max(1, scale))
+  }
+
   export interface BeatSeriesData {
     xs: number[]
     channelY: (number | null)[]
@@ -404,6 +416,12 @@
     }
   }
 
+  // Marker size multiplier for the view currently on screen (see markerZoomScale).
+  function visibleMarkerScale(u: uPlot): number {
+    const { min, max } = u.scales.x
+    return min != null && max != null ? markerZoomScale(max - min) : 1
+  }
+
   // A uPlot `points.paths` implementation: iterates this series' own data
   // in [idx0, idx1], converts each point to pixel space via `u.valToPos`,
   // and draws `shape` at each — returning both `stroke` and `fill` (when
@@ -422,7 +440,7 @@
       const scaleKey = series.scale ?? 'y'
       const yData = u.data[seriesIdx] as (number | null)[]
       const xData = u.data[0] as number[]
-      const r = pxSize / 2
+      const r = (pxSize * visibleMarkerScale(u)) / 2
       for (let i = idx0; i <= idx1; i++) {
         const xVal = xData[i]
         const yVal = yData[i]
@@ -495,7 +513,7 @@
           const path = new Path2D()
           const yData = u.data[seriesIdx] as (number | null)[]
           const xData = u.data[0] as number[]
-          const r = size / 2
+          const r = (size * visibleMarkerScale(u)) / 2
           for (let i = idx0; i <= idx1; i++) {
             const xVal = xData[i]
             const yVal = yData[i]

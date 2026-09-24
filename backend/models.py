@@ -115,6 +115,7 @@ class WindowBeat(BaseModel):
     rr: float
     r_amplitude: float
     hr: float
+    manual_added_at: str | None = None
     bradycardia_absolute: bool | None = None
     tachycardia_absolute: bool | None = None
     skipped_beat: bool | None = None
@@ -159,6 +160,7 @@ class PersistedBeat(BaseModel):
     rr: float
     r_amplitude: float
     hr: float
+    manual_added_at: str | None = None
     bradycardia_absolute: bool | None = None
     tachycardia_absolute: bool | None = None
     skipped_beat: bool | None = None

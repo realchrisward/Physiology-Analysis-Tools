@@ -81,6 +81,14 @@ flagged down to 1/163. A fixed `eps` is still selectable in Settings.
 - **Rejected beats get a visible strike overlay**, distinguishing "reviewed
   and dismissed" from "never flagged" (fixed this session) — the original had
   no such distinction either.
+- **Manual beat editing** — add a beat the detector missed (snapped to the
+  nearest peak, then confirmed), delete a false one, and edit or delete
+  bad-data ranges. Hand edits survive re-running beat detection, and an added
+  beat is flagged with when it was added. The original could only re-detect.
+- **Marker lane** — beat markers sit on a fixed row above the trace and grow
+  when zoomed in, instead of overlapping the waveform.
+- **Focus-mode beat details** — confirm/reject/reassign/delete from a popover
+  beside the selected beat while the graph fills the window.
 - **Recent-files list** (persisted across app restarts) and auto-open /
   auto-run-detection on import.
 - **A live-status sidebar file browser**, replacing a flat file list with no

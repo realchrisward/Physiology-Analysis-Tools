@@ -39,7 +39,20 @@ CREATE TABLE IF NOT EXISTS beats (
     other_arrhythmia INTEGER,
     review_state TEXT NOT NULL DEFAULT 'unreviewed',
     reassigned_category TEXT,
+    manual_added_at TEXT,
     UNIQUE(file_id, ts)
+);
+
+-- Beats the technician added or removed by hand. Kept apart from `beats`
+-- (which a re-detect rewrites wholesale) so they can be re-applied to the
+-- fresh detection result instead of being lost.
+CREATE TABLE IF NOT EXISTS manual_beat_edits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id),
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    r_amplitude REAL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS bad_data_marks (
@@ -62,6 +75,11 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    # Databases created before manual beat editing lack this column;
+    # CREATE TABLE IF NOT EXISTS above will not add it to an existing table.
+    beat_columns = {row["name"] for row in conn.execute("PRAGMA table_info(beats)")}
+    if "manual_added_at" not in beat_columns:
+        conn.execute("ALTER TABLE beats ADD COLUMN manual_added_at TEXT")
     conn.commit()
     return conn
 
@@ -245,16 +263,60 @@ def insert_beat(
     rr: float,
     r_amplitude: float,
     hr: float,
+    manual_added_at: str | None = None,
 ) -> None:
     """Insert one manually added beat: unreviewed, with no arrhythmia flags
     (arrhythmia detection has not seen it). Raises sqlite3.IntegrityError if
     a beat already exists at exactly this `ts`."""
     conn.execute(
-        "INSERT INTO beats (file_id, ts, rr, r_amplitude, hr, review_state) "
-        "VALUES (?, ?, ?, ?, ?, 'unreviewed')",
-        (file_id, ts, rr, r_amplitude, hr),
+        "INSERT INTO beats (file_id, ts, rr, r_amplitude, hr, review_state, "
+        "manual_added_at) VALUES (?, ?, ?, ?, ?, 'unreviewed', ?)",
+        (file_id, ts, rr, r_amplitude, hr, manual_added_at),
     )
     conn.commit()
+
+
+def record_manual_add(
+    conn: sqlite3.Connection, file_id: int, ts: float, r_amplitude: float, tolerance: float
+) -> str:
+    """Remember a hand-added beat so a re-detect can restore it. Returns the
+    ISO (UTC) time it was recorded. Adding a beat where one had been manually
+    removed cancels that removal."""
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "DELETE FROM manual_beat_edits WHERE file_id=? AND kind='delete' "
+        "AND ABS(ts - ?) < ?",
+        (file_id, ts, tolerance),
+    )
+    conn.execute(
+        "INSERT INTO manual_beat_edits (file_id, ts, kind, r_amplitude, created_at) "
+        "VALUES (?, ?, 'add', ?, ?)",
+        (file_id, ts, r_amplitude, created_at),
+    )
+    conn.commit()
+    return created_at
+
+
+def record_manual_delete(conn: sqlite3.Connection, file_id: int, ts: float) -> None:
+    """Remember a hand-removed beat so a re-detect does not bring it back.
+    Removing a beat that was itself hand-added just forgets that addition."""
+    cursor = conn.execute(
+        "DELETE FROM manual_beat_edits WHERE file_id=? AND kind='add' AND ts=?",
+        (file_id, ts),
+    )
+    if cursor.rowcount == 0:
+        conn.execute(
+            "INSERT INTO manual_beat_edits (file_id, ts, kind, created_at) "
+            "VALUES (?, ?, 'delete', ?)",
+            (file_id, ts, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+    conn.commit()
+
+
+def list_manual_edits(conn: sqlite3.Connection, file_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM manual_beat_edits WHERE file_id=? ORDER BY id", (file_id,)
+    ).fetchall()
 
 
 def update_beat_rr_hr(
@@ -290,6 +352,7 @@ def delete_file_state(conn: sqlite3.Connection, file_id: int) -> None:
     chosen to abandon.
     """
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM manual_beat_edits WHERE file_id=?", (file_id,))
     conn.execute("DELETE FROM bad_data_marks WHERE file_id=?", (file_id,))
     conn.execute("DELETE FROM files WHERE id=?", (file_id,))
     conn.commit()
@@ -364,14 +427,18 @@ def replace_beats(
         review_state, reassigned_category = preserved_state.get(
             row.ts, ("unreviewed", None)
         )
+        manual_added_at = None
+        if "manual_added_at" in beat_df.columns:
+            value = row.manual_added_at
+            manual_added_at = None if pd.isna(value) else str(value)
 
         conn.execute(
             "INSERT INTO beats ("
             "file_id, ts, rr, r_amplitude, hr, "
             "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
             "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
-            "review_state, reassigned_category"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "review_state, reassigned_category, manual_added_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 file_id,
                 row.ts,
@@ -381,6 +448,7 @@ def replace_beats(
                 *optional_values,
                 review_state,
                 reassigned_category,
+                manual_added_at,
             ),
         )
 

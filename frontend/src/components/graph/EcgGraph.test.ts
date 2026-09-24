@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRawSnippet } from 'svelte'
-import EcgGraph, { buildBeatAlignedData, toChartData, MARKER_LANE_Y } from './EcgGraph.svelte'
+import EcgGraph, { buildBeatAlignedData, toChartData, markerZoomScale, MARKER_LANE_Y } from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
 
 afterEach(() => {
@@ -1469,6 +1469,27 @@ describe('EcgGraph bad-data marking UX', () => {
       (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE',
     )
     expect(deleteCall).toBeTruthy()
+  })
+})
+
+describe('markerZoomScale', () => {
+  it('leaves markers at normal size when zoomed out', () => {
+    expect(markerZoomScale(60)).toBe(1)
+    expect(markerZoomScale(8)).toBe(1)
+  })
+
+  it('grows markers as the visible span shrinks', () => {
+    expect(markerZoomScale(4)).toBeGreaterThan(1)
+    expect(markerZoomScale(1)).toBeGreaterThan(markerZoomScale(4))
+  })
+
+  it('caps the growth so markers never swamp the trace', () => {
+    expect(markerZoomScale(0.001)).toBe(2.5)
+  })
+
+  it('falls back to normal size for a degenerate span', () => {
+    expect(markerZoomScale(0)).toBe(1)
+    expect(markerZoomScale(NaN)).toBe(1)
   })
 })
 

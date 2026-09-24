@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { generateReport, getFileState, updateBeatCategory } from './persistence'
+import {
+  addBeat,
+  deleteBadData,
+  generateReport,
+  getFileState,
+  snapBeat,
+  updateBadData,
+  updateBeatCategory,
+} from './persistence'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -34,6 +42,59 @@ describe('persistence api', () => {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: '/a.txt', ts: 12.5, action: 'confirm', category: undefined }),
+    })
+  })
+
+  it('updateBadData PATCHes the mark id with its new range', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ok' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateBadData('/a.txt', 7, 1.5, 2.5)
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files/bad-data', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/a.txt', id: 7, start: 1.5, stop: 2.5 }),
+    })
+  })
+
+  it('deleteBadData DELETEs by mark id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ok' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await deleteBadData('/a.txt', 7)
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files/bad-data', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/a.txt', id: 7 }),
+    })
+  })
+
+  it('snapBeat POSTs the channel and rough position to the read-only snap route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ok', ts: 4.2 }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await snapBeat('/a.txt', 'channel 1', 4.19)
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files/beats/snap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/a.txt', channel: 'channel 1', ts: 4.19 }),
+    })
+    expect(result.ts).toBe(4.2)
+  })
+
+  it('addBeat POSTs to /files/beats/one', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'ok' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await addBeat('/a.txt', 'channel 1', 4.2)
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/files/beats/one', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/a.txt', channel: 'channel 1', ts: 4.2 }),
     })
   })
 

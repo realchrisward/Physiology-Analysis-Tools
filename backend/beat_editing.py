@@ -30,6 +30,64 @@ router = APIRouter(prefix="/files", tags=["beat-editing"])
 _MIN_HALF_WINDOW_S = 0.05
 
 
+def apply_manual_edits(df: pd.DataFrame, edits, min_gap: float) -> pd.DataFrame:
+    """Re-apply a file's hand-made beat edits to a fresh detection result.
+
+    Removals drop any detected beat within `min_gap` seconds of the removed
+    one (detection can land a sample or two off if settings changed).
+    Additions are put back with their original timestamp and time of entry,
+    unless detection now found a beat there itself. RR/HR are then redone
+    for every beat but the first, whose predecessor is not in the table.
+    """
+    if not edits:
+        return df
+    df = df.copy()
+    ts_values = df["ts"].to_numpy(dtype=float)
+
+    keep = np.ones(len(df), dtype=bool)
+    for edit in edits:
+        if edit["kind"] == "delete":
+            keep &= np.abs(ts_values - edit["ts"]) >= min_gap
+    df = df[keep].reset_index(drop=True)
+    ts_values = df["ts"].to_numpy(dtype=float)
+
+    if "manual_added_at" not in df.columns:
+        df["manual_added_at"] = None
+    new_rows = []
+    for edit in edits:
+        if edit["kind"] != "add":
+            continue
+        if len(ts_values) and np.any(np.abs(ts_values - edit["ts"]) < min_gap):
+            continue
+        row = {column: None for column in df.columns}
+        row.update(
+            ts=edit["ts"],
+            R_amplitude=edit["r_amplitude"],
+            manual_added_at=edit["created_at"],
+        )
+        if "beats" in row:
+            row["beats"] = 1
+        if "review_state" in row:
+            row["review_state"] = "unreviewed"
+        new_rows.append(row)
+    if new_rows:
+        df = (
+            pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            .sort_values("ts")
+            .reset_index(drop=True)
+        )
+
+    ts_values = df["ts"].to_numpy(dtype=float)
+    if len(ts_values) >= 2:
+        rr = df["RR"].to_numpy(dtype=float).copy()
+        rr[1:] = np.diff(ts_values)
+        if np.isnan(rr[0]):
+            rr[0] = ts_values[1] - ts_values[0]
+        df["RR"] = rr
+        df["HR"] = 60.0 / rr
+    return df
+
+
 def rr_hr_for_successor(
     df: pd.DataFrame, removed_ts: float
 ) -> tuple[float, float, float] | None:
@@ -203,7 +261,10 @@ def add_beat(payload: BeatAddRequest, request: Request) -> BeatAddResult:
         hr = 60.0 / rr
         r_amplitude = float(values[idx] * ctx["sign"])
 
-        db.insert_beat(conn, file_row["id"], new_ts, rr, r_amplitude, hr)
+        added_at = db.record_manual_add(
+            conn, file_row["id"], new_ts, r_amplitude, ctx["min_gap"]
+        )
+        db.insert_beat(conn, file_row["id"], new_ts, rr, r_amplitude, hr, added_at)
 
         # The beat after the new one now measures its RR from it.
         updates = {new_ts: (rr, hr)}
@@ -215,8 +276,12 @@ def add_beat(payload: BeatAddRequest, request: Request) -> BeatAddResult:
                 conn, file_row["id"], successor_ts, successor_rr, 60.0 / successor_rr
             )
 
+        if "manual_added_at" not in beat_df.columns:
+            beat_df = beat_df.assign(manual_added_at=None)
         row = {column: None for column in beat_df.columns}
-        row.update(ts=new_ts, RR=rr, R_amplitude=r_amplitude, HR=hr)
+        row.update(
+            ts=new_ts, RR=rr, R_amplitude=r_amplitude, HR=hr, manual_added_at=added_at
+        )
         if "beats" in row:
             row["beats"] = 1
         if "review_state" in row:
@@ -234,7 +299,13 @@ def add_beat(payload: BeatAddRequest, request: Request) -> BeatAddResult:
 
         return BeatAddResult(
             status="ok",
-            beat=WindowBeat(ts=new_ts, rr=rr, r_amplitude=r_amplitude, hr=hr),
+            beat=WindowBeat(
+                ts=new_ts,
+                rr=rr,
+                r_amplitude=r_amplitude,
+                hr=hr,
+                manual_added_at=added_at,
+            ),
         )
     except Exception as e:
         return BeatAddResult(status="error", error=str(e))

@@ -17,6 +17,7 @@ workflow authority).
 | `frontend/src/lib/api/http.ts` | `apiGet`/`apiPost` — shared fetch wrapper. Never throws: network failures and non-2xx responses are caught and returned as `{status:'error', error}`. |
 | `frontend/src/lib/api/types.ts` | Hand-written TS interfaces mirroring every `backend/models.py` class the client uses, plus `ApiError` (the explicit failure-shape union member for the 3 endpoints whose success shape doesn't carry `status`/`error`). |
 | `frontend/src/lib/api/{files,beats,arrhythmia,settings,windowing,persistence}.ts` | One thin wrapper file per backend router, all 15 endpoints. |
+| `frontend/src/lib/format.ts` | `formatEditTime(iso)` — "24 Sep 2026, 14:32" in the viewer's locale, used for the manual-beat flag. |
 | `frontend/src/lib/tokens.css` | Design tokens: color (neutral scale + accent + semantic success/warning/danger, WCAG AA, light+dark), spacing, type (incl. a mono scale for numeric readouts), radii, shadow. |
 | `desktop/main.js` | Electron main process. Spawns/tears down the backend subprocess; `ipcMain.handle`s: `get-backend-port`, `pick-files`, `pick-folder`, `pick-output-directory` (all dialog-based, filtered to `SUPPORTED_EXTENSIONS` — `adicht`, `txt`, `mat`, `gzip`, `edf`). |
 | `desktop/preload.js` | `contextBridge.exposeInMainWorld('api', {...})` — the only surface the renderer can call into Electron/Node through. |
@@ -28,6 +29,36 @@ workflow authority).
 | `frontend/src/components/graph/EcgGraph.svelte` | The ECG graph — `uplot` wrapper (first real npm runtime dependency, pinned exact `1.6.31`). Real pan (drag)/zoom (wheel) against `GET /channels/window`, debounced 150ms; Reset View restores the real full extent from the initial load. Beat/arrhythmia markers from `GET /beats/window` (3 visual categories: flagged/normal/not-yet-evaluated) via a testable `buildBeatAlignedData` seam, plus a retained raw `WindowBeat[]` for click-to-select hit-testing. Click-vs-drag disambiguation (one `mousedown`/`mousemove`/`mouseup` sequence, 3 outcomes: pan / bad-data-mark / beat-select) fires `onBeatSelect(beat)`. "Mark Bad Data" mode toggles drag behavior to add (`POST /files/bad-data`) instead of pan; clicking an existing mark removes it (`DELETE /files/bad-data`). Marks render as a proportional strip below the graph (known limitation, see below). A `beatsRefreshToken` prop triggers a beats-only re-fetch (no viewport/channel-data disturbance) after an arrhythmia re-run or category mutation. 653 lines, carrying pan/zoom/click-select/bad-data-marking/beats-refresh/dark-mode-aware rendering — flagged by both F3's and F4's final reviews as past the point a future task adding more behavior should consider splitting the data-fetch/caching layer out from the uPlot/DOM-handling layer. |
 | `frontend/src/components/review/BeatCategoryPanel.svelte` | Shows only the arrhythmia categories that actually fired (`=== true`) for the selected beat. Confirm/Reject/Reassign wired to `PATCH /files/beats/category` (the 6 `REASSIGNABLE_CATEGORIES`, never `any_arrhythmia`, as reassign targets). |
 | `frontend/src/components/review/ArrhythmiaControls.svelte` | Heuristic/unsupervised/both re-run buttons, single `RunState` progress value. Guards its own completion against a stale response from a channel the technician has since switched away from (captures `channel` at dispatch, compares to the live prop on resolve — no request-id counter needed since only one run can ever be in flight). |
+
+## Graph review tools (added after F5)
+
+All in `EcgGraph.svelte` unless noted; tests in `EcgGraph.test.ts`.
+
+- **Marker lane.** Beat markers sit on their own fixed row near the top of
+  the plot (a hidden 0-1 `lane` scale, `MARKER_LANE_Y`), not on the trace;
+  the y scale leaves headroom above the trace for it. Only a marker's x
+  position carries meaning. Markers grow as the view zooms in
+  (`markerZoomScale`: 1x at 8 s visible or more, up to 2.5x).
+- **Add beat** (button or `A`). Click near a missing beat: the backend
+  suggests the nearest peak (`POST /files/beats/snap`), the graph zooms to
+  about 1 s around it and shows it as a pending beat (dashed guide + ring).
+  Clicking elsewhere while pending places it exactly there (the zoomed-in
+  override of the snap; "Snap to peak" undoes that). Nothing is saved until
+  **Add beat** / `Enter`; `Esc` cancels, then leaves the mode. Exclusive with
+  bad-data mode.
+- **Bad-data editing.** Clicking a mark selects it (it no longer deletes).
+  An editor row offers From/To fields with Save range, and Delete (also the
+  `Delete` key); in bad-data mode the selected mark's edges can be dragged.
+- **Focus-mode beat details.** In focus mode the graph covers the side panel,
+  so `EcgGraph` shows a popover beside the selected beat, filled by a
+  `focusOverlay` snippet from `ReviewWorkspace` (the same `BeatCategoryPanel`).
+  `ReviewWorkspace` renders the panel in only one place at a time
+  (`onFocusModeChange`), because its `C`/`R` shortcuts are document-level.
+- **Manual flag.** `BeatCategoryPanel` shows "Added manually · date, time"
+  for a hand-added beat (`WindowBeat.manual_added_at`).
+- **Labelling.** The `N`/`P`/`C`/`R` shortcuts are a keycap legend under the
+  beat navigation; the Raw/Filtered button sits under a "Trace" label, and
+  the marker filters under "Show markers".
 
 ## Design decisions
 

@@ -129,6 +129,8 @@ export interface WindowBeat {
   other_arrhythmia: boolean | null
   review_state: string
   reassigned_category: string | null
+  // ISO time the technician added this beat by hand; absent for detected beats.
+  manual_added_at?: string | null
 }
 
 export interface BeatWindowResult {
@@ -160,6 +162,7 @@ export interface PersistedBeat {
   rr: number
   r_amplitude: number
   hr: number
+  manual_added_at?: string | null
   bradycardia_absolute: boolean | null
   tachycardia_absolute: boolean | null
   skipped_beat: boolean | null

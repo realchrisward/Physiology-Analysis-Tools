@@ -3,6 +3,7 @@ import time
 from fastapi import APIRouter, Request
 from physiology_analysis_tools.modules import heartbeat_detection
 
+from backend import beat_editing, db
 from backend.models import Beat, BeatDetectionResult, BeatDetectRequest
 
 router = APIRouter(prefix="/beats", tags=["beats"])
@@ -28,6 +29,31 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
         return BeatDetectionResult(
             status="error", error=str(e), elapsed_seconds=time.monotonic() - start
         )
+
+    # A re-detect must not throw away what the technician did by hand: put
+    # their added beats back and keep their removed beats removed.
+    imported = request.app.state.imported_files.get(payload.path)
+    if imported is not None:
+        try:
+            conn = db.connect(request.app.state.db_path)
+            try:
+                file_row = db.get_file_row(
+                    conn, payload.path, imported.size, imported.modified_time
+                )
+                if file_row is not None:
+                    df = beat_editing.apply_manual_edits(
+                        df,
+                        db.list_manual_edits(conn, file_row["id"]),
+                        request.app.state.beat_settings.min_RR / 1000.0,
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            return BeatDetectionResult(
+                status="error",
+                error=f"Could not re-apply manual beat edits: {e}",
+                elapsed_seconds=time.monotonic() - start,
+            )
 
     elapsed_seconds = time.monotonic() - start
     request.app.state.beat_cache[payload.path] = df

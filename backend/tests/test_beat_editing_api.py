@@ -135,3 +135,140 @@ def test_snap_and_add_need_beat_detection_first(tmp_path, real_beats_txt_file):
 
     assert snapped["status"] == "error"
     assert "beat detection" in snapped["error"]
+
+
+def _redetect(client, path):
+    """Re-run the whole pipeline the way the app does after a settings change."""
+    assert client.post(
+        "/beats/detect", json={"path": path, "channel": "channel 1"}
+    ).json()["status"] == "ok"
+    client.post(
+        "/arrhythmia/detect",
+        json={"path": path, "channel": "channel 1", "method": "heuristic"},
+    )
+    assert client.post(
+        "/files/beats", json={"path": path, "channel": "channel 1"}
+    ).json()["status"] == "ok"
+
+
+def _add_at(client, path, ts):
+    added = client.post(
+        "/files/beats/one", json={"path": path, "channel": "channel 1", "ts": ts}
+    ).json()
+    assert added["status"] == "ok"
+    return added["beat"]
+
+
+def test_added_beat_is_flagged_manual_with_a_timestamp(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    target = _beats(client, path)[6]["ts"]
+    _delete(client, path, target)
+
+    added = _add_at(client, path, target)
+
+    assert added["manual_added_at"]
+    stored = next(b for b in _beats(client, path) if b["ts"] == added["ts"])
+    assert stored["manual_added_at"] == added["manual_added_at"]
+    cached = next(b for b in _window_beats(client, path) if b["ts"] == added["ts"])
+    assert cached["manual_added_at"] == added["manual_added_at"]
+    assert all(b["manual_added_at"] is None for b in _beats(client, path) if b["ts"] != added["ts"])
+
+
+def test_redetection_does_not_duplicate_a_manual_add_it_now_finds(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    target = _beats(client, path)[6]["ts"]
+    _delete(client, path, target)
+    added = _add_at(client, path, target)
+    # The peak is a real one, so re-detection finds it by itself; restoring
+    # the manual add on top must not create a second beat.
+    _redetect(client, path)
+
+    beats = _beats(client, path)
+    near = [b for b in beats if abs(b["ts"] - added["ts"]) < 0.01]
+    assert len(near) == 1
+
+
+def test_manual_add_of_a_missed_beat_is_restored_after_redetection(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    beats = _beats(client, path)
+    # Midway between two beats: detection would never find a peak here.
+    midpoint = (beats[6]["ts"] + beats[7]["ts"]) / 2
+    added = _add_at(client, path, midpoint)
+    count_with_add = len(_beats(client, path))
+
+    _redetect(client, path)
+
+    after = _beats(client, path)
+    assert len(after) == count_with_add
+    restored = next(b for b in after if b["ts"] == pytest.approx(added["ts"]))
+    assert restored["manual_added_at"] == added["manual_added_at"]
+    index = after.index(restored)
+    assert restored["rr"] == pytest.approx(restored["ts"] - after[index - 1]["ts"])
+    assert after[index + 1]["rr"] == pytest.approx(after[index + 1]["ts"] - restored["ts"])
+    assert restored["review_state"] == "unreviewed"
+
+
+def test_manual_delete_survives_redetection(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    before = _beats(client, path)
+    removed = before[6]["ts"]
+    _delete(client, path, removed)
+
+    _redetect(client, path)
+
+    after = _beats(client, path)
+    assert len(after) == len(before) - 1
+    assert all(abs(b["ts"] - removed) > 0.01 for b in after)
+    successor = next(b for b in after if b["ts"] > removed)
+    predecessor = max((b for b in after if b["ts"] < removed), key=lambda b: b["ts"])
+    assert successor["rr"] == pytest.approx(successor["ts"] - predecessor["ts"])
+
+
+def test_deleting_a_manual_beat_forgets_it_for_good(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    beats = _beats(client, path)
+    added = _add_at(client, path, (beats[6]["ts"] + beats[7]["ts"]) / 2)
+    _delete(client, path, added["ts"])
+
+    _redetect(client, path)
+
+    assert len(_beats(client, path)) == len(beats)
+
+
+def test_old_databases_gain_the_manual_column(tmp_path):
+    import sqlite3
+
+    from backend import db
+
+    db_path = str(tmp_path / "old.db")
+    old = sqlite3.connect(db_path)
+    old.execute(
+        "CREATE TABLE beats (id INTEGER PRIMARY KEY, file_id INTEGER, ts REAL, "
+        "rr REAL, r_amplitude REAL, hr REAL)"
+    )
+    old.commit()
+    old.close()
+
+    conn = db.connect(db_path)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(beats)")}
+    conn.close()
+
+    assert "manual_added_at" in columns
+
+
+def test_discarding_saved_state_forgets_manual_edits(tmp_path, real_beats_txt_file):
+    path = real_beats_txt_file
+    client = _client_with_beats(tmp_path, path)
+    before = _beats(client, path)
+    _delete(client, path, before[6]["ts"])
+    client.request("DELETE", "/files/state", json={"path": path})
+
+    client.post("/beats/detect", json={"path": path, "channel": "channel 1"})
+    client.post("/files/beats", json={"path": path, "channel": "channel 1"})
+
+    assert len(_beats(client, path)) == len(before)

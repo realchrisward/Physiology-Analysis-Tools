@@ -63,6 +63,7 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                 rr=beat_row["rr"],
                 r_amplitude=beat_row["r_amplitude"],
                 hr=beat_row["hr"],
+                manual_added_at=beat_row["manual_added_at"],
                 bradycardia_absolute=_to_bool(beat_row["bradycardia_absolute"]),
                 tachycardia_absolute=_to_bool(beat_row["tachycardia_absolute"]),
                 skipped_beat=_to_bool(beat_row["skipped_beat"]),
@@ -107,6 +108,10 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                     col_values = [beat_row[col] for beat_row in beat_rows]
                     if any(value is not None for value in col_values):
                         cache_df[col] = [_to_bool(value) for value in col_values]
+                if any(beat_row["manual_added_at"] for beat_row in beat_rows):
+                    cache_df["manual_added_at"] = [
+                        beat_row["manual_added_at"] for beat_row in beat_rows
+                    ]
                 cache_df["review_state"] = [
                     beat_row["review_state"] for beat_row in beat_rows
                 ]
@@ -334,6 +339,9 @@ def delete_beat(payload: BeatDeleteRequest, request: Request) -> BeatDeleteResul
             return BeatDeleteResult(
                 status="error", error="No beat found at this timestamp"
             )
+        # Remember the removal so re-running beat detection does not bring
+        # the beat back.
+        db.record_manual_delete(conn, file_row["id"], payload.ts)
 
         cached_df = request.app.state.beat_cache.get(payload.path)
         if cached_df is not None:

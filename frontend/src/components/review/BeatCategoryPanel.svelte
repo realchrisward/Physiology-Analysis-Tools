@@ -4,6 +4,7 @@
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
   import Icon from '../shared/Icon.svelte'
+  import { formatEditTime } from '../../lib/format'
 
   // The 6 reassignable categories, exactly per `backend/categories.py`'s
   // `REASSIGNABLE_CATEGORIES` (documented in BACKEND_OVERVIEW.md).
@@ -167,6 +168,12 @@
 
 <div class="beat-category-panel" data-testid="beat-category-panel">
   <p class="beat-summary" data-testid="selected-beat-summary">Selected beat: t={beat.ts}s, HR {beat.hr}, RR {beat.rr}</p>
+  {#if beat.manual_added_at}
+    <p class="manual-flag" data-testid="manual-beat-flag">
+      <Icon name="plus" size={12} />
+      Added manually · {formatEditTime(beat.manual_added_at)}
+    </p>
+  {/if}
 
   <div class="beat-categories" data-testid="beat-categories">
     {#if flaggedCategories.length === 0}
@@ -312,6 +319,20 @@
   .beat-summary {
     font-size: var(--font-size-sm);
     font-weight: 500;
+  }
+
+  .manual-flag {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    align-self: flex-start;
+    margin: 0;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+    font-size: 0.75rem;
+    font-weight: 600;
   }
 
   .category-list {

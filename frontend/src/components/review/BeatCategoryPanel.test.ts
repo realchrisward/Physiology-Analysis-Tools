@@ -54,6 +54,22 @@ describe('BeatCategoryPanel', () => {
     expect(screen.queryByTestId('category-skipped_beat')).not.toBeInTheDocument()
   })
 
+  it('flags a hand-added beat with the day and time it was added', () => {
+    const beat = makeBeat({ manual_added_at: '2026-09-24T14:32:10+00:00' })
+
+    render(BeatCategoryPanel, { props: { path: '/data/57.txt', beat, onUpdated: vi.fn() } })
+
+    const flag = screen.getByTestId('manual-beat-flag')
+    expect(flag).toHaveTextContent('Added manually')
+    expect(flag).toHaveTextContent('2026')
+  })
+
+  it('shows no manual flag on a detected beat', () => {
+    render(BeatCategoryPanel, { props: { path: '/data/57.txt', beat: makeBeat(), onUpdated: vi.fn() } })
+
+    expect(screen.queryByTestId('manual-beat-flag')).not.toBeInTheDocument()
+  })
+
   it('shows a "no categories" message when nothing is flagged', () => {
     const beat = makeBeat() // every category false/null
 
