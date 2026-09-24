@@ -41,7 +41,13 @@ async function waitForHealth(port, timeoutMs, state) {
 
 async function startBackend() {
   const port = await findFreePort()
-  const pythonBin = path.join(REPO_ROOT, '.venv', 'bin', 'python')
+  // A virtualenv puts its interpreter in a different place on Windows than
+  // it does elsewhere, so hardcoding one layout makes `npm run dev` fail on
+  // the other platform before the backend can even start.
+  const pythonBin =
+    process.platform === 'win32'
+      ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+      : path.join(REPO_ROOT, '.venv', 'bin', 'python')
 
   const proc = spawn(
     pythonBin,
