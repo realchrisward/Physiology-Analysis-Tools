@@ -26,6 +26,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.beat_settings = heartbeat_detection.Settings()
     app.state.arrhythmia_settings = arrhythmia_detection.Settings()
     app.state.beat_cache: dict[str, "pandas.DataFrame"] = {}
+    # path -> (fingerprint of the beat timestamps, typical RR). See
+    # beats_window.typical_rr_for.
+    app.state.typical_rr_cache: dict[str, tuple] = {}
     app.state.window_cache: dict = {}
     # Highpass-filtered copies of a channel, for the graph's raw/filtered
     # view toggle. Keyed by (path, channel, order, cutoff) since the filter

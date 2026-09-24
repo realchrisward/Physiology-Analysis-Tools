@@ -1,6 +1,8 @@
 import pandas as pd
 from fastapi import APIRouter, Request
 
+from physiology_analysis_tools.modules import ml_tools
+
 from backend import categories
 from backend.models import BeatsOfInterestResult, BeatWindowResult, WindowBeat
 
@@ -52,6 +54,26 @@ def get_beat_window(
     return BeatWindowResult(status="ok", beats=beats, count=len(beats))
 
 
+def typical_rr_for(request: Request, path: str, df: pd.DataFrame) -> float | None:
+    """The file's typical RR (see ml_tools.estimate_typical_rr), memoized.
+
+    This route is hit after every review action, and the estimate costs
+    ~0.4 s on 150k beats. Only the beat TIMESTAMPS (re-detect, add, delete)
+    or the KDE bandwidth change the answer, so they are the cache key, which
+    means no cache write elsewhere needs to know about this.
+    """
+    bandwidth = request.app.state.arrhythmia_settings.kde_bandwidth
+    ts = df["ts"].to_numpy(dtype=float)
+    fingerprint = (len(ts), hash(ts.tobytes()), bandwidth)
+    cache = request.app.state.typical_rr_cache
+    cached = cache.get(path)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    value = ml_tools.estimate_typical_rr(ts, bandwidth=bandwidth)
+    cache[path] = (fingerprint, value)
+    return value
+
+
 @router.get("/of-interest", response_model=BeatsOfInterestResult)
 def get_beats_of_interest(path: str, request: Request) -> BeatsOfInterestResult:
     """Every beat currently flagged as an arrhythmia, by timestamp.
@@ -69,11 +91,16 @@ def get_beats_of_interest(path: str, request: Request) -> BeatsOfInterestResult:
     if "any_arrhythmia" not in df.columns:
         # Beat detection has run but arrhythmia detection hasn't — no flags
         # exist yet, which is an empty result, not an error.
-        return BeatsOfInterestResult(status="ok", ts=[], count=0)
+        return BeatsOfInterestResult(
+            status="ok", ts=[], count=0, typical_rr=typical_rr_for(request, path, df)
+        )
 
     flagged = df[df["any_arrhythmia"].fillna(False).astype(bool)]
     timestamps = sorted(float(ts) for ts in flagged["ts"])
 
     return BeatsOfInterestResult(
-        status="ok", ts=timestamps, count=len(timestamps)
+        status="ok",
+        ts=timestamps,
+        count=len(timestamps),
+        typical_rr=typical_rr_for(request, path, df),
     )

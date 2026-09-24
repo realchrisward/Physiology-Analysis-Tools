@@ -39,6 +39,7 @@ All in `EcgGraph.svelte` unless noted; tests in `EcgGraph.test.ts`.
   the y scale leaves headroom above the trace for it. Only a marker's x
   position carries meaning. Markers grow as the view zooms in
   (`markerZoomScale`: 1x at 8 s visible or more, up to 2.5x).
+- **Focus width.** A jump to a beat of interest (N/P, first load) shows 10 beats either side: `focusWidthSeconds(typicalRr)` = `21 × typical_rr`, clamped to 0.5–15 s, 2 s when unknown. `typicalRr` comes from `GET /beats/of-interest` through `ReviewWorkspace`. A tighter manual zoom is kept.
 - **Add beat** (button or `A`). Click near a missing beat: the backend
   suggests the nearest peak (`POST /files/beats/snap`), the graph zooms to
   about 1 s around it and shows it as a pending beat (dashed guide + ring).

@@ -24,6 +24,23 @@
     return Math.min(MARKER_ZOOM_MAX, Math.max(1, scale))
   }
 
+  // The view a jump to a beat of interest lands on: this many beats of
+  // context either side of it, from the recording's own typical RR interval,
+  // so a mouse (~0.12 s) and a human (~0.8 s) both get a readable stretch of
+  // neighbouring beats. Clamped so an odd estimate can never give an absurdly
+  // tight or huge view, and 2 s (the old fixed window) when there is no
+  // estimate yet.
+  export const FOCUS_NEIGHBOUR_BEATS = 10
+  export const FOCUS_MIN_SECONDS = 0.5
+  export const FOCUS_MAX_SECONDS = 15
+  export const FOCUS_FALLBACK_SECONDS = 2
+
+  export function focusWidthSeconds(typicalRr: number | null | undefined): number {
+    if (typicalRr == null || !Number.isFinite(typicalRr) || typicalRr <= 0) return FOCUS_FALLBACK_SECONDS
+    const width = (2 * FOCUS_NEIGHBOUR_BEATS + 1) * typicalRr
+    return Math.min(FOCUS_MAX_SECONDS, Math.max(FOCUS_MIN_SECONDS, width))
+  }
+
   export interface BeatSeriesData {
     xs: number[]
     channelY: (number | null)[]
@@ -163,6 +180,7 @@
     initialBadDataMarks,
     selectedBeatTs = null,
     beatsOfInterest = [],
+    typicalRr = null,
     focusOverlay,
     onFocusModeChange,
   }: {
@@ -203,6 +221,10 @@
     // arrhythmia detection usually resolves AFTER this component mounts, and
     // a review action can change which beats are flagged at any time.
     beatsOfInterest?: number[]
+    // The recording's typical RR interval in seconds (from the same response
+    // as `beatsOfInterest`), used to size the view a jump lands on. Null
+    // until known, which falls back to a fixed width.
+    typicalRr?: number | null
     // Rendered in a popover beside the selected beat while in focus mode,
     // where the page's side panel is covered by the full-window graph. The
     // parent supplies the content (it owns persistence state); this
@@ -254,11 +276,6 @@
   // Width of the view the graph zooms to around a beat being added, so the
   // technician can judge (and correct) the suggested position.
   const ADD_BEAT_ZOOM_SECONDS = 1
-  // Width of the view when jumping to a beat of interest. The whole point of
-  // the jump is to land on a focused stretch of trace where the beat's SHAPE
-  // is readable — at a mouse's ~600bpm this is roughly 20 beats of context,
-  // enough to judge a beat against its neighbours without hunting for it.
-  const FOCUS_WINDOW_SECONDS = 2
   // A page-forward/back step moves by slightly less than a full screen so a
   // sliver of the previous view stays visible as a visual anchor, the same
   // way a document reader's page-down does.
@@ -1627,8 +1644,9 @@
   function focusOnTime(ts: number): Promise<void> {
     if (!chart) return Promise.resolve()
     const { min, max } = chart.scales.x
-    const currentWidth = min != null && max != null ? max - min : FOCUS_WINDOW_SECONDS
-    const width = Math.min(currentWidth, FOCUS_WINDOW_SECONDS)
+    const focusWidth = focusWidthSeconds(typicalRr)
+    const currentWidth = min != null && max != null ? max - min : focusWidth
+    const width = Math.min(currentWidth, focusWidth)
     return setVisibleRange(ts - width / 2, ts + width / 2)
   }
 

@@ -154,6 +154,9 @@ export interface BeatsOfInterestResult {
   status: string
   ts: number[]
   count: number
+  // Typical beat-to-beat interval in seconds (dominant RR mode), or null when
+  // there are too few beats to tell. Sizes the focus view around a beat.
+  typical_rr?: number | null
   error: string | null
 }
 

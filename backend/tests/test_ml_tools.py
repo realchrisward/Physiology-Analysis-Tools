@@ -77,6 +77,53 @@ class TestExtractFirstModalityKde:
         assert list(ml_tools.extract_first_modality_kde(rr)) == [0.12]
 
 
+class TestEstimateTypicalRr:
+    @staticmethod
+    def beats_at(rr, count=400, seed=0):
+        rng = numpy.random.default_rng(seed)
+        return numpy.cumsum(rng.normal(rr, rr * 0.03, count))
+
+    def test_reads_a_mouse_rate_recording(self):
+        assert ml_tools.estimate_typical_rr(self.beats_at(0.12)) == pytest.approx(0.12, rel=0.05)
+
+    def test_is_not_clipped_to_the_mouse_range_for_slower_hearts(self):
+        # A human-like 0.8 s RR must come back as ~0.8, not 0.1667: the view
+        # window would otherwise show barely two beats.
+        assert ml_tools.estimate_typical_rr(self.beats_at(0.8)) == pytest.approx(0.8, rel=0.05)
+
+    def test_one_huge_gap_does_not_disable_the_mode_filter(self):
+        ts = self.beats_at(0.12)
+        ts = numpy.concatenate([ts, ts[-1] + 60 + numpy.cumsum(numpy.full(50, 0.12))])
+
+        assert ml_tools.estimate_typical_rr(ts) == pytest.approx(0.12, rel=0.05)
+
+    def test_skipped_beats_do_not_drag_the_estimate_up(self):
+        rr = numpy.full(300, 0.12)
+        rr[::5] = 0.24  # every fifth beat missed
+        assert ml_tools.estimate_typical_rr(numpy.cumsum(rr)) == pytest.approx(0.12, rel=0.05)
+
+    def test_perfectly_regular_beats(self):
+        assert ml_tools.estimate_typical_rr(numpy.arange(20) * 0.5) == pytest.approx(0.5)
+
+    def test_too_few_beats_gives_none(self):
+        assert ml_tools.estimate_typical_rr([]) is None
+        assert ml_tools.estimate_typical_rr([1.0]) is None
+
+    def test_two_beats_give_their_single_interval(self):
+        assert ml_tools.estimate_typical_rr([1.0, 1.25]) == pytest.approx(0.25)
+
+    def test_unsorted_and_duplicate_timestamps_are_tolerated(self):
+        ts = numpy.array([0.36, 0.0, 0.12, 0.24, 0.24, 0.48])
+
+        assert ml_tools.estimate_typical_rr(ts) == pytest.approx(0.12)
+
+    def test_only_duplicates_gives_none(self):
+        assert ml_tools.estimate_typical_rr([2.0, 2.0, 2.0]) is None
+
+    def test_a_very_long_recording_is_subsampled_but_still_accurate(self):
+        assert ml_tools.estimate_typical_rr(self.beats_at(0.12, count=60000)) == pytest.approx(0.12, rel=0.05)
+
+
 class TestBeatepocherKdeClippedRrSmooth:
     def test_epochs_are_fixed_length_and_keyed_by_timestamp(self):
         signal_df, beat_df = _synthetic_recording([0.12] * 20)

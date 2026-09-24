@@ -143,6 +143,10 @@ class BeatsOfInterestResult(BaseModel):
     status: str
     ts: list[float] = []
     count: int = 0
+    # The recording's typical beat-to-beat interval in seconds (dominant RR
+    # mode, not clipped to any species range), so the graph can size its
+    # focus view to a number of beats. None when there are too few beats.
+    typical_rr: float | None = None
     error: str | None = None
 
 

@@ -1,7 +1,13 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRawSnippet } from 'svelte'
-import EcgGraph, { buildBeatAlignedData, toChartData, markerZoomScale, MARKER_LANE_Y } from './EcgGraph.svelte'
+import EcgGraph, {
+  buildBeatAlignedData,
+  focusWidthSeconds,
+  markerZoomScale,
+  toChartData,
+  MARKER_LANE_Y,
+} from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
 
 afterEach(() => {
@@ -1136,6 +1142,33 @@ describe('EcgGraph beat-of-interest navigation', () => {
     expect(screen.getByTestId('legend-beats-of-interest-count')).toHaveTextContent('3 beats of interest')
   })
 
+  async function focusSpanFor(typicalRr: number | null) {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: BEATS_OF_INTEREST, typicalRr },
+      }),
+    )
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    const focusCall = fetchMock.mock.calls
+      .map((_, i) => fetchedUrl(fetchMock, i))
+      .filter((url) => url.pathname === '/channels/window')
+      .at(-1)!
+    return Number(focusCall.searchParams.get('end')) - Number(focusCall.searchParams.get('start'))
+  }
+
+  it('sizes the view it jumps to from the recording\'s typical RR', async () => {
+    const wide = await focusSpanFor(0.5) // 21 beats = 10.5 s
+    cleanup()
+    const narrow = await focusSpanFor(0.05) // 21 beats = 1.05 s
+    cleanup()
+    const fallback = await focusSpanFor(null) // 2 s
+
+    expect(wide).toBeGreaterThan(fallback)
+    expect(narrow).toBeLessThan(fallback)
+  })
+
   it('opens focused on the first beat of interest rather than the whole recording', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
@@ -1469,6 +1502,28 @@ describe('EcgGraph bad-data marking UX', () => {
       (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE',
     )
     expect(deleteCall).toBeTruthy()
+  })
+})
+
+describe('focusWidthSeconds', () => {
+  it('shows ten beats either side of the beat of interest', () => {
+    expect(focusWidthSeconds(0.12)).toBeCloseTo(21 * 0.12)
+    expect(focusWidthSeconds(0.2)).toBeCloseTo(4.2)
+  })
+
+  it('is wider than the old fixed 2 s for a mouse-rate recording', () => {
+    expect(focusWidthSeconds(0.12)).toBeGreaterThan(2)
+  })
+
+  it('never goes tighter than half a second or wider than fifteen', () => {
+    expect(focusWidthSeconds(0.01)).toBe(0.5)
+    expect(focusWidthSeconds(5)).toBe(15)
+  })
+
+  it('falls back to the old 2 s when there is no usable estimate', () => {
+    for (const bad of [null, undefined, 0, -1, NaN, Infinity]) {
+      expect(focusWidthSeconds(bad as number | null | undefined)).toBe(2)
+    }
   })
 })
 

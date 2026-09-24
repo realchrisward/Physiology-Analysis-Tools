@@ -266,6 +266,80 @@ def test_rejecting_a_beat_drops_it_from_beats_of_interest(
     assert rejected_ts not in after["ts"]
 
 
+def _detected_client(tmp_path, path, arrhythmia=True):
+    client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
+    client.post("/files/import", json={"paths": [path]})
+    client.post("/beats/detect", json={"path": path, "channel": "channel 1"})
+    if arrhythmia:
+        client.post(
+            "/arrhythmia/detect",
+            json={"path": path, "channel": "channel 1", "method": "heuristic"},
+        )
+    client.post("/files/beats", json={"path": path, "channel": "channel 1"})
+    return client
+
+
+def test_beats_of_interest_reports_the_typical_rr(tmp_path, real_beats_txt_file):
+    client = _detected_client(tmp_path, real_beats_txt_file)
+    ts = [b["ts"] for b in client.get(
+        "/beats/window", params={"path": real_beats_txt_file, "start": 0, "end": 999}
+    ).json()["beats"]]
+
+    result = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+
+    assert result["typical_rr"] is not None
+    intervals = sorted(b - a for a, b in zip(ts, ts[1:]))
+    # Somewhere in the range of the recording's actual beat spacing.
+    assert intervals[0] <= result["typical_rr"] <= intervals[-1]
+
+
+def test_typical_rr_is_reported_before_arrhythmia_detection_too(tmp_path, real_beats_txt_file):
+    client = _detected_client(tmp_path, real_beats_txt_file, arrhythmia=False)
+
+    result = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+
+    assert result["ts"] == []
+    assert result["typical_rr"] is not None
+
+
+def test_typical_rr_is_unchanged_by_a_review_action(tmp_path, real_beats_txt_file):
+    client = _detected_client(tmp_path, real_beats_txt_file)
+    before = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+
+    client.patch(
+        "/files/beats/category",
+        json={"path": real_beats_txt_file, "ts": before["ts"][0], "action": "reject"},
+    )
+    after = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+
+    assert after["typical_rr"] == before["typical_rr"]
+
+
+def test_typical_rr_follows_the_beat_timestamps(tmp_path, real_beats_txt_file):
+    client = _detected_client(tmp_path, real_beats_txt_file)
+    app_state = client.app.state
+    before = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+    cached = app_state.typical_rr_cache[real_beats_txt_file]
+
+    # Same timestamps: the cached value is served, not recomputed.
+    client.get("/beats/of-interest", params={"path": real_beats_txt_file})
+    assert app_state.typical_rr_cache[real_beats_txt_file] is cached
+
+    # Removing a beat changes the timestamps, so the fingerprint no longer
+    # matches and the estimate is redone.
+    beats = client.get(
+        "/beats/window", params={"path": real_beats_txt_file, "start": 0, "end": 999}
+    ).json()["beats"]
+    client.request(
+        "DELETE", "/files/beats/one", json={"path": real_beats_txt_file, "ts": beats[5]["ts"]}
+    )
+    after = client.get("/beats/of-interest", params={"path": real_beats_txt_file}).json()
+
+    assert app_state.typical_rr_cache[real_beats_txt_file] is not cached
+    assert after["typical_rr"] is not None
+    assert before["typical_rr"] is not None
+
+
 def test_beats_of_interest_before_beat_detection_reports_error(real_beats_txt_file):
     client = TestClient(create_app())
     client.post("/files/import", json={"paths": [real_beats_txt_file]})

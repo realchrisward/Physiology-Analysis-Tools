@@ -92,6 +92,13 @@ silent misalignment.
 `min_rr`/`max_rr` are the ones to revisit for a different species or
 preparation — the defaults assume mouse.
 
+**The review graph reuses the same first-mode RR, unclipped.** Jumping to a
+beat of interest shows 10 beats either side: `21 × typical_rr`, held between
+0.5 s and 15 s (2 s when there is no estimate). It is not clipped to
+`min_rr`/`max_rr` (that range is for the epoch shape and would squash a slower
+heart's view into two beats), and gaps over 5× the median RR are dropped
+before the mode is found (`ml_tools.estimate_typical_rr`).
+
 ---
 
 ## Step 2 — Which beats are outliers? (PCA + DBSCAN)

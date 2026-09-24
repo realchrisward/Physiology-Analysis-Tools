@@ -147,6 +147,47 @@ def extract_first_modality_kde(rr_data, bandwidth=0.05):
     return rr_data[rr_data < cutoff_val]
 
 
+# RR intervals longer than this many times the median are gaps (a bad-data
+# stretch, a pause, joined recordings), not beats, and are left out before
+# looking for the dominant mode.
+_TYPICAL_RR_MAX_MEDIAN_MULTIPLE = 5
+# Above this many intervals the KDE is fitted to an evenly-strided subset:
+# the distribution's shape is the same, and the cost stays bounded.
+_TYPICAL_RR_MAX_SAMPLES = 20000
+
+
+def estimate_typical_rr(ts, bandwidth=0.05):
+    """
+    The recording's typical beat-to-beat interval in seconds: the median of
+    the dominant RR mode (see extract_first_modality_kde), or None when there
+    are too few beats to say.
+
+    Unlike the epoch window in beatepocher_kde_clipped_rr_smooth this is NOT
+    clipped to the mouse heart-rate range, so it is right for any species; it
+    is used to size the review graph's view around a beat.
+
+    Gaps and non-positive intervals (duplicate timestamps) are dropped first.
+    One very long gap otherwise stretches the KDE grid so far that the real
+    mode lands on its edge, where no peak is found and the mode filter does
+    nothing.
+    """
+    ts = numpy.sort(numpy.asarray(ts, dtype=float))
+    if len(ts) < 2:
+        return None
+    rr = numpy.diff(ts)
+    rr = rr[rr > 0]
+    if len(rr) == 0:
+        return None
+
+    rr = rr[rr <= _TYPICAL_RR_MAX_MEDIAN_MULTIPLE * numpy.median(rr)]
+    if len(rr) > _TYPICAL_RR_MAX_SAMPLES:
+        rr = rr[:: len(rr) // _TYPICAL_RR_MAX_SAMPLES]
+
+    first_mode = extract_first_modality_kde(rr, bandwidth=bandwidth)
+    chosen = first_mode if len(first_mode) > 0 else rr
+    return float(numpy.median(chosen))
+
+
 def beatepocher_kde_clipped_rr_smooth(
     filtered_data_frame,
     beat_df,

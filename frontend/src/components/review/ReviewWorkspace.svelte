@@ -226,6 +226,9 @@
   // beats are flagged: detection running, an arrhythmia re-run, or a
   // confirm/reject/reassign.
   let beatsOfInterest: number[] = $state([])
+  // Typical RR interval (seconds) from the same response; sizes the graph's
+  // focus view around a beat of interest.
+  let typicalRr: number | null = $state(null)
   // Guards the automatic on-load arrhythmia run so it happens once per
   // channel, not on every reactive re-run.
   let autoArrhythmiaChannel: string | null = null
@@ -249,9 +252,11 @@
     if (destroyed) return 'no-beats'
     if (result.status !== 'ok' || result.error) {
       beatsOfInterest = []
+      typicalRr = null
       return 'no-beats'
     }
     beatsOfInterest = result.ts ?? []
+    typicalRr = result.typical_rr ?? null
     return 'has-beats'
   }
 
@@ -383,6 +388,7 @@
       restored = null
       selectedBeat = null
       beatsOfInterest = []
+      typicalRr = null
       lastPersistedChannel = null
       // Let the automatic on-load run fire again for this channel now that
       // there is nothing persisted to inherit.
@@ -825,6 +831,7 @@
             {initialBadDataMarks}
             selectedBeatTs={selectedBeat?.ts ?? null}
             {beatsOfInterest}
+            {typicalRr}
             {focusOverlay}
             onFocusModeChange={(on) => (focusMode = on)}
           />
