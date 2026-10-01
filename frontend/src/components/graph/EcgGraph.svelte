@@ -2734,6 +2734,32 @@
         {beatsOfInterest.length}
         {beatsOfInterest.length === 1 ? 'beat' : 'beats'} of interest
       </span>
+      <span
+        class="legend-review-key"
+        data-testid="legend-review-key"
+        title="Every marker below follows this: filled once you've judged it, hollow while unreviewed. A rejected beat also gets a strike through it, since it keeps its normal color and shape underneath."
+      >
+        <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+          <circle cx="0" cy="0" r="6" fill="currentColor" />
+        </svg>
+        Reviewed
+        <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+          <circle cx="0" cy="0" r="5" fill="none" stroke="currentColor" stroke-width="1.5" />
+        </svg>
+        Unreviewed
+        <!-- A rejected beat clears every category flag (see
+             rejectedOverlaySeries' own comment), so on its own it would
+             render identically to a never-flagged "Normal" beat — this
+             strike is the only thing on the chart that still marks it as
+             rejected rather than merely normal, so it needs its own key
+             entry here rather than being folded into the category legend
+             below. -->
+        <svg class="legend-swatch" data-testid="legend-rejected-marker" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+          <circle cx="0" cy="0" r="6" fill="var(--color-success)" />
+          <line x1="-4.5" y1="-4.5" x2="4.5" y2="4.5" stroke="var(--color-danger)" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        Rejected
+      </span>
       {#each DISPLAY_CATEGORIES as cat (cat)}
         {@const active = !hiddenCategories.has(cat)}
         <button
@@ -2746,7 +2772,18 @@
           onclick={() => toggleCategoryFilter(cat)}
           style={`--legend-color: var(${legendColorVarName(cat)})`}
         >
-          <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+          <!-- "Not yet evaluated" markers are drawn dimmed on the chart
+               itself (see displayCategoryColor) — matched here with opacity
+               rather than full color so this swatch isn't a darker, more
+               solid version of what's actually on screen. -->
+          <svg
+            class="legend-swatch"
+            class:legend-swatch--dimmed={cat === 'unevaluated'}
+            width="12"
+            height="12"
+            viewBox="-8 -8 16 16"
+            aria-hidden="true"
+          >
             {#if DISPLAY_CATEGORY_SHAPE[cat] === 'circle'}
               <circle cx="0" cy="0" r="6" fill="currentColor" />
             {:else if DISPLAY_CATEGORY_SHAPE[cat] === 'square'}
@@ -3191,7 +3228,11 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    background: var(--color-warning, #b45309);
+    /* Matches the shading painted on the chart itself and the count badge
+       beside this strip (both red/danger) — this used to be the amber
+       warning color, which made the same bad-data range look like two
+       different things depending on which part of the graph you looked at. */
+    background: var(--color-danger, #b91c1c);
     border: none;
     padding: 0;
     cursor: pointer;
@@ -3238,6 +3279,21 @@
   .legend-swatch {
     color: var(--legend-color, currentColor);
     flex-shrink: 0;
+  }
+
+  .legend-review-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-2);
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+  }
+
+  /* Matches the 55% opacity `displayCategoryColor` renders "Not yet
+     evaluated" markers at on the chart (see that function). */
+  .legend-swatch--dimmed {
+    opacity: 0.55;
   }
 
   .ecg-legend-review-filter {

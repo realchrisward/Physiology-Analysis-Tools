@@ -154,6 +154,16 @@
   --color-waveform: #4ade80;
   --color-graph-grid: rgba(51, 65, 85, 0.7);
 
+  /* Was missing from this explicit block until now: picking "Dark" in the
+     app (rather than matching a dark OS) fell through to the light theme's
+     red for this one, since a property undeclared in a more specific
+     selector still resolves from the next rule that DOES declare it — here,
+     plain `:root` above, not the `prefers-color-scheme` block below, which
+     only applies when the OS itself is dark. Same values as that block. */
+  --color-bad-data-fill: rgba(248, 113, 113, 0.16);
+  --color-bad-data-fill-hover: rgba(248, 113, 113, 0.32);
+  --color-bad-data-stroke: rgba(248, 113, 113, 0.6);
+
   --color-cat-bradycardia: #60a5fa;
   --color-cat-tachycardia: #f87171;
   --color-cat-skipped: #a78bfa;

@@ -1,9 +1,18 @@
 const { spawn } = require('node:child_process')
+const fs = require('node:fs')
 const net = require('node:net')
 const path = require('node:path')
 
 const REPO_ROOT = path.join(__dirname, '..')
-const HEALTH_TIMEOUT_MS = 8000
+// uvicorn only logs anything once backend.app has finished importing
+// (scipy/pandas/numpy, fastapi) — so on a cold environment nothing appears
+// in stderr for the whole time it's importing. On Windows that import can
+// be considerably slower than it is here: real-time antivirus scanning
+// each newly-installed native extension (.pyd) the first time it loads is
+// a known, common cause, and can on its own push a cold start past 8s even
+// though the backend is starting fine. Overridable via an env var so a
+// slow machine can be tuned without a code change.
+const HEALTH_TIMEOUT_MS = Number(process.env.PAT_BACKEND_HEALTH_TIMEOUT_MS) || 30000
 const POLL_INTERVAL_MS = 200
 
 function findFreePort() {
@@ -36,7 +45,15 @@ async function waitForHealth(port, timeoutMs, state) {
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
   }
-  throw new Error(`Backend did not become healthy within ${timeoutMs}ms on port ${port}:\n${state.stderrTail}`)
+  const hint = state.stderrTail
+    ? state.stderrTail
+    : 'No output was received from the backend process in this time. This usually means it is still ' +
+      'starting — a cold virtual environment, or antivirus scanning newly-installed packages, can take ' +
+      'longer than usual on the very first run. Try again; if it keeps happening, open a terminal in the ' +
+      'repo root and run the backend directly (Windows: ".venv\\Scripts\\python -m uvicorn backend.app:app ' +
+      '--port 8001", macOS/Linux: ".venv/bin/python -m uvicorn backend.app:app --port 8001") to see what it ' +
+      'is doing.'
+  throw new Error(`Backend did not become healthy within ${timeoutMs}ms on port ${port}:\n${hint}`)
 }
 
 async function startBackend() {
@@ -48,6 +65,17 @@ async function startBackend() {
     process.platform === 'win32'
       ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
       : path.join(REPO_ROOT, '.venv', 'bin', 'python')
+
+  // A missing venv would otherwise spawn, fail silently in a way that still
+  // only surfaces as the generic health-check timeout above, and leave the
+  // technician no wiser about what to fix. Caught here instead, with the
+  // one concrete, actionable cause.
+  if (!fs.existsSync(pythonBin)) {
+    throw new Error(
+      `Python virtual environment not found at ${pythonBin}. Follow the setup steps in instructions.md ` +
+        '(create .venv and install backend/requirements.txt) before starting the app.',
+    )
+  }
 
   const proc = spawn(
     pythonBin,

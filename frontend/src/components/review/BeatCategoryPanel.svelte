@@ -63,13 +63,29 @@
     categoryOverride ?? REASSIGNABLE_CATEGORIES.filter((cat) => beat[cat] === true),
   )
 
-  // Reflects the outcome of this beat's most recent successful action
-  // locally, without re-fetching anything — `WindowBeat` itself carries no
-  // `review_state`/`reassigned_category` fields (those only exist on the
-  // persisted-beat shape), so this component tracks them itself from each
-  // `CategoryUpdateResult` it receives.
-  let reviewState: string | null = $state(null)
-  let reassignedCategory: string | null = $state(null)
+  // Seeded from the beat itself (so stepping onto a beat judged earlier —
+  // this session or a prior one — shows that judgment immediately, not a
+  // blank unreviewed state), then kept current locally from each
+  // `CategoryUpdateResult` this component's own actions receive, without
+  // re-fetching anything. This component is remounted per beat (see the
+  // `{#key selectedBeat.ts}` wrapper in ReviewWorkspace), so reading `beat`
+  // only at init is exactly the "one fresh read per beat" this needs.
+  let reviewState: string | null = $state(
+    beat.review_state && beat.review_state !== 'unreviewed' ? beat.review_state : null,
+  )
+  let reassignedCategory: string | null = $state(beat.reassigned_category ?? null)
+
+  // A beat with a terminal judgment already (confirmed or rejected) shows
+  // that status plus a single button to switch it, instead of both Confirm
+  // and Reject — asking the technician to judge a beat twice over is just
+  // noise. `reassignedCategory` can also be set from the one existing test
+  // fixture that feeds this component a synthetic `review_state:
+  // 'reassigned'` the backend itself never actually sends (reassign really
+  // returns `review_state: 'confirmed'` — see backend/db.py) — treated the
+  // same way `reviewState === 'rejected'` only ever excludes it, not the
+  // reverse, so a rejected beat is never mislabeled as reassigned.
+  let isReassigned = $derived(!!reassignedCategory && reviewState !== 'rejected')
+  let hasStatus = $derived(reviewState === 'confirmed' || reviewState === 'rejected')
 
   let reassignCategory: string = $state('')
   let submitting: boolean = $state(false)
@@ -201,19 +217,46 @@
   </div>
 
   {#if reviewState}
-    <p
-      data-testid="review-state"
-      class="review-state"
-      class:review-state--confirmed={reviewState === 'confirmed'}
-      class:review-state--rejected={reviewState === 'rejected'}
-      class:review-state--reassigned={reviewState === 'reassigned'}
-    >
-      {#if reviewState === 'reassigned' && reassignedCategory}
-        Reassigned to {CATEGORY_LABELS[reassignedCategory as ReassignableCategory] ?? reassignedCategory}
-      {:else}
-        Review state: {reviewState}
+    <div class="judged-status" data-testid="review-state-row">
+      <p
+        data-testid="review-state"
+        class="review-state"
+        class:review-state--confirmed={reviewState === 'confirmed' && !isReassigned}
+        class:review-state--rejected={reviewState === 'rejected'}
+        class:review-state--reassigned={isReassigned}
+      >
+        {#if isReassigned}
+          Reassigned to {CATEGORY_LABELS[reassignedCategory as ReassignableCategory] ?? reassignedCategory}
+        {:else}
+          Review state: {reviewState}
+        {/if}
+      </p>
+      {#if hasStatus}
+        {#if reviewState === 'confirmed'}
+          <button
+            type="button"
+            class="btn btn-sm btn-danger-text"
+            data-testid="reject-button"
+            disabled={submitting}
+            onclick={() => submit('reject')}
+            title="Mark this beat as rejected instead (R)"
+          >
+            Mark as rejected <kbd>R</kbd>
+          </button>
+        {:else}
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            data-testid="confirm-button"
+            disabled={submitting}
+            onclick={() => submit('confirm')}
+            title="Mark this beat as confirmed instead (C)"
+          >
+            Mark as confirmed <kbd>C</kbd>
+          </button>
+        {/if}
       {/if}
-    </p>
+    </div>
   {/if}
 
   {#if errorMessage}
@@ -230,26 +273,28 @@
   {/if}
 
   <div class="actions">
-    <button
-      type="button"
-      class="btn btn-primary"
-      data-testid="confirm-button"
-      disabled={submitting}
-      onclick={() => submit('confirm')}
-      title="Confirm this beat (C)"
-    >
-      Confirm <kbd>C</kbd>
-    </button>
-    <button
-      type="button"
-      class="btn btn-danger-text"
-      data-testid="reject-button"
-      disabled={submitting}
-      onclick={() => submit('reject')}
-      title="Reject this beat (R)"
-    >
-      Reject <kbd>R</kbd>
-    </button>
+    {#if !hasStatus}
+      <button
+        type="button"
+        class="btn btn-primary"
+        data-testid="confirm-button"
+        disabled={submitting}
+        onclick={() => submit('confirm')}
+        title="Confirm this beat (C)"
+      >
+        Confirm <kbd>C</kbd>
+      </button>
+      <button
+        type="button"
+        class="btn btn-danger-text"
+        data-testid="reject-button"
+        disabled={submitting}
+        onclick={() => submit('reject')}
+        title="Reject this beat (R)"
+      >
+        Reject <kbd>R</kbd>
+      </button>
+    {/if}
 
     <label class="field">
       Reassign to:
@@ -378,6 +423,13 @@
   .category-chip-remove:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .judged-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   /* Semantic status colors from tokens.css, distinguishing the three
