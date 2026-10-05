@@ -128,29 +128,6 @@
         <span class="breadcrumb-current" data-testid="breadcrumb-current">{fileNameOf(selectedFile.path)}</span>
       </nav>
     {/if}
-
-    <span class="topbar-spacer"></span>
-
-    <button
-      type="button"
-      class="icon-btn"
-      data-testid="about-button"
-      onclick={() => (aboutOpen = true)}
-      aria-label="About"
-      title="About"
-    >
-      <Icon name="info" />
-    </button>
-
-    <button
-      type="button"
-      class="icon-btn"
-      data-testid="settings-button"
-      onclick={() => (settingsOpen = true)}
-      aria-label="Settings"
-    >
-      <Icon name="settings" />
-    </button>
   </header>
 
   <Sidebar
@@ -160,6 +137,8 @@
     onResize={handleSidebarResize}
     onFilesCleared={handleFilesCleared}
     onFileRemoved={handleFileRemoved}
+    onSettingsOpen={() => (settingsOpen = true)}
+    onAboutOpen={() => (aboutOpen = true)}
   />
 
   <main class="main-content">

@@ -293,6 +293,21 @@ class DiscardStateResult(BaseModel):
     error: str | None = None
 
 
+class DatabaseResetResult(BaseModel):
+    status: str
+    error: str | None = None
+
+
+class DatabaseInfoResult(BaseModel):
+    status: str
+    path: str | None = None
+    directory: str | None = None
+    size_bytes: int | None = None
+    file_count: int | None = None
+    beat_count: int | None = None
+    error: str | None = None
+
+
 class CategoryUpdateRequest(BaseModel):
     path: str
     ts: float

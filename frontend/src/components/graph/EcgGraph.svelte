@@ -798,6 +798,12 @@
   let chart: uPlot | undefined
   let fullExtent: { start: number; end: number } | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
+  // Drives the bottom X-range slider: kept in sync with `chart.scales.x` by
+  // a `setScale` hook (see `panZoomPlugin`) so it reflects every way the
+  // visible range can change — drag, wheel, zoom buttons, page/jump/focus —
+  // not just moves made through the slider itself.
+  let sliderCenter: number = $state(0)
+  let sliderHalfWidth: number = $state(0)
   // Teardown for the currently-active drag's `document`-level listeners, if
   // any drag is in progress. Reachable from both the drag's own `onUp`
   // completion path and the component's onMount/onDestroy cleanup, so a
@@ -1639,6 +1645,30 @@
     return refetch(start, end)
   }
 
+  // Bottom X-range slider: same live-feedback-then-settle shape as
+  // `handleDragStart`'s mouse pan (immediate `setScale` + `maybeBufferAhead`
+  // on every move, a real fetch only once the gesture ends), so dragging the
+  // slider feels the same as dragging the trace itself and a fast drag
+  // doesn't spam the backend. The slider's value is the window's CENTER
+  // (not its start) and its own width is held fixed at the current zoom
+  // level — see the `min`/`max`/`value` bindings in the template, which
+  // derive from `fullExtent` and `sliderHalfWidth`.
+  function handleXSliderInput(e: Event) {
+    if (!chart) return
+    const center = Number((e.currentTarget as HTMLInputElement).value)
+    const newMin = center - sliderHalfWidth
+    const newMax = center + sliderHalfWidth
+    viewChanged = true
+    chart.setScale('x', { min: newMin, max: newMax })
+    maybeBufferAhead(newMin, newMax)
+  }
+
+  function handleXSliderChange() {
+    if (!chart) return
+    const { min, max } = chart.scales.x
+    if (min != null && max != null) scheduleRefetch(min, max)
+  }
+
   // Centres the view on `ts`, keeping the current zoom level if the
   // technician has already zoomed in tighter than the default focus window.
   function focusOnTime(ts: number): Promise<void> {
@@ -1753,6 +1783,17 @@
               chart?.redraw()
             }
           })
+        },
+        // Fires on every x-scale change regardless of source (mouse drag,
+        // wheel, zoom buttons, page/jump/focus, the slider itself) — one
+        // place to keep the slider's thumb position/width correct instead
+        // of threading a sync call through every one of those call sites.
+        setScale: (u, key) => {
+          if (key !== 'x') return
+          const { min, max } = u.scales.x
+          if (min == null || max == null) return
+          sliderCenter = (min + max) / 2
+          sliderHalfWidth = (max - min) / 2
         },
       },
     }
@@ -1991,6 +2032,11 @@
         toChartData(merged),
         containerEl,
       )
+      // Seeds the slider immediately rather than waiting on the `setScale`
+      // hook to have fired by now — belt-and-braces, since it's cheap and
+      // means the slider never briefly shows a stale/zeroed range.
+      sliderCenter = (fullExtent.start + fullExtent.end) / 2
+      sliderHalfWidth = (fullExtent.end - fullExtent.start) / 2
       applyFilters()
       chartReady = true
   }
@@ -2606,6 +2652,31 @@
     bind:clientWidth={containerWidth}
   ></div>
 
+  {#if chartReady && fullExtent}
+    {@const spanStart = fullExtent.start + sliderHalfWidth}
+    {@const spanEnd = fullExtent.end - sliderHalfWidth}
+    {@const sliderDisabled = spanStart >= spanEnd}
+    {@const sliderMin = sliderDisabled ? (fullExtent.start + fullExtent.end) / 2 : spanStart}
+    {@const sliderMax = sliderDisabled ? sliderMin : spanEnd}
+    <!-- X-axis only: drag to move the visible window left/right along the
+         recording. Stays in sync with the graph's own mouse pan/zoom via
+         the `setScale` hook in `panZoomPlugin`, and vice versa. No Y slider
+         — Y is amplitude, not a position to scroll through. -->
+    <input
+      type="range"
+      class="x-range-slider"
+      data-testid="x-range-slider"
+      aria-label="Scroll graph horizontally"
+      min={sliderMin}
+      max={sliderMax}
+      step="any"
+      value={sliderCenter}
+      disabled={sliderDisabled}
+      oninput={handleXSliderInput}
+      onchange={handleXSliderChange}
+    />
+  {/if}
+
   {#if showFocusOverlay && overlayPos}
     <div
       class="focus-overlay"
@@ -3147,6 +3218,18 @@
 
   .ecg-graph-container {
     width: 100%;
+  }
+
+  .x-range-slider {
+    width: 100%;
+    margin: var(--space-1) 0 0;
+    accent-color: var(--color-accent, #2563eb);
+    cursor: ew-resize;
+  }
+
+  .x-range-slider:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
 
   .mark-editor {

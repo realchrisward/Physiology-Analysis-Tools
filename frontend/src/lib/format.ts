@@ -50,3 +50,17 @@ export function formatRelativeTime(ts: number, now: number = Date.now()): string
   if (dayDiff < 7) return plural(dayDiff, 'day')
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 }
+
+/** "1.4 MB" style human-readable file size (binary/1024-based units). */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex++
+  }
+  return `${value.toFixed(value < 10 ? 2 : 1)} ${units[unitIndex]}`
+}

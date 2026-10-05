@@ -43,6 +43,23 @@ export function recordRecentFile(path: string, filename: string): void {
   persist()
 }
 
+/** Drops just the given paths from the recent-files list (the Home screen's
+ * "Clear selected"), persisting the result. Paths not present are ignored. */
+export function removeRecentFiles(paths: string[]): void {
+  if (paths.length === 0) return
+  const toRemove = new Set(paths)
+  for (let i = recentFiles.length - 1; i >= 0; i--) {
+    if (toRemove.has(recentFiles[i].path)) recentFiles.splice(i, 1)
+  }
+  persist()
+}
+
+/** Empties the whole recent-files list (the Home screen's "Clear all"). */
+export function clearRecentFiles(): void {
+  recentFiles.length = 0
+  persist()
+}
+
 /** Test-only: reset the list (and clear storage) so each test starts clean. */
 export function resetForTesting(): void {
   recentFiles.length = 0

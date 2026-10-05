@@ -26,6 +26,8 @@
     onResize,
     onFilesCleared,
     onFileRemoved,
+    onSettingsOpen,
+    onAboutOpen,
   }: {
     collapsed?: boolean
     activePath?: string | null
@@ -38,6 +40,12 @@
     // Removing the file that is currently open leaves the same problem, so
     // the shell is told which one went.
     onFileRemoved?: (path: string) => void
+    // Settings/About used to be standalone icon buttons in the topbar; they
+    // live in this sidebar footer now (see the redesign that removed the
+    // topbar's menu-like buttons), but the dialogs themselves are still
+    // owned and rendered by App.svelte, so this just reports the click.
+    onSettingsOpen?: () => void
+    onAboutOpen?: () => void
   } = $props()
 
   // "Opened 5 minutes ago" would go stale on screen, so re-read the clock
@@ -274,6 +282,31 @@
       {/if}
     </div>
   {/if}
+
+  <div class="sidebar-footer">
+    <button
+      type="button"
+      class="sidebar-footer-btn"
+      data-testid="settings-button"
+      onclick={() => onSettingsOpen?.()}
+      title="Settings"
+      aria-label="Settings"
+    >
+      <Icon name="settings" size={16} />
+      {#if !collapsed}<span>Settings</span>{/if}
+    </button>
+    <button
+      type="button"
+      class="sidebar-footer-btn"
+      data-testid="about-button"
+      onclick={() => onAboutOpen?.()}
+      title="About"
+      aria-label="About"
+    >
+      <Icon name="info" size={16} />
+      {#if !collapsed}<span>About</span>{/if}
+    </button>
+  </div>
 
   {#if !collapsed}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -564,5 +597,44 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .sidebar-footer {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .sidebar.collapsed .sidebar-footer {
+    align-items: center;
+  }
+
+  .sidebar-footer-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .sidebar-footer-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .sidebar.collapsed .sidebar-footer-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    justify-content: center;
   }
 </style>

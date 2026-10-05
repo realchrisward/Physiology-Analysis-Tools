@@ -696,52 +696,92 @@
 </script>
 
 <div class="review-workspace" data-testid="review-workspace">
+  <!-- One merged bar: channel choice, beat detection, and arrhythmia
+       detection used to be two separate stacked toolbar rows — now three
+       labeled groups (divided by a thin rule) in a single wrapping row, so
+       the vertical space the second row used to take is freed up for the
+       graph below instead. -->
   <div class="review-toolbar">
-    <select
-      class="channel-select"
-      data-testid="channel-select"
-      bind:value={selectedChannel}
-      onchange={handleChannelChange}
-      disabled={!hydrationChecked}
-    >
-      {#each channels as channel}
-        <option value={channel}>{channel}</option>
-      {/each}
-    </select>
+    <div class="toolbar-group">
+      <span class="toolbar-group-label">Channel</span>
+      <select
+        class="channel-select"
+        data-testid="channel-select"
+        bind:value={selectedChannel}
+        onchange={handleChannelChange}
+        disabled={!hydrationChecked}
+      >
+        {#each channels as channel}
+          <option value={channel}>{channel}</option>
+        {/each}
+      </select>
+    </div>
 
-    <button
-      type="button"
-      class="btn btn-sm"
-      data-testid="rerun-detection-button"
-      disabled={!hydrationChecked || detection.status === 'pending'}
-      onclick={handleRerunDetection}
-    >
-      Re-run detection
-    </button>
+    <span class="toolbar-divider" aria-hidden="true"></span>
 
-    {#if detection.status === 'pending'}
-      <div class="detection-summary text-muted" data-testid="detection-summary">
-        <span class="spinner" aria-hidden="true"></span>
-        {#if fileRow?.status === 'queued'}
-          beat detection is queued…
-        {:else}
-          detecting beats for {selectedChannel}…
-        {/if}
-      </div>
-    {:else if detection.status === 'ok'}
-      <div class="detection-summary text-muted" data-testid="detection-summary">
-        {detection.count} beats detected{detection.meanHr !== null ? `, mean HR ${detection.meanHr}` : ''}{detection.duration !==
-        null
-          ? `, duration ${detection.duration}s`
-          : ''}
-      </div>
-    {:else if detection.status === 'error'}
-      <div class="detection-summary text-danger" data-testid="detection-summary">
-        detection failed: {detection.error}
-      </div>
-    {/if}
+    <div class="toolbar-group">
+      <span class="toolbar-group-label">Beat detection</span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="rerun-detection-button"
+        disabled={!hydrationChecked || detection.status === 'pending'}
+        onclick={handleRerunDetection}
+      >
+        Re-run detection
+      </button>
 
-    <span class="toolbar-spacer"></span>
+      {#if detection.status === 'pending'}
+        <div class="detection-summary text-muted" data-testid="detection-summary">
+          <span class="spinner" aria-hidden="true"></span>
+          {#if fileRow?.status === 'queued'}
+            beat detection is queued…
+          {:else}
+            detecting beats for {selectedChannel}…
+          {/if}
+        </div>
+      {:else if detection.status === 'ok'}
+        <div class="detection-summary text-muted" data-testid="detection-summary">
+          {detection.count} beats detected{detection.meanHr !== null ? `, mean HR ${detection.meanHr}` : ''}{detection.duration !==
+          null
+            ? `, duration ${detection.duration}s`
+            : ''}
+        </div>
+      {:else if detection.status === 'error'}
+        <div class="detection-summary text-danger" data-testid="detection-summary">
+          detection failed: {detection.error}
+        </div>
+      {/if}
+    </div>
+
+    <span class="toolbar-divider" aria-hidden="true"></span>
+
+    <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
+         own `disabled` above: `activeChannel` still holds `defaultChannel`
+         until the mount-time `getFileState` hydration resolves, so a rerun
+         triggered before that settles would run arrhythmia detection against
+         the wrong (pre-hydration) channel on reopen. Uses a `disabled` prop
+         ANDed with ArrhythmiaControls' own `runState`-based button-disabling
+         (see that component) rather than wrapping this in `{#if
+         hydrationChecked}` — that would work too, but a prop keeps this
+         component mounted (and its `channel` prop live-updating) across the
+         hydration boundary exactly like the `<select>` above, instead of an
+         unmount/remount that briefly hides these controls entirely. No
+         separate group label here — ArrhythmiaControls already renders its
+         own "Arrhythmia detection" label inline with its buttons. -->
+    <div class="toolbar-group toolbar-group-grow">
+      <ArrhythmiaControls
+        path={path}
+        channel={activeChannel}
+        onComplete={handleArrhythmiaComplete}
+        disabled={!hydrationChecked || autoArrhythmiaRunning}
+      />
+      {#if autoArrhythmiaRunning}
+        <span class="text-muted" data-testid="auto-arrhythmia-running">
+          Finding beats of interest…
+        </span>
+      {/if}
+    </div>
   </div>
 
   {#if restored}
@@ -773,31 +813,6 @@
       </button>
     </div>
   {/if}
-
-  <div class="arrhythmia-toolbar">
-    <!-- `disabled={!hydrationChecked}` — same reasoning as the `<select>`'s
-         own `disabled` above: `activeChannel` still holds `defaultChannel`
-         until the mount-time `getFileState` hydration resolves, so a rerun
-         triggered before that settles would run arrhythmia detection against
-         the wrong (pre-hydration) channel on reopen. Uses a `disabled` prop
-         ANDed with ArrhythmiaControls' own `runState`-based button-disabling
-         (see that component) rather than wrapping this in `{#if
-         hydrationChecked}` — that would work too, but a prop keeps this
-         component mounted (and its `channel` prop live-updating) across the
-         hydration boundary exactly like the `<select>` above, instead of an
-         unmount/remount that briefly hides these controls entirely. -->
-    <ArrhythmiaControls
-      path={path}
-      channel={activeChannel}
-      onComplete={handleArrhythmiaComplete}
-      disabled={!hydrationChecked || autoArrhythmiaRunning}
-    />
-    {#if autoArrhythmiaRunning}
-      <span class="text-muted" data-testid="auto-arrhythmia-running">
-        Finding beats of interest…
-      </span>
-    {/if}
-  </div>
 
   <div class="review-main" class:beat-panel-collapsed={beatPanelCollapsed}>
     <div class="graph-area">
@@ -987,6 +1002,37 @@
     padding: var(--space-3) var(--space-4);
   }
 
+  /* One labeled group per concern (Channel / Beat detection / Arrhythmia
+     detection) within the single merged toolbar above — a thin
+     `.toolbar-divider` between groups does the job the old two-separate-rows
+     layout used borders/background for, without the extra row of height. */
+  .toolbar-group {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .toolbar-group-grow {
+    flex: 1;
+  }
+
+  .toolbar-group-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    margin-right: var(--space-1);
+  }
+
+  .toolbar-divider {
+    align-self: stretch;
+    min-height: 24px;
+    width: 1px;
+    background: var(--color-border);
+  }
+
   .channel-select {
     min-width: 160px;
   }
@@ -996,25 +1042,14 @@
     white-space: nowrap;
   }
 
-  .toolbar-spacer {
-    flex: 1;
-  }
-
   .report-status {
     font-size: var(--font-size-sm);
-  }
-
-  .arrhythmia-toolbar {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--space-3) var(--space-4);
   }
 
   .review-main {
     flex: 1;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 1fr) 280px;
     gap: var(--space-3);
     min-height: 0;
     transition: grid-template-columns var(--transition-fast, 150ms ease);

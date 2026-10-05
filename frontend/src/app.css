@@ -121,10 +121,6 @@ button:disabled {
   font-weight: 500;
 }
 
-.topbar-spacer {
-  flex: 1;
-}
-
 .main-content {
   grid-area: main;
   overflow-y: auto;
@@ -203,6 +199,25 @@ button:disabled {
 
 .btn-danger-text {
   color: var(--color-danger);
+}
+
+/* Solid destructive button (e.g. "Delete database"). Needs its own hover
+   rule, not just `.btn-danger:hover`: the generic `.btn:hover:not(:disabled)`
+   above is just as specific (one class + two pseudo-classes each), so
+   without the extra `.btn` qualifier here to outweigh it, source order alone
+   decided the winner - whichever button happened to render that rule second
+   kept its color scheme, but the other was left with ITS white text over the
+   generic rule's pale hover background, i.e. invisible. Qualifying the
+   selector with `.btn` as well settles it unconditionally. */
+.btn.btn-danger {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #ffffff;
+}
+
+.btn.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 85%, black);
+  border-color: color-mix(in srgb, var(--color-danger) 85%, black);
 }
 
 .btn-sm {

@@ -9,7 +9,7 @@
     openFiles,
     openRecentFile,
   } from '../../lib/stores/importQueue.svelte'
-  import { recentFiles } from '../../lib/stores/recentFiles.svelte'
+  import { clearRecentFiles, recentFiles, removeRecentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
 
   // Keeps "Opened 5 minutes ago" honest while the screen stays open.
@@ -40,6 +40,22 @@
 
   function openSelected() {
     void openFiles(selectedPaths)
+  }
+
+  // Clearing drops entries from the Home screen's own recent-files list only
+  // — it never touches the raw files on disk, nor the Sidebar's separate,
+  // already-imported file list (`fileRegistry`'s own "Clear" button covers
+  // that). Ticks referencing removed paths fall away automatically via
+  // `selectedPaths`'s own derivation, but `ticked` is reset too so a stale
+  // path can't linger and silently re-select a later, unrelated file.
+  function clearSelected() {
+    removeRecentFiles(selectedPaths)
+    ticked = []
+  }
+
+  function clearAll() {
+    clearRecentFiles()
+    ticked = []
   }
 </script>
 
@@ -120,6 +136,23 @@
           onclick={openAll}
         >
           Open all ({recentFiles.length})
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost btn-danger-text"
+          data-testid="clear-selected-recent-button"
+          disabled={selectedPaths.length === 0}
+          onclick={clearSelected}
+        >
+          Clear selected{selectedPaths.length > 0 ? ` (${selectedPaths.length})` : ''}
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost btn-danger-text"
+          data-testid="clear-all-recent-button"
+          onclick={clearAll}
+        >
+          Clear all
         </button>
       </div>
       <p class="recent-files-hint text-muted">

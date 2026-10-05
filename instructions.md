@@ -68,7 +68,7 @@ Run from the repo root. Takes a few minutes, mostly downloading.
 
 Windows (PowerShell / cmd):
 
-```powershell
+```bash
 py -m venv .venv
 .venv\Scripts\activate
 
@@ -107,7 +107,7 @@ All four should pass before you start changing anything.
 
 Windows:
 
-```powershell
+```bash
 .venv\Scripts\activate
 pytest backend/ -q                     # 110 passed, 1 skipped
 npm --prefix frontend run test         # 204 passed

@@ -206,6 +206,9 @@ describe('SettingsDialog', () => {
 
     render(SettingsDialog, { props: { onClose: vi.fn() } })
 
+    // Theme options live under their own tab now (General is the default).
+    await fireEvent.click(screen.getByTestId('settings-tab-appearance'))
+
     expect(screen.getByTestId('theme-system-button').getAttribute('aria-pressed')).toBe('true')
 
     await fireEvent.click(screen.getByTestId('theme-bw-button'))

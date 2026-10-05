@@ -86,6 +86,21 @@ export interface SettingsResult {
   error: string | null
 }
 
+export interface DatabaseResetResult {
+  status: string
+  error: string | null
+}
+
+export interface DatabaseInfoResult {
+  status: string
+  path: string | null
+  directory: string | null
+  size_bytes: number | null
+  file_count: number | null
+  beat_count: number | null
+  error: string | null
+}
+
 export interface ArrhythmiaBeat {
   ts: number
   bradycardia_absolute: boolean | null
