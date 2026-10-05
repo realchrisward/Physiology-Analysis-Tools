@@ -51,6 +51,11 @@ export function formatRelativeTime(ts: number, now: number = Date.now()): string
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
+/** A heart rate to at most two decimals ("471.47"), not "471.4702384650006". */
+export function formatHeartRate(hr: number): string {
+  return String(Math.round(hr * 100) / 100)
+}
+
 /** "1.4 MB" style human-readable file size (binary/1024-based units). */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

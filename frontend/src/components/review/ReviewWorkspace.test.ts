@@ -1600,7 +1600,6 @@ describe('ReviewWorkspace', () => {
 
       expect(screen.getByTestId('run-heuristic-button')).toBeDisabled()
       expect(screen.getByTestId('run-unsupervised-button')).toBeDisabled()
-      expect(screen.getByTestId('run-both-button')).toBeDisabled()
 
       resolveFileState!(fileStateResponse())
 
@@ -1608,7 +1607,6 @@ describe('ReviewWorkspace', () => {
         expect(screen.getByTestId('run-heuristic-button')).not.toBeDisabled()
       })
       expect(screen.getByTestId('run-unsupervised-button')).not.toBeDisabled()
-      expect(screen.getByTestId('run-both-button')).not.toBeDisabled()
     })
 
     it('falls back to defaultChannel with no prior state (found: false)', async () => {

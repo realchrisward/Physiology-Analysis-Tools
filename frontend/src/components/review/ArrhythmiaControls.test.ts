@@ -40,7 +40,6 @@ describe('ArrhythmiaControls', () => {
   it.each([
     ['run-heuristic-button', 'heuristic'],
     ['run-unsupervised-button', 'unsupervised'],
-    ['run-both-button', 'both'],
   ] as const)('calls detectArrhythmias with method %s', async (testId, method) => {
     const fetchMock = vi.fn().mockResolvedValue(arrhythmiaOkResponse())
     vi.stubGlobal('fetch', fetchMock)
@@ -59,7 +58,7 @@ describe('ArrhythmiaControls', () => {
     })
   })
 
-  it('shows a running indicator and disables all three buttons while a run is in flight', async () => {
+  it('shows a running indicator and disables both buttons while a run is in flight', async () => {
     let resolveFetch: ((value: unknown) => void) | undefined
     const pending = new Promise((resolve) => {
       resolveFetch = resolve
@@ -76,13 +75,11 @@ describe('ArrhythmiaControls', () => {
     expect(screen.getByTestId('arrhythmia-running')).toBeInTheDocument()
     expect(screen.getByTestId('run-heuristic-button')).toBeDisabled()
     expect(screen.getByTestId('run-unsupervised-button')).toBeDisabled()
-    expect(screen.getByTestId('run-both-button')).toBeDisabled()
 
     // The spinner shows on the specific button that was clicked, not the
-    // other two, so it's clear at a glance which run is actually in flight.
+    // other one, so it's clear at a glance which run is actually in flight.
     expect(screen.getByTestId('run-heuristic-button').querySelector('.spinner')).toBeInTheDocument()
     expect(screen.getByTestId('run-unsupervised-button').querySelector('.spinner')).not.toBeInTheDocument()
-    expect(screen.getByTestId('run-both-button').querySelector('.spinner')).not.toBeInTheDocument()
 
     resolveFetch!(arrhythmiaOkResponse())
     await waitFor(() => expect(screen.queryByTestId('arrhythmia-running')).not.toBeInTheDocument())
@@ -95,11 +92,11 @@ describe('ArrhythmiaControls', () => {
     const onComplete = vi.fn()
 
     render(ArrhythmiaControls, { props: { path: '/data/57.txt', channel: 'channel 1', onComplete } })
-    await fireEvent.click(screen.getByTestId('run-both-button'))
+    await fireEvent.click(screen.getByTestId('run-unsupervised-button'))
 
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId('arrhythmia-running')).not.toBeInTheDocument()
-    expect(screen.getByTestId('run-both-button')).not.toBeDisabled()
+    expect(screen.getByTestId('run-unsupervised-button')).not.toBeDisabled()
   })
 
   // Regression coverage for the exploit described alongside this fix: a

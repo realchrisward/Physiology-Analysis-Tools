@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, Menu, ipcMain, dialog } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { startBackend } = require('./backend-process')
@@ -21,6 +21,11 @@ function findSupportedFiles(dirPath) {
 }
 
 function createWindow() {
+  // The stock File/Edit/View/Window menu has nothing this app needs (every
+  // action lives in the UI itself). macOS keeps its menu: the app menu
+  // carries Cmd+Q/Cmd+C/Cmd+V there, which don't work without it.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -30,6 +35,19 @@ function createWindow() {
       nodeIntegration: false,
     },
   })
+
+  // Without the menu, View > Toggle Developer Tools is gone too; keep the
+  // usual shortcuts for development builds only.
+  if (!app.isPackaged) {
+    win.webContents.on('before-input-event', (event, input) => {
+      const opensDevTools =
+        input.type === 'keyDown' &&
+        (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i'))
+      if (!opensDevTools) return
+      win.webContents.toggleDevTools()
+      event.preventDefault()
+    })
+  }
 
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event, url) => {

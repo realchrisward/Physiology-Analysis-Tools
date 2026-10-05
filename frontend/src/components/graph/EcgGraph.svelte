@@ -2442,14 +2442,68 @@
       </button>
     </div>
 
-    {#if beatsOfInterest.length > 0}
-      <ul class="nav-hint" data-testid="beat-nav-hint" aria-label="Keyboard shortcuts">
-        <li><kbd>N</kbd> Next</li>
-        <li><kbd>P</kbd> Previous</li>
-        <li><kbd>C</kbd> Confirm arrhythmia</li>
-        <li><kbd>R</kbd> Reject</li>
-      </ul>
-    {/if}
+    <!-- Keyboard hints and the marker filter share one row: the filter used
+         to sit in the legend under the plot, below the fold on most
+         screens. It stays even with no beats of interest (only the hints
+         depend on those). -->
+    <div class="nav-hint-row">
+      {#if beatsOfInterest.length > 0}
+        <ul class="nav-hint" data-testid="beat-nav-hint" aria-label="Keyboard shortcuts">
+          <li><kbd>N</kbd> Next</li>
+          <li><kbd>P</kbd> Previous</li>
+          <li><kbd>C</kbd> Confirm arrhythmia</li>
+          <li><kbd>R</kbd> Reject</li>
+        </ul>
+      {/if}
+      <div class="ecg-legend-review-filter" role="radiogroup" aria-label="Filter by review status">
+        <span
+          class="legend-filter-label"
+          data-testid="marker-filter-label"
+          title="Hide or show beat markers by category, review status or rejected. This never changes the signal or the saved beats."
+        >
+          Show markers
+        </span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          class:btn-active={reviewFilter === 'all'}
+          data-testid="review-filter-all"
+          onclick={() => setReviewFilter('all')}
+        >
+          All
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          class:btn-active={reviewFilter === 'reviewed'}
+          data-testid="review-filter-reviewed"
+          onclick={() => setReviewFilter('reviewed')}
+        >
+          Reviewed
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          class:btn-active={reviewFilter === 'unreviewed'}
+          data-testid="review-filter-unreviewed"
+          onclick={() => setReviewFilter('unreviewed')}
+        >
+          Unreviewed
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          class:btn-active={hideRejected}
+          data-testid="hide-rejected-toggle"
+          aria-pressed={hideRejected}
+          title="Hide beats you have rejected, without deleting them"
+          onclick={toggleHideRejected}
+        >
+          <Icon name="eye-off" size={14} />
+          {hideRejected ? 'Rejected hidden' : 'Hide rejected'}
+        </button>
+      </div>
+    </div>
   </div>
 
   <div class="ecg-graph-toolbar">
@@ -2715,30 +2769,31 @@
 
   <!-- Whole-file overview of the marks: the shading on the chart itself
        (see badDataPlugin) covers the visible range, this covers everything
-       off-screen too. -->
-  <div class="marks-strip-row">
-    <span class="marks-strip-label">
-      Bad data
-      {#if badDataMarks.length > 0}<span class="marks-count">{badDataMarks.length}</span>{/if}
-    </span>
-  <div data-testid="bad-data-marks-bar" class="bad-data-marks-bar">
-    {#each badDataMarks as mark (mark.id)}
-      <button
-        type="button"
-        data-testid="bad-data-mark"
-        class="bad-data-mark"
-        style={`left: ${markLeftPct(mark)}%; width: ${markWidthPct(mark)}%`}
-        class:selected={mark.id === selectedMarkId}
-        onclick={() => selectMark(mark)}
-        title={`Bad data ${mark.start.toFixed(2)}–${mark.stop.toFixed(2)} (click to edit or delete)`}
-        aria-label={`Bad data mark from ${mark.start.toFixed(2)} to ${mark.stop.toFixed(2)}, click to edit or delete`}
-      ></button>
-    {/each}
-    {#if badDataMarks.length === 0}
-      <span class="marks-strip-empty">No bad-data ranges marked</span>
-    {/if}
-  </div>
-  </div>
+       off-screen too. Only shown once the file has marks — with none there
+       is nothing to overview, and marking itself starts from the toolbar's
+       "Mark bad data", not from this strip. -->
+  {#if badDataMarks.length > 0}
+    <div class="marks-strip-row">
+      <span class="marks-strip-label">
+        Bad data
+        <span class="marks-count">{badDataMarks.length}</span>
+      </span>
+      <div data-testid="bad-data-marks-bar" class="bad-data-marks-bar">
+        {#each badDataMarks as mark (mark.id)}
+          <button
+            type="button"
+            data-testid="bad-data-mark"
+            class="bad-data-mark"
+            style={`left: ${markLeftPct(mark)}%; width: ${markWidthPct(mark)}%`}
+            class:selected={mark.id === selectedMarkId}
+            onclick={() => selectMark(mark)}
+            title={`Bad data ${mark.start.toFixed(2)}–${mark.stop.toFixed(2)} (click to edit or delete)`}
+            aria-label={`Bad data mark from ${mark.start.toFixed(2)} to ${mark.stop.toFixed(2)}, click to edit or delete`}
+          ></button>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   {#if selectedMark}
     <div class="mark-editor" data-testid="bad-data-editor">
@@ -2876,54 +2931,6 @@
           {DISPLAY_CATEGORY_LABELS[cat]}
         </button>
       {/each}
-    </div>
-    <div class="ecg-legend-review-filter" role="radiogroup" aria-label="Filter by review status">
-      <span
-        class="legend-filter-label"
-        data-testid="marker-filter-label"
-        title="Hide or show beat markers by category, review status or rejected. This never changes the signal or the saved beats."
-      >
-        Show markers
-      </span>
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-active={reviewFilter === 'all'}
-        data-testid="review-filter-all"
-        onclick={() => setReviewFilter('all')}
-      >
-        All
-      </button>
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-active={reviewFilter === 'reviewed'}
-        data-testid="review-filter-reviewed"
-        onclick={() => setReviewFilter('reviewed')}
-      >
-        Reviewed
-      </button>
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-active={reviewFilter === 'unreviewed'}
-        data-testid="review-filter-unreviewed"
-        onclick={() => setReviewFilter('unreviewed')}
-      >
-        Unreviewed
-      </button>
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-active={hideRejected}
-        data-testid="hide-rejected-toggle"
-        aria-pressed={hideRejected}
-        title="Hide beats you have rejected, without deleting them"
-        onclick={toggleHideRejected}
-      >
-        <Icon name="eye-off" size={14} />
-        {hideRejected ? 'Rejected hidden' : 'Hide rejected'}
-      </button>
     </div>
   </div>
 </div>
@@ -3091,13 +3098,6 @@
     font-size: 0.65rem;
   }
 
-  .marks-strip-empty {
-    padding-left: var(--space-2);
-    font-size: 0.7rem;
-    color: var(--color-text-muted, #5b6b7c);
-  }
-
-
   .ecg-graph-toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -3134,6 +3134,26 @@
     list-style: none;
     font-size: var(--font-size-sm, 0.875rem);
     color: var(--color-text, #1f2933);
+  }
+
+  /* Shortcut hints on the left, marker filter on the right. Takes over the
+     full-width row + top rule `.nav-hint` has on its own (that variant is
+     still used by itself in the focus overlay). */
+  .nav-hint-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1) var(--space-3);
+    flex-basis: 100%;
+    padding-top: var(--space-1);
+    border-top: 1px solid var(--color-border, #d3dae1);
+  }
+
+  .nav-hint-row .nav-hint {
+    flex-basis: auto;
+    padding: 0;
+    border-top: none;
   }
 
   .nav-hint li {
@@ -3298,10 +3318,14 @@
     margin-top: var(--space-2);
   }
 
+  /* Its only children are absolutely positioned marks, so it has no content
+     width of its own: without `flex: 1` it collapsed to 0px inside the row
+     and the strip was invisible. */
   .bad-data-marks-bar {
     position: relative;
+    flex: 1;
+    min-width: 0;
     height: var(--space-3, 12px);
-    margin-top: var(--space-2, 8px);
     background: var(--color-border, #d3dae1);
     border-radius: var(--radius-sm, 4px);
     overflow: hidden;
@@ -3381,7 +3405,9 @@
 
   .ecg-legend-review-filter {
     display: flex;
-    gap: 2px;
-    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
   }
 </style>

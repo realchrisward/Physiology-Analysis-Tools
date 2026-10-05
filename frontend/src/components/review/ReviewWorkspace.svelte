@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
-  import { detectArrhythmias } from '../../lib/api/arrhythmia'
+  import { detectArrhythmias, type ArrhythmiaMethod } from '../../lib/api/arrhythmia'
+  import { formatHeartRate } from '../../lib/format'
   import { getBeatsOfInterest } from '../../lib/api/windowing'
   import {
     discardFileState,
@@ -233,6 +234,17 @@
   // channel, not on every reactive re-run.
   let autoArrhythmiaChannel: string | null = null
   let autoArrhythmiaRunning: boolean = $state(false)
+  // Arrhythmia methods that have produced results for the ACTIVE channel,
+  // shown as green "done" buttons in ArrhythmiaControls. Cleared when those
+  // results stop being valid: a channel switch, or a beat re-detection
+  // (which replaces the beats and, with them, every flag). A reopened
+  // session's saved flags don't say which method made them, so those leave
+  // this empty rather than guessing.
+  let arrhythmiaDone: ArrhythmiaMethod[] = $state([])
+
+  function markArrhythmiaDone(...methods: ArrhythmiaMethod[]) {
+    arrhythmiaDone = [...new Set([...arrhythmiaDone, ...methods])]
+  }
   // The automatic run is a multi-step chain (check → detect → persist →
   // refresh) that can outlive the component if the technician navigates away
   // mid-run. Checked at every await boundary so an unmounted workspace stops
@@ -275,16 +287,19 @@
   async function autoRunArrhythmiaDetection(channel: string) {
     autoArrhythmiaRunning = true
     try {
+      let methodsRun: ArrhythmiaMethod[] = ['heuristic', 'unsupervised']
       let result = await detectArrhythmias(path, channel, 'both')
       if (destroyed) return
       if (result.status !== 'ok' || result.error) {
         result = await detectArrhythmias(path, channel, 'heuristic')
+        methodsRun = ['heuristic']
         if (destroyed) return
       }
       // A channel switch while this was in flight makes the result stale —
       // same channel-identity guard every other async operation here uses.
       if (channel !== activeChannel) return
       if (result.status === 'ok' && !result.error) {
+        markArrhythmiaDone(...methodsRun)
         await persistChannelData(channel)
         if (destroyed) return
         refreshGraphBeats()
@@ -598,7 +613,8 @@
   // preserves any beat's prior `review_state`/`reassigned_category` across
   // a re-persist), so it does not undo any confirm/reject/reassign already
   // applied on this channel.
-  async function handleArrhythmiaComplete() {
+  async function handleArrhythmiaComplete(method: ArrhythmiaMethod) {
+    markArrhythmiaDone(method)
     refreshGraphBeats()
     await refreshBeatsOfInterest()
     await persistChannelData(activeChannel)
@@ -625,6 +641,7 @@
       // reflect this channel's detection — advance the channel EcgGraph is
       // keyed/mounted against.
       activeChannel = channel
+      arrhythmiaDone = []
       // Remember this channel choice for next time this file is reopened
       // (F5's `GET /files/state` hydration above reads it back). Deliberately
       // fire-and-forget: `putChannel`/`apiPost` never throws (see http.ts),
@@ -681,6 +698,7 @@
       selectedBeat = null
       persistPending = false
       persistError = null
+      arrhythmiaDone = []
       refreshGraphBeats()
       await persistChannelData(channel)
     } else {
@@ -741,11 +759,17 @@
           {/if}
         </div>
       {:else if detection.status === 'ok'}
-        <div class="detection-summary text-muted" data-testid="detection-summary">
-          {detection.count} beats detected{detection.meanHr !== null ? `, mean HR ${detection.meanHr}` : ''}{detection.duration !==
-          null
-            ? `, duration ${detection.duration}s`
-            : ''}
+        <!-- Two stacked rows (count over the details) rather than one long
+             inline sentence; ~33px tall, within the toolbar's own height. -->
+        {@const detail = [
+          detection.meanHr !== null ? `mean HR ${formatHeartRate(detection.meanHr)}` : null,
+          detection.duration !== null ? `duration ${detection.duration}s` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+        <div class="detection-summary detection-stats" data-testid="detection-summary">
+          <span class="detection-stat-primary">{detection.count} beats detected</span>
+          {#if detail}<span class="detection-stat-detail text-muted">{detail}</span>{/if}
         </div>
       {:else if detection.status === 'error'}
         <div class="detection-summary text-danger" data-testid="detection-summary">
@@ -775,6 +799,7 @@
         channel={activeChannel}
         onComplete={handleArrhythmiaComplete}
         disabled={!hydrationChecked || autoArrhythmiaRunning}
+        done={arrhythmiaDone}
       />
       {#if autoArrhythmiaRunning}
         <span class="text-muted" data-testid="auto-arrhythmia-running">
@@ -1040,6 +1065,21 @@
   .detection-summary {
     font-size: var(--font-size-sm);
     white-space: nowrap;
+  }
+
+  .detection-stats {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.25;
+  }
+
+  .detection-stat-primary {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .detection-stat-detail {
+    font-size: 0.75rem;
   }
 
   .report-status {
