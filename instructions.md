@@ -4,11 +4,11 @@ Branch: `web-ui-redesign`.
 
 **Prerequisites** (install these first, on any machine):
 
-| | Version | Check |
-|---|---|---|
-| Python | 3.12+ | `python3 --version` (Windows: `py --version`) |
-| Node.js | 20+ (tested on 22) | `node --version` |
-| Git | any | `git --version` — only needed for the clone route |
+| | Version | Windows check | macOS / Linux check |
+|---|---|---|---|
+| Python | 3.12+ | `py --version` | `python3 --version` |
+| Node.js | 20+ (tested on 22) | `node --version` | `node --version` |
+| Git | any | `git --version` — only needed for the clone route | `git --version` — only needed for the clone route |
 
 Always use the project's own `.venv` — never the bare system `python3`. The
 package is also published to PyPI, so a system interpreter may silently
@@ -18,6 +18,8 @@ instead of this working tree.
 ---
 
 ## Setup A — from a fresh `git clone`
+
+Same commands on every OS:
 
 ```bash
 git clone https://github.com/realchrisward/Physiology-Analysis-Tools.git
@@ -32,10 +34,16 @@ Then run **Common setup** below.
 Unzip it, `cd` into the folder, then **delete the two directories that do
 not survive the trip** before running Common setup:
 
+Windows (PowerShell):
+
+```powershell
+Remove-Item -Recurse -Force .venv, node_modules, frontend\node_modules, desktop\node_modules
+```
+
+macOS / Linux:
+
 ```bash
 rm -rf .venv node_modules frontend/node_modules desktop/node_modules
-# Windows PowerShell:
-#   Remove-Item -Recurse -Force .venv, node_modules, frontend\node_modules, desktop\node_modules
 ```
 
 This matters even when moving between two machines of the same OS:
@@ -58,12 +66,24 @@ Run from the repo root. Takes a few minutes, mostly downloading.
 
 ### 1. Python backend
 
-```bash
-python3 -m venv .venv                       # Windows: py -m venv .venv
-source .venv/bin/activate                   # Windows: .venv\Scripts\activate
+Windows (PowerShell / cmd):
+
+```powershell
+py -m venv .venv
+.venv\Scripts\activate
 
 pip install -e .                            # the analysis library (pyproject.toml)
 pip install -r backend/requirements.txt     # FastAPI backend + test deps
+```
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -e .
+pip install -r backend/requirements.txt
 ```
 
 `pip install -e .` pulls in PySide6 and pyqtgraph. Those belong to the old
@@ -72,7 +92,8 @@ in `pyproject.toml`, so expect a large download.
 
 ### 2. Node (frontend + Electron)
 
-There are no npm workspaces yet, so install in all three places:
+There are no npm workspaces yet, so install in all three places (same
+commands on every OS):
 
 ```bash
 npm install                     # repo root (concurrently, wait-on)
@@ -82,22 +103,36 @@ npm install --prefix desktop
 
 ### 3. Verify the setup
 
-All four should pass before you start changing anything:
+All four should pass before you start changing anything.
 
-```bash
-source .venv/bin/activate              # Windows: .venv\Scripts\activate
+Windows:
+
+```powershell
+.venv\Scripts\activate
 pytest backend/ -q                     # 110 passed, 1 skipped
 npm --prefix frontend run test         # 204 passed
 npm --prefix frontend run check        # 0 errors (2 known warnings)
 npm --prefix desktop run test          # 5 passed
 ```
 
+macOS / Linux:
+
+```bash
+source .venv/bin/activate
+pytest backend/ -q
+npm --prefix frontend run test
+npm --prefix frontend run check
+npm --prefix desktop run test
+```
+
 ---
 
 ## Running the app
 
+Same command on every OS, from the repo root:
+
 ```bash
-npm run dev                            # from repo root
+npm run dev
 ```
 
 Starts Vite and Electron together. Electron spawns the Python backend
@@ -108,9 +143,18 @@ activated in the shell you launch from, but it does need to exist at
 
 To poke at the API on its own:
 
+Windows:
+
+```powershell
+.venv\Scripts\activate
+uvicorn backend.app:app --reload        # http://127.0.0.1:8000/docs
+```
+
+macOS / Linux:
+
 ```bash
 source .venv/bin/activate
-uvicorn backend.app:app --reload        # http://127.0.0.1:8000/docs
+uvicorn backend.app:app --reload
 ```
 
 ---
