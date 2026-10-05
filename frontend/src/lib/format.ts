@@ -56,6 +56,21 @@ export function formatHeartRate(hr: number): string {
   return String(Math.round(hr * 100) / 100)
 }
 
+/**
+ * A length of time in seconds as "42.5s", "12m 05s" or "2h 05m" - seconds
+ * under a minute, minutes and seconds under an hour, hours and minutes after.
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—'
+  const rounded = Math.round(seconds * 10) / 10
+  if (rounded < 60) return `${rounded}s`
+  const total = Math.round(seconds)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  return `${minutes}m ${String(total % 60).padStart(2, '0')}s`
+}
+
 /** "1.4 MB" style human-readable file size (binary/1024-based units). */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'

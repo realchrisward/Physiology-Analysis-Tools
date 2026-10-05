@@ -1,12 +1,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ReviewWorkspace from './ReviewWorkspace.svelte'
+import { resetForTesting as resetArrhythmiaRuns } from '../../lib/stores/arrhythmiaRuns.svelte'
 import { fileRegistry, resetForTesting as resetFileRegistry } from '../../lib/stores/fileRegistry.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
   resetFileRegistry()
+  resetArrhythmiaRuns()
 })
 
 // jsdom performs no layout, so every element's real `clientWidth` is 0
@@ -193,7 +195,8 @@ describe('ReviewWorkspace', () => {
       const summary = screen.getByTestId('detection-summary')
       expect(summary).toHaveTextContent('42')
       expect(summary).toHaveTextContent('72')
-      expect(summary).toHaveTextContent('60')
+      // 60 s is shown as minutes + seconds.
+      expect(summary).toHaveTextContent('1m 00s')
     })
   })
 
@@ -2096,7 +2099,7 @@ describe('ReviewWorkspace', () => {
 })
 
 describe('ReviewWorkspace automatic beat-of-interest detection', () => {
-  function autoRunFetch(overrides: { ofInterestAfterRun?: number[]; bothFails?: boolean } = {}) {
+  function autoRunFetch(overrides: { ofInterestAfterRun?: number[] } = {}) {
     let arrhythmiaRuns = 0
     let ranSuccessfully = false
     const methodsRequested: string[] = []
@@ -2116,12 +2119,6 @@ describe('ReviewWorkspace automatic beat-of-interest detection', () => {
         arrhythmiaRuns += 1
         const method = JSON.parse(init?.body ?? '{}').method
         methodsRequested.push(method)
-        if (method === 'both' && overrides.bothFails) {
-          return Promise.resolve({
-            ok: true,
-            json: async () => ({ status: 'error', error: 'not enough usable beat epochs', beats: [] }),
-          })
-        }
         ranSuccessfully = true
         return Promise.resolve({
           ok: true,
@@ -2142,26 +2139,14 @@ describe('ReviewWorkspace automatic beat-of-interest detection', () => {
       props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
     })
 
-    await waitFor(() => expect(methodsRequested).toContain('both'))
+    // Heuristic only; unsupervised stays a deliberate click.
+    await waitFor(() => expect(methodsRequested).toEqual(['heuristic']))
     // The results are persisted so a later reopen/export agrees with what is
     // on screen.
     await waitFor(() => {
       const posted = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/files/beats'))
       expect(posted.length).toBeGreaterThan(0)
     })
-  })
-
-  it('falls back to heuristic-only when the unsupervised method cannot run', async () => {
-    const { fetchMock, methodsRequested } = autoRunFetch({ bothFails: true })
-    vi.stubGlobal('fetch', fetchMock)
-
-    render(ReviewWorkspace, {
-      props: { path: '/data/57.txt', channels: ['channel 1'], defaultChannel: 'channel 1' },
-    })
-
-    // A short recording legitimately can't cluster; the technician should
-    // still get the detection that CAN run rather than nothing at all.
-    await waitFor(() => expect(methodsRequested).toEqual(['both', 'heuristic']))
   })
 
   it('does not run detection when the file already has flagged beats', async () => {
