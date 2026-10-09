@@ -938,6 +938,11 @@ describe('ReviewWorkspace', () => {
   // channel-1 response must not clobber `lastPersistedChannel` back to
   // `'channel 1'` — the backend (which can only ever hold one channel's
   // persisted beats at a time) actually has channel 2's data persisted.
+  //
+  // `POST /files/beats` calls are also serialised (a new one is only sent once
+  // the previous one has finished), so channel 2's call is QUEUED behind
+  // channel 1's: what is left to guard is channel 1's response arriving while
+  // channel 2's persist is pending, which must not mark the file persisted.
   describe('persist race: out-of-order POST /files/beats responses', () => {
     const beatOnChannel1 = {
       ts: 1,
@@ -969,7 +974,7 @@ describe('ReviewWorkspace', () => {
       document.dispatchEvent(new MouseEvent('mouseup', { clientX: clickX, clientY: 100, bubbles: true }))
     }
 
-    it('keeps the later-dispatched channel as the effective last-persisted channel when its response resolves before the earlier channel\'s stale one', async () => {
+    it('keeps the later-requested channel as the effective last-persisted channel when the earlier channel\'s stale response arrives while it is queued', async () => {
       let resolvePersistChannel1: ((value: unknown) => void) | undefined
       let resolvePersistChannel2: ((value: unknown) => void) | undefined
       const persistChannel1Promise = new Promise((resolve) => {
@@ -1029,9 +1034,8 @@ describe('ReviewWorkspace', () => {
           expect(screen.getByTestId('persist-pending')).toBeInTheDocument()
         })
 
-        // Quickly switch to channel 2 and select a beat there — dispatches
-        // persistBeats('channel 2'), also held pending. This is dispatched
-        // strictly AFTER channel 1's call above.
+        // Quickly switch to channel 2 and select a beat there — requests
+        // persistBeats('channel 2'), which waits behind channel 1's call.
         const select = screen.getByTestId('channel-select') as HTMLSelectElement
         await fireEvent.change(select, { target: { value: 'channel 2' } })
         await waitFor(() => {
@@ -1040,26 +1044,37 @@ describe('ReviewWorkspace', () => {
 
         await clickBeatMarker()
         await waitFor(() => {
-          expect(fetchMock).toHaveBeenCalledWith(
-            'http://127.0.0.1:8000/files/beats',
-            expect.objectContaining({ body: JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }) }),
-          )
+          expect(screen.getByTestId('persist-pending')).toHaveTextContent('channel 2')
         })
+        // Serialised: channel 2's call is not sent while channel 1's is out.
+        const channel2Calls = () =>
+          fetchMock.mock.calls.filter(
+            (call) =>
+              String(call[0]).includes('/files/beats') &&
+              (call[1] as { body?: string } | undefined)?.body ===
+                JSON.stringify({ path: '/data/57.txt', channel: 'channel 2' }),
+          )
+        expect(channel2Calls()).toHaveLength(0)
 
-        // Resolve channel 2's (later-dispatched) response FIRST.
+        // Channel 1's (now superseded) response arrives while channel 2's
+        // persist is still pending. Without the `persistRequestId` guard this
+        // stale handler would set `lastPersistedChannel` to 'channel 1' and
+        // clear `persistPending`, mounting the panel before channel 2's data
+        // is actually persisted.
+        resolvePersistChannel1!({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
+        // Only now is channel 2's call sent.
+        await waitFor(() => {
+          expect(channel2Calls()).toHaveLength(1)
+        })
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(screen.queryByTestId('beat-category-panel')).not.toBeInTheDocument()
+        expect(screen.getByTestId('persist-pending')).toBeInTheDocument()
+
         resolvePersistChannel2!({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
         await waitFor(() => {
           expect(screen.getByTestId('beat-category-panel')).toBeInTheDocument()
         })
-
-        // Now resolve channel 1's (earlier-dispatched) response SECOND — an
-        // out-of-order completion. Without the `persistRequestId` guard,
-        // this stale handler would clobber `lastPersistedChannel` back to
-        // 'channel 1'.
-        resolvePersistChannel1!({ ok: true, json: async () => ({ status: 'ok', count: 1, error: null }) })
-        // Let any (incorrect) stale handling flush before proceeding.
-        await Promise.resolve()
-        await Promise.resolve()
 
         // The category panel must still reflect channel 2's beat/state —
         // the stale channel-1 response must not have reset anything.

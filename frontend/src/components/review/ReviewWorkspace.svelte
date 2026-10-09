@@ -205,6 +205,15 @@
   // `persistPending`/`persistError`.
   let persistRequestId = 0
 
+  // `POST /files/beats` calls run strictly one after another. Two of them in
+  // flight at once (the automatic arrhythmia run's persist and the persist a
+  // beat selection triggers can overlap by milliseconds) both rewrite the
+  // file's rows, and on a large recording the second can fail with "database
+  // is locked" and leave the persist-error banner up. Each call chains onto
+  // this; it never rejects, so one failed call can't stall the ones behind it.
+  // `persistRequestId` above still decides whose RESPONSE counts.
+  let persistQueue: Promise<unknown> = Promise.resolve()
+
   // Bumped on every successful arrhythmia re-run (see `ArrhythmiaControls`'s
   // `onComplete` below) and passed straight through as EcgGraph's own
   // `beatsRefreshToken` prop. EcgGraph watches it via an `$effect` (mirroring
@@ -229,9 +238,14 @@
   let flags = $derived(flagsForPath(path))
   // `seq` bumps on every request to move the graph (a flag clicked in the
   // sidebar or Home); the graph's own navigation only changes `ts` (see
-  // `reportFlagFocus`), which it must not answer by moving again.
+  // `reportFlagFocus`), which it must not answer by moving again. Only ever a
+  // request for a recording that HAS flags: `flagFocus` outlives a closed
+  // project, and importing one of its recordings again as an ordinary file
+  // must not open zoomed on the old flag (and select and persist a beat).
   let focusRequest = $derived(
-    flagFocus.path === path && flagFocus.ts !== null ? { ts: flagFocus.ts, seq: flagFocus.seq } : null,
+    flags.length > 0 && flagFocus.path === path && flagFocus.ts !== null
+      ? { ts: flagFocus.ts, seq: flagFocus.seq }
+      : null,
   )
 
   // Every flagged beat's timestamp for the whole file — what EcgGraph's
@@ -539,7 +553,9 @@
     const requestId = ++persistRequestId
     persistPending = true
     persistError = null
-    const result = await persistBeats(path, channel)
+    const run = persistQueue.then(() => persistBeats(path, channel))
+    persistQueue = run.catch(() => undefined)
+    const result = await run
     if (requestId !== persistRequestId) return // superseded by a newer persist call
 
     persistPending = false
@@ -882,6 +898,7 @@
             {path}
             channel={activeChannel}
             onBeatSelect={handleBeatSelect}
+            onBeatClear={() => (selectedBeat = null)}
             {beatsRefreshToken}
             {initialBadDataMarks}
             selectedBeatTs={selectedBeat?.ts ?? null}

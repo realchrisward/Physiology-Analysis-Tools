@@ -245,6 +245,7 @@
     flaggedTimes = [],
     focusRequest = null,
     onFlagNavigate,
+    onBeatClear,
   }: {
     path: string
     channel: string
@@ -313,6 +314,12 @@
     // The graph's own flag navigation (the buttons, `[` / `]`) landed on the
     // flag at `ts`; the parent records it so the sidebar can highlight it.
     onFlagNavigate?: (ts: number) => void
+    // Asks the parent to drop its selected beat. A jump to a flag whose own
+    // beat cannot be found (another channel or beat settings, a deleted beat,
+    // detection not done yet) must not leave the PREVIOUS selection active:
+    // the view has moved on, but the confirm/reject keys would still act on
+    // that old, off-screen beat.
+    onBeatClear?: () => void
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -813,14 +820,24 @@
   // changes underneath it (a project closed, another opened). Drawn heavier
   // than the other flags, and what the navigation steps from.
   let currentFlagTs: number | null = $state(null)
-  let flagIndex: number = $derived.by(() => {
-    const ts = currentFlagTs
-    return ts === null ? -1 : flaggedTimes.findIndex((flag) => isSameFlagTime(flag.ts, ts))
-  })
+  let flagIndex: number = $derived(indexOfFlagTime(flaggedTimes, currentFlagTs))
   let currentFlag: FlaggedTime | null = $derived(flagIndex >= 0 ? flaggedTimes[flagIndex] : null)
   // `seq` of the last `focusRequest` acted on, so each one is honoured once.
   // Plain, not `$state`: only read from the mount path and the effect below.
   let handledFocusSeq: number | null = null
+  // The flag whose beat the graph still has to select: set when a jump
+  // focuses a flag, cleared once that beat has been selected (right away, after
+  // the jump's fetch, or later when detection delivers beats) or the
+  // technician chooses a beat themselves. Plain: never read by the template.
+  let pendingFlagSelectTs: number | null = null
+  // Bumped by anything that decides what is selected — a flag jump, a beat of
+  // interest jump, a marker click — so a jump that was waiting on its fetch can
+  // tell it has been superseded and must not select (or clear) afterwards.
+  let selectionEpoch = 0
+  // True while the current flag has no beat in the loaded detection result:
+  // another channel or beat settings, a deleted beat, or detection not
+  // finished yet. Shown next to the flag counter.
+  let flagBeatMissing: boolean = $state(false)
   // `chart` itself is a plain (non-reactive) binding, so markup that only
   // read it would never update once the async mount finally created it.
   // This is the reactive "the chart exists now" signal.
@@ -911,6 +928,9 @@
   // `chart`/`fullExtent` above, it's only ever read from an event handler,
   // never from the template.
   let lastBeats: WindowBeat[] = []
+  // The x-range `lastBeats` was fetched for. A flag outside it says nothing
+  // about whether that flag has a detected beat (see `settleFlagBeat`).
+  let lastBeatsRange: { start: number; end: number } | undefined
   // The raw channel {x, y} from the most recent successful `loadWindow` call
   // (set in `fetchMergedWindow` below), retained for the same reason as
   // `lastBeats` above but for `refreshBeatsOnly`'s benefit: a beats-only
@@ -1060,9 +1080,12 @@
     if (!chart || !lastChannelWindow) return
 
     lastBeats = beats
+    lastBeatsRange = { start: min, end: max }
     const merged = buildBeatAlignedData(lastChannelWindow.x, lastChannelWindow.y, beats, selectedBeatTs, hideRejected)
     chart.setData(toChartData(merged), false)
     applyFilters()
+    // Detection may only just have produced the beats the open flag waits on.
+    settleFlagBeat()
   }
 
   // Re-applies just the selection-highlight ring against whatever waveform
@@ -1179,6 +1202,7 @@
       // rather than a visible glitch.
       lastChannelWindow = channelData
       lastBeats = beats
+      lastBeatsRange = { start: fetchStart, end: fetchEnd }
       // uPlot derives the y range from the data it holds AT THE MOMENT the
       // x scale changes. Every jump/zoom sets x first and only then fetches
       // that window's data, so y ends up ranged against the PREVIOUS
@@ -1201,6 +1225,7 @@
       }
       loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth, pixelWidth: fetchWidth }
       applyFilters() // setData resets series visibility; re-apply the active category/review filters
+      settleFlagBeat()
     }
   }
 
@@ -1369,6 +1394,7 @@
     if (result.status === 'ok' && result.beat && !result.error) {
       const added = result.beat
       pendingBeat = null
+      noteManualSelection()
       showBadDataToast(
         `Beat added at ${added.ts.toFixed(3)}s — re-run arrhythmia detection to include it in the flags`,
       )
@@ -1461,9 +1487,15 @@
     return Math.abs(a - b) < FLAG_BEAT_TOLERANCE_SECONDS
   }
 
-  function isCurrentFlag(flag: FlaggedTime): boolean {
-    return currentFlagTs !== null && isSameFlagTime(flag.ts, currentFlagTs)
-  }
+  // Why a flag can lack a detected beat (see `flagBeatMissing`).
+  const FLAG_NO_BEAT_TITLE =
+    'No beat was detected at this flag, so no beat is selected here. The model may have judged another channel or other beat-detection settings, the beat may have been deleted, or detection may not have finished yet (the beat is selected as soon as it appears).'
+
+  // With more flags than this inside the view, tags are skipped (only the
+  // current flag keeps its own): they could not be told apart or read at that
+  // density anyway, and they are the costly part of a redraw. Bands and lines
+  // are still drawn for every flag.
+  const FLAG_TAG_MAX_VISIBLE = 150
 
   function flagColor(kind: FlagKind): string {
     return cssVar(FLAG_KIND_COLOR_VAR[kind], FLAG_FALLBACK_COLOR[kind])
@@ -1471,6 +1503,14 @@
 
   function flagSoftColor(kind: FlagKind): string {
     return cssVar(FLAG_KIND_SOFT_VAR[kind], FLAG_FALLBACK_SOFT[kind])
+  }
+
+  // `resolve` once per kind for the lifetime of the returned function. A draw
+  // makes one of these per color it needs, so a redraw costs a computed-style
+  // lookup per KIND (at most three), not one per flag.
+  function perKind(resolve: (kind: FlagKind) => string): (kind: FlagKind) => string {
+    const cache: Partial<Record<FlagKind, string>> = {}
+    return (kind) => (cache[kind] ??= resolve(kind))
   }
 
   // Text color for a solid tag: the flag colors run from near-black (black &
@@ -1484,17 +1524,20 @@
   }
 
   // The flags inside the visible x range (plus `marginPx` of slack for line
-  // width), left to right, with their x position in canvas pixels.
-  function visibleFlags(u: uPlot, marginPx: number): { flag: FlaggedTime; x: number }[] {
-    const visible: { flag: FlaggedTime; x: number }[] = []
+  // width), left to right, with their x position in canvas pixels and whether
+  // each is the current flag (by identity: flags within the tolerance of each
+  // other are still separate flags).
+  function visibleFlags(u: uPlot, marginPx: number): { flag: FlaggedTime; x: number; current: boolean }[] {
+    const visible: { flag: FlaggedTime; x: number; current: boolean }[] = []
     const { min, max } = u.scales.x
     if (min == null || max == null || !(max > min)) return visible
     const left = u.bbox.left - marginPx
     const right = u.bbox.left + u.bbox.width + marginPx
+    const current = currentFlag
     for (const flag of flaggedTimes) {
       if (flag.ts < min || flag.ts > max) continue
       const x = u.valToPos(flag.ts, 'x', true)
-      if (Number.isFinite(x) && x >= left && x <= right) visible.push({ flag, x })
+      if (Number.isFinite(x) && x >= left && x <= right) visible.push({ flag, x, current: flag === current })
     }
     return visible
   }
@@ -1515,9 +1558,10 @@
               ctx.beginPath()
               ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height)
               ctx.clip()
-              for (const { flag, x } of visibleFlags(u, 0)) {
-                const half = ((isCurrentFlag(flag) ? FLAG_BAND_CURRENT_PX : FLAG_BAND_PX) * dpr) / 2
-                ctx.fillStyle = flagSoftColor(flag.kind)
+              const softOf = perKind(flagSoftColor)
+              for (const { flag, x, current } of visibleFlags(u, 0)) {
+                const half = ((current ? FLAG_BAND_CURRENT_PX : FLAG_BAND_PX) * dpr) / 2
+                ctx.fillStyle = softOf(flag.kind)
                 ctx.fillRect(x - half, u.bbox.top, half * 2, u.bbox.height)
               }
             } finally {
@@ -1542,15 +1586,20 @@
               ctx.rect(left, top, width, height)
               ctx.clip()
 
+              const colorOf = perKind(flagColor)
               ctx.lineCap = 'butt'
-              for (const { flag, x } of visible) {
-                ctx.strokeStyle = flagColor(flag.kind)
-                ctx.lineWidth = (isCurrentFlag(flag) ? FLAG_LINE_CURRENT_PX : FLAG_LINE_PX) * dpr
+              for (const { flag, x, current } of visible) {
+                ctx.strokeStyle = colorOf(flag.kind)
+                ctx.lineWidth = (current ? FLAG_LINE_CURRENT_PX : FLAG_LINE_PX) * dpr
                 ctx.beginPath()
                 ctx.moveTo(x, top)
                 ctx.lineTo(x, top + height)
                 ctx.stroke()
               }
+
+              // Past the density limit only the current flag keeps a tag.
+              const showAllTags = visible.length <= FLAG_TAG_MAX_VISIBLE
+              if (!showAllTags && !visible.some((v) => v.current)) return
 
               // Tags sit under the marker lane (see above): the lane's own
               // y, plus a reviewed marker's radius at this zoom, plus a gap.
@@ -1565,13 +1614,25 @@
               ctx.textAlign = 'left'
               ctx.textBaseline = 'middle'
 
+              // Tags repeat the same few strings ("FP 0.912", "FN"); measure
+              // each distinct one once per draw.
+              const widths = new Map<string, number>()
+              const textWidth = (text: string): number => {
+                let w = widths.get(text)
+                if (w === undefined) {
+                  w = ctx.measureText(text).width
+                  widths.set(text, w)
+                }
+                return w
+              }
+
               // The current flag's tag is drawn last so it is never hidden
               // by a neighbour's.
               for (const currentPass of [false, true]) {
-                visible.forEach(({ flag, x }, i) => {
-                  const current = isCurrentFlag(flag)
+                if (!currentPass && !showAllTags) continue
+                visible.forEach(({ flag, x, current }, i) => {
                   if (current !== currentPass) return
-                  const color = flagColor(flag.kind)
+                  const color = colorOf(flag.kind)
                   const kindLabel = FLAG_KIND_LABEL[flag.kind]
                   const score = formatPrediction(flag.prediction)
                   // A tag has to end before the next flag's line (or the plot
@@ -1579,10 +1640,10 @@
                   const limit = current || i + 1 >= visible.length ? right : visible[i + 1].x - gap
                   const tagLeft = x + (current ? 3 : 2) * dpr
                   let text = score ? `${kindLabel} ${score}` : kindLabel
-                  let tagW = ctx.measureText(text).width + padX * 2
+                  let tagW = textWidth(text) + padX * 2
                   if (tagLeft + tagW > limit) {
                     text = kindLabel
-                    tagW = ctx.measureText(text).width + padX * 2
+                    tagW = textWidth(text) + padX * 2
                   }
                   let tagX = tagLeft
                   if (tagLeft + tagW > limit) {
@@ -1743,7 +1804,10 @@
     const unitsPerPx = u.posToVal(1, 'x') - u.posToVal(0, 'x')
     const toleranceVal = Math.abs(unitsPerPx) * BEAT_HIT_TOLERANCE_PX
     const beat = findNearestBeat(xVal, toleranceVal)
-    if (beat) onBeatSelect(beat)
+    if (beat) {
+      noteManualSelection()
+      onBeatSelect(beat)
+    }
   }
 
   // Left-drag (no modifier) pans: mutates the x-scale directly on every
@@ -1980,6 +2044,10 @@
     const clamped = Math.max(0, Math.min(beatsOfInterest.length - 1, index))
     beatOfInterestIndex = clamped
     const ts = beatsOfInterest[clamped]
+    // The technician's own choice: it replaces a flag selection still waiting
+    // for detection, and supersedes a flag jump still waiting on its fetch.
+    noteManualSelection()
+    const epoch = selectionEpoch
 
     // Select immediately when the beat is already loaded, so the detail
     // panel responds without waiting on the network.
@@ -1995,6 +2063,8 @@
     // on nothing at all).
     if (!loaded) {
       await pending
+      // Gone, or superseded by a newer jump or a beat chosen meanwhile?
+      if (mountCancelled || epoch !== selectionEpoch) return
       const fetched = lastBeats.find((b) => b.ts === ts)
       // Still the beat the technician asked for? A newer jump may have
       // superseded this one while the fetch was in flight.
@@ -2022,9 +2092,89 @@
 
   // The flagged beat's full record, once the graph holds it — beat detection
   // may still be queued (nothing to find), or the beat may be outside the
-  // loaded window until the move below has fetched it.
+  // loaded window until the move below has fetched it. The closest beat within
+  // tolerance wins, so two flags a millisecond apart each get their own beat.
   function findFlaggedBeat(ts: number): WindowBeat | undefined {
-    return lastBeats.find((beat) => isSameFlagTime(beat.ts, ts))
+    let nearest: WindowBeat | undefined
+    let nearestDist = FLAG_BEAT_TOLERANCE_SECONDS
+    for (const beat of lastBeats) {
+      const dist = Math.abs(beat.ts - ts)
+      if (dist < nearestDist) {
+        nearest = beat
+        nearestDist = dist
+        if (dist === 0) break
+      }
+    }
+    return nearest
+  }
+
+  // Position of the flag at `ts` in `flags`. Exact first: `currentFlagTs` is
+  // normally one of the list's own timestamps, and two flags closer together
+  // than the tolerance must stay distinct, or the navigation would resolve the
+  // second back to the first and never get past it. The tolerance only
+  // covers a `ts` that came from somewhere else.
+  function indexOfFlagTime(flags: FlaggedTime[], ts: number | null): number {
+    if (ts === null) return -1
+    const exact = flags.findIndex((flag) => flag.ts === ts)
+    if (exact >= 0) return exact
+    let nearest = -1
+    let nearestDist = FLAG_BEAT_TOLERANCE_SECONDS
+    flags.forEach((flag, i) => {
+      const dist = Math.abs(flag.ts - ts)
+      if (dist < nearestDist) {
+        nearest = i
+        nearestDist = dist
+      }
+    })
+    return nearest
+  }
+
+  function isInView(ts: number): boolean {
+    const { min, max } = chart?.scales.x ?? {}
+    return min != null && max != null && ts >= min && ts <= max
+  }
+
+  // A beat the technician chose themselves (a marker click, a beat of
+  // interest, an added beat). Whatever flag selection was still waiting for
+  // detection to deliver its beat is dropped, and a jump still waiting on its
+  // fetch is superseded: neither may override this choice later.
+  function noteManualSelection() {
+    selectionEpoch += 1
+    pendingFlagSelectTs = null
+  }
+
+  // Reconciles the current flag with the beats the graph holds right now, and
+  // returns whether the flag's own beat is among them. Called when a jump
+  // starts and every time freshly fetched beats are committed:
+  //  - if a selection is still owed (`pendingFlagSelectTs`) and the beat is
+  //    here, it is selected — the case of detection finishing AFTER the
+  //    recording was opened on a flag. A jump's own first call passes
+  //    `inView: false` (the view is about to move to the flag); every later
+  //    one requires the flag to be on screen, so a technician who has panned
+  //    away while detection ran does not get an off-screen beat selected;
+  //  - if the beat is absent, `flagBeatMissing` is set, but only when the
+  //    beats just loaded actually cover the flag's time (a flag scrolled
+  //    outside the loaded window says nothing either way).
+  function settleFlagBeat(requireInView: boolean = true): boolean {
+    const ts = currentFlagTs
+    // No flags any more (the project was closed): nothing is owed.
+    if (flaggedTimes.length === 0) {
+      pendingFlagSelectTs = null
+      flagBeatMissing = false
+      return false
+    }
+    if (ts === null) return false
+    const beat = findFlaggedBeat(ts)
+    if (beat) {
+      flagBeatMissing = false
+      if (pendingFlagSelectTs !== null && isSameFlagTime(pendingFlagSelectTs, ts) && (!requireInView || isInView(ts))) {
+        pendingFlagSelectTs = null
+        onBeatSelect?.(beat)
+      }
+      return true
+    }
+    if (lastBeatsRange && ts >= lastBeatsRange.start && ts <= lastBeatsRange.end) flagBeatMissing = true
+    return false
   }
 
   // Brings the flag at `ts` into view — centred, with the beats either side
@@ -2033,14 +2183,24 @@
   // way `goToBeatOfInterest` does. `keepZoom` holds a tighter zoom the
   // technician already chose, like `focusOnTime`; the opening view of a
   // recording ignores the zoom it happens to be at.
+  //
+  // A flag whose beat is NOT found (another channel or beat settings, a
+  // deleted beat, detection not done yet) must not leave the previous
+  // selection active while the view moves away from it — C / R would act on
+  // an off-screen beat — so the selection is cleared instead, and the flag's
+  // beat is selected later if detection delivers it (`settleFlagBeat`).
   async function focusOnFlag(ts: number, keepZoom: boolean): Promise<void> {
     if (!chart) return
+    const epoch = ++selectionEpoch
     currentFlagTs = ts
+    pendingFlagSelectTs = ts
+    flagBeatMissing = false
 
     // Select immediately when the beat is already loaded, so the detail
-    // panel responds without waiting on the network.
-    const loaded = findFlaggedBeat(ts)
-    if (loaded) onBeatSelect?.(loaded)
+    // panel responds without waiting on the network; otherwise drop the
+    // old selection right away.
+    const loaded = settleFlagBeat(false)
+    if (!loaded) onBeatClear?.()
 
     const { min, max } = chart.scales.x
     const maxWidth = keepZoom && min != null && max != null ? max - min : null
@@ -2049,13 +2209,14 @@
 
     // Outside the loaded buffer (a long recording), the beat only arrives
     // with this fetch. If detection hasn't produced beats yet there is still
-    // nothing to select afterwards, and the highlight on the trace is enough.
+    // nothing to select afterwards: the selection stays cleared, the highlight
+    // on the trace stays, and the beat is picked up when detection finishes.
     if (!loaded) {
       await pending
-      const fetched = findFlaggedBeat(ts)
-      // Still the flag the technician asked for? A newer jump may have
-      // superseded this one while the fetch was in flight.
-      if (fetched && currentFlagTs !== null && isSameFlagTime(currentFlagTs, ts)) onBeatSelect?.(fetched)
+      // Gone (the graph was unmounted), or superseded by a newer jump or a
+      // beat the technician chose while the fetch was in flight?
+      if (mountCancelled || !chart || epoch !== selectionEpoch) return
+      if (!settleFlagBeat()) onBeatClear?.()
     }
   }
 
@@ -2066,6 +2227,14 @@
     // Reported straight away (not after the fetch) so the sidebar's
     // highlight follows the click.
     onFlagNavigate?.(ts)
+    // The report makes the parent's `focusRequest` carry this flag with a
+    // `seq` this graph has not seen (it was mounted without one). Reading the
+    // prop recomputes it, so that `seq` can be recorded as handled now —
+    // otherwise the effect below would take it for a new request and focus
+    // the flag a second time. A later request (a sidebar click: new `seq`)
+    // still moves the graph.
+    const echoed = focusRequest
+    if (echoed) handledFocusSeq = echoed.seq
     void focusOnFlag(ts, true)
   }
 
@@ -2319,6 +2488,8 @@
       // what click hit-testing and every later local re-merge read from.
       lastChannelWindow = data
       lastBeats = beats
+      // The mount fetch asks for the whole file (see `initialLoad`).
+      lastBeatsRange = { start: -Infinity, end: Infinity }
 
       fullExtent = { start: data.x[0] ?? 0, end: data.x[data.x.length - 1] ?? 0 }
       // The initial mount fetch already loads the whole file's extent (see
@@ -2830,6 +3001,9 @@
           {#if currentFlag}
             {@const score = formatPrediction(currentFlag.prediction)}
             {FLAG_KIND_LABEL[currentFlag.kind]} {flagIndex + 1} of {flaggedTimes.length} · {formatFlagTime(currentFlag.ts)}{score ? ` · ${score}` : ''}
+            {#if flagBeatMissing}
+              <span class="flag-nav-missing" data-testid="flag-no-beat" title={FLAG_NO_BEAT_TITLE}>· no detected beat here</span>
+            {/if}
           {:else}
             {flaggedTimes.length} flagged {flaggedTimes.length === 1 ? 'beat' : 'beats'}
           {/if}
@@ -3685,6 +3859,11 @@
     font-size: var(--font-size-sm);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
+  }
+
+  .flag-nav-missing {
+    font-weight: 400;
+    color: var(--color-text-muted);
   }
 
   .legend-total {
