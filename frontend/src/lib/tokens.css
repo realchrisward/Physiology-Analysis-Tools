@@ -54,6 +54,16 @@
   --color-cat-cluster: #db2777;
   --color-cat-other: #0d9488;
 
+  /* FP/FN review: a model's false positives / negatives, drawn as vertical
+     guides across the graph and as badges in lists. Hues kept clear of the
+     beat-category markers above. */
+  --color-flag-fp: #ea580c;
+  --color-flag-fn: #0891b2;
+  --color-flag: #a16207;
+  --color-flag-fp-soft: rgba(234, 88, 12, 0.14);
+  --color-flag-fn-soft: rgba(8, 145, 178, 0.14);
+  --color-flag-soft: rgba(161, 98, 7, 0.14);
+
   /* Spacing scale */
   --space-1: 4px;
   --space-2: 8px;
@@ -124,6 +134,13 @@
     --color-cat-cluster: #f472b6;
     --color-cat-other: #2dd4bf;
 
+    --color-flag-fp: #fb923c;
+    --color-flag-fn: #22d3ee;
+    --color-flag: #facc15;
+    --color-flag-fp-soft: rgba(251, 146, 60, 0.18);
+    --color-flag-fn-soft: rgba(34, 211, 238, 0.18);
+    --color-flag-soft: rgba(250, 204, 21, 0.18);
+
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
@@ -171,6 +188,13 @@
   --color-cat-cluster: #f472b6;
   --color-cat-other: #2dd4bf;
 
+  --color-flag-fp: #fb923c;
+  --color-flag-fn: #22d3ee;
+  --color-flag: #facc15;
+  --color-flag-fp-soft: rgba(251, 146, 60, 0.18);
+  --color-flag-fn-soft: rgba(34, 211, 238, 0.18);
+  --color-flag-soft: rgba(250, 204, 21, 0.18);
+
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
@@ -216,6 +240,14 @@
   --color-cat-premature: #595959;
   --color-cat-cluster: #737373;
   --color-cat-other: #8c8c8c;
+
+  /* Every FP/FN guide is also labelled "FP"/"FN" in text. */
+  --color-flag-fp: #000000;
+  --color-flag-fn: #4d4d4d;
+  --color-flag: #737373;
+  --color-flag-fp-soft: rgba(0, 0, 0, 0.1);
+  --color-flag-fn-soft: rgba(0, 0, 0, 0.06);
+  --color-flag-soft: rgba(0, 0, 0, 0.06);
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);

@@ -5,9 +5,11 @@
   import Sidebar from './components/shell/Sidebar.svelte'
   import AboutDialog from './components/shell/AboutDialog.svelte'
   import Icon from './components/shared/Icon.svelte'
+  import FlagListImportDialog from './components/flags/FlagListImportDialog.svelte'
   import { themeState } from './lib/stores/theme.svelte'
-  import { autoOpenRequest, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
+  import { autoOpenRequest, fileRegistry, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
   import { recordRecentFile } from './lib/stores/recentFiles.svelte'
+  import { closeFlagImportDialog, flagImportDialog, getFlagProject } from './lib/stores/flagProjects.svelte'
 
   const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
   const MIN_SIDEBAR_WIDTH = 180
@@ -27,6 +29,11 @@
 
   let view: 'import' | 'review' = $state('import')
   let selectedFile: ReviewSelection | null = $state(null)
+  // What ReviewWorkspace is rendered from. Unlike `selectedFile` it is never
+  // cleared: a workspace that is unmounting can still have requests in
+  // flight that read its props, and a prop getter onto a now-null
+  // `selectedFile` would throw.
+  let shownFile: ReviewSelection | null = $state(null)
   let settingsOpen: boolean = $state(false)
   let aboutOpen: boolean = $state(false)
   let sidebarCollapsed: boolean = $state(false)
@@ -34,11 +41,19 @@
 
   function handleReview(row: ReviewSelection) {
     selectedFile = row
+    shownFile = row
     view = 'review'
     // Every way of opening a file lands here, so this is the one place that
-    // keeps its "last opened" time current.
-    recordRecentFile(row.path, fileNameOf(row.path))
+    // keeps its "last opened" time current. FP/FN project recordings stay out
+    // of Recent files — the project itself is the thing to reopen.
+    if (!row.projectId) recordRecentFile(row.path, fileNameOf(row.path))
   }
+
+  function projectOf(selection: ReviewSelection | null) {
+    return selection?.projectId ? getFlagProject(selection.projectId) : undefined
+  }
+
+  let selectedProject = $derived(projectOf(selectedFile))
 
   function handleFileRemoved(path: string) {
     if (selectedFile?.path === path) handleFilesCleared()
@@ -55,6 +70,14 @@
     selectedFile = null
     view = 'import'
   }
+
+  // The sidebar reports its own removals (above), but FP/FN reviews can also
+  // drop recordings from Home or the import dialog. Whatever the route, a
+  // file that is no longer in the session can't stay open.
+  $effect(() => {
+    const path = selectedFile?.path
+    if (path && !fileRegistry.some((row) => row.path === path)) handleFilesCleared()
+  })
 
   function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed
@@ -122,9 +145,16 @@
       <nav class="breadcrumb">
         <button type="button" class="breadcrumb-back" data-testid="back-to-import-button" onclick={handleBack}>
           <Icon name="chevron-left" size={16} />
-          Import
+          Home
         </button>
         <span class="breadcrumb-sep">/</span>
+        {#if selectedProject}
+          <span class="breadcrumb-project" data-testid="breadcrumb-project" title={selectedProject.csvPath}>
+            <Icon name="target" size={14} />
+            {selectedProject.name}
+          </span>
+          <span class="breadcrumb-sep">/</span>
+        {/if}
         <span class="breadcrumb-current" data-testid="breadcrumb-current">{fileNameOf(selectedFile.path)}</span>
       </nav>
     {/if}
@@ -144,7 +174,7 @@
   <main class="main-content">
     {#if view === 'import'}
       <ImportScreen />
-    {:else if view === 'review' && selectedFile}
+    {:else if view === 'review' && selectedFile && shownFile}
       <!-- Keyed on path: the sidebar is reachable (and its files clickable)
            from inside Review now, not just the Welcome screen, so switching
            directly from one open file to another no longer unmounts this
@@ -157,11 +187,11 @@
            `initialChannel`). Forcing a full remount on path change is the
            same "start clean" approach already used for `{#key
            activeChannel}` inside EcgGraph. -->
-      {#key selectedFile.path}
+      {#key shownFile.path}
         <ReviewWorkspace
-          path={selectedFile.path}
-          channels={selectedFile.channels}
-          defaultChannel={selectedFile.defaultChannel}
+          path={shownFile.path}
+          channels={shownFile.channels}
+          defaultChannel={shownFile.defaultChannel}
         />
       {/key}
     {/if}
@@ -173,5 +203,17 @@
 
   {#if aboutOpen}
     <AboutDialog onClose={() => (aboutOpen = false)} />
+  {/if}
+
+  {#if flagImportDialog.open}
+    <!-- Keyed so a different list or project always starts the dialog over:
+         it reads its props once, on mount. -->
+    {#key `${flagImportDialog.csvPath}|${flagImportDialog.projectId}`}
+      <FlagListImportDialog
+        csvPath={flagImportDialog.csvPath}
+        projectId={flagImportDialog.projectId}
+        onClose={closeFlagImportDialog}
+      />
+    {/key}
   {/if}
 </div>

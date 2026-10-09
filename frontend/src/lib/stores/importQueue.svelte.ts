@@ -40,7 +40,7 @@ const pendingDetection: FileRow[] = []
 let workerRunning = false
 let stopRequested = false
 
-async function importPaths(paths: string[], autoOpen: boolean = true): Promise<void> {
+async function importPaths(paths: string[], autoOpen: boolean = true, recordRecent: boolean = true): Promise<void> {
   if (paths.length === 0) return
 
   importQueue.error = ''
@@ -76,7 +76,7 @@ async function importPaths(paths: string[], autoOpen: boolean = true): Promise<v
     newRows.push(row)
 
     if (fileResult.status === 'ok') {
-      recordRecentFile(fileResult.path, fileResult.filename)
+      if (recordRecent) recordRecentFile(fileResult.path, fileResult.filename)
       if (!autoOpenCandidate && row.defaultChannel !== null) {
         autoOpenCandidate = row
       }
@@ -246,6 +246,26 @@ export async function openFiles(paths: string[]): Promise<void> {
       }
       return
     }
+  }
+}
+
+/**
+ * Loads an FP/FN review project's recordings into the session through the
+ * exact same import + auto-run detection path as Import Files, in the order
+ * given (so the recording opened first is detected first). Nothing is opened
+ * here — flagProjects.svelte.ts decides which recording to show — and the
+ * files are kept out of Recent files: a project can hold dozens of
+ * recordings and would otherwise push everything else off that list.
+ * Files already in this session are left as they are.
+ */
+export async function importForProject(paths: string[]): Promise<void> {
+  const missing = paths.filter((path) => !fileRegistry.some((row) => row.path === path))
+  if (missing.length === 0) return
+  importQueue.importing = true
+  try {
+    await importPaths(missing, false, false)
+  } finally {
+    importQueue.importing = false
   }
 }
 

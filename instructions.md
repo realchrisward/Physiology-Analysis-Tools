@@ -137,6 +137,13 @@ starts with an empty review history; the app just re-detects on first open.
 Deleting that file resets every file's saved review. Per-file, the in-app
 **Start fresh** button does the same thing for one recording.
 
+FP/FN reviews (imported false positive / negative lists, the animals chosen
+and the folders searched) and Recent files are kept in the Electron
+profile's localStorage, not in SQLite. A list is read once when it is
+imported, so moving the CSV afterwards is fine; the recordings it matched
+must stay where they were found (**Find recordings…** on Home searches
+again).
+
 Sample recordings for manual testing are in
 `src/physiology_analysis_tools/examples/` (`57 long.txt` and `9 long.txt`
 are the most useful — real traces with a decent number of beats).

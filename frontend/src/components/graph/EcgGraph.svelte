@@ -51,6 +51,52 @@
     return { start: end - width, end }
   }
 
+  // The view a jump to a flagged beat (FP/FN review) lands on. The model
+  // judged that beat from the one before it, itself and the one after it, so
+  // unlike a beat of interest the flag sits in the MIDDLE of the view, with
+  // this many beats across — from the recording's own typical RR interval,
+  // clamped the same way as `focusWidthSeconds`, and a fixed width when there
+  // is no estimate yet (it usually isn't known when the graph first opens).
+  export const FLAG_FOCUS_BEATS = 7
+  export const FLAG_FOCUS_MIN_SECONDS = 0.5
+  export const FLAG_FOCUS_MAX_SECONDS = 15
+  export const FLAG_FOCUS_FALLBACK_SECONDS = 2
+  // A flag's timestamp is one of the detected beats' timestamps, equal to the
+  // millisecond; this is how close counts as "the same beat".
+  export const FLAG_BEAT_TOLERANCE_SECONDS = 0.002
+
+  export function flagFocusWidth(typicalRr: number | null | undefined): number {
+    if (typicalRr == null || !Number.isFinite(typicalRr) || typicalRr <= 0) return FLAG_FOCUS_FALLBACK_SECONDS
+    return Math.min(FLAG_FOCUS_MAX_SECONDS, Math.max(FLAG_FOCUS_MIN_SECONDS, FLAG_FOCUS_BEATS * typicalRr))
+  }
+
+  // The [start, end] that centres `ts`. `maxWidth` keeps a tighter zoom the
+  // technician already chose; `extent` (the file's own range) slides the view
+  // back inside the recording for a flag near either end, so the same width
+  // is shown rather than a half-empty one.
+  export function flagFocusRange(
+    ts: number,
+    typicalRr: number | null | undefined,
+    extent?: { start: number; end: number } | null,
+    maxWidth?: number | null,
+  ): { start: number; end: number } {
+    let width = flagFocusWidth(typicalRr)
+    if (maxWidth != null && Number.isFinite(maxWidth) && maxWidth > 0) width = Math.min(width, maxWidth)
+    let start = ts - width / 2
+    let end = ts + width / 2
+    if (extent && extent.end > extent.start) {
+      if (width >= extent.end - extent.start) return { start: extent.start, end: extent.end }
+      if (start < extent.start) {
+        start = extent.start
+        end = start + width
+      } else if (end > extent.end) {
+        end = extent.end
+        start = end - width
+      }
+    }
+    return { start, end }
+  }
+
   export interface BeatSeriesData {
     xs: number[]
     channelY: (number | null)[]
@@ -164,16 +210,18 @@
 </script>
 
 <script lang="ts">
-  import { onMount, type Snippet } from 'svelte'
+  import { onMount, untrack, type Snippet } from 'svelte'
   import uPlot from 'uplot'
   import 'uplot/dist/uPlot.min.css'
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
   import { addBadData, addBeat, deleteBadData, snapBeat, updateBadData } from '../../lib/api/persistence'
   import { themeState } from '../../lib/stores/theme.svelte'
   import { graphPrefs } from '../../lib/stores/graphPrefs.svelte'
+  import type { FlaggedTime } from '../../lib/stores/flagProjects.svelte'
+  import { FLAG_KIND_COLOR_VAR, FLAG_KIND_LABEL, FLAG_KIND_SOFT_VAR, FLAG_KIND_TITLE, formatFlagTime, formatPrediction } from '../../lib/flags'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
-  import type { BadDataMark } from '../../lib/api/types'
+  import type { BadDataMark, FlagKind } from '../../lib/api/types'
   import {
     CATEGORY_COLOR_VAR,
     DISPLAY_CATEGORIES,
@@ -194,6 +242,9 @@
     typicalRr = null,
     focusOverlay,
     onFocusModeChange,
+    flaggedTimes = [],
+    focusRequest = null,
+    onFlagNavigate,
   }: {
     path: string
     channel: string
@@ -244,6 +295,24 @@
     // Tells the parent focus mode toggled, so it can render its beat
     // controls in exactly one place (their C/R shortcuts are document-level).
     onFocusModeChange?: (on: boolean) => void
+    // FP/FN review: the timestamps a model flagged in THIS recording
+    // (`flagsForPath`, ascending by `ts`), each one a detected beat's own
+    // timestamp. Every one is highlighted on the trace (see `flagPlugin`) and
+    // the "Model flags" navigation steps through them. Empty — the default,
+    // and every ordinary recording — means none of that is shown. A live
+    // prop: a project can be opened or closed while the graph stays mounted.
+    flaggedTimes?: FlaggedTime[]
+    // Asks the graph to open on / move to a flag: `ts` is the flag, `seq`
+    // distinguishes "the technician asked again" from "nothing new". The
+    // graph acts only on a `seq` it has not handled yet — at mount (it opens
+    // zoomed on the flag instead of the start of the file) or later (a click
+    // on another flag in the sidebar) — never on a `ts` change alone, since
+    // the graph's own navigation reports its position back through
+    // `onFlagNavigate` and must not be answered by moving again.
+    focusRequest?: { ts: number; seq: number } | null
+    // The graph's own flag navigation (the buttons, `[` / `]`) landed on the
+    // flag at `ts`; the parent records it so the sidebar can highlight it.
+    onFlagNavigate?: (ts: number) => void
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -738,6 +807,20 @@
   // so that clicking a beat directly on the graph doesn't scramble the
   // navigation's place in the list.
   let beatOfInterestIndex: number = $state(-1)
+  // The flag (`ts`) the graph was last focused on — by the "Model flags"
+  // navigation, or by a `focusRequest` — or null before any. Kept as a `ts`
+  // rather than an index into `flaggedTimes` so it stays right if that list
+  // changes underneath it (a project closed, another opened). Drawn heavier
+  // than the other flags, and what the navigation steps from.
+  let currentFlagTs: number | null = $state(null)
+  let flagIndex: number = $derived.by(() => {
+    const ts = currentFlagTs
+    return ts === null ? -1 : flaggedTimes.findIndex((flag) => isSameFlagTime(flag.ts, ts))
+  })
+  let currentFlag: FlaggedTime | null = $derived(flagIndex >= 0 ? flaggedTimes[flagIndex] : null)
+  // `seq` of the last `focusRequest` acted on, so each one is honoured once.
+  // Plain, not `$state`: only read from the mount path and the effect below.
+  let handledFocusSeq: number | null = null
   // `chart` itself is a plain (non-reactive) binding, so markup that only
   // read it would never update once the async mount finally created it.
   // This is the reactive "the chart exists now" signal.
@@ -1345,6 +1428,208 @@
     chart?.redraw()
   })
 
+  // ---- FP/FN review flags ------------------------------------------------
+  // `flaggedTimes` are drawn on the chart canvas itself (like the bad-data
+  // shading and the pending beat), so they stay aligned with the trace at any
+  // pan/zoom and cost no DOM. Per flag: a soft band and a full-height line in
+  // the flag's kind color, plus a small tag. The tag hangs just BELOW the
+  // beat-marker lane rather than at the very top: the lane is one continuous
+  // row of ticks that must stay readable, markers grow when zoomed in, and
+  // the headroom under the lane (see MARKER_LANE_HEADROOM) is the one band
+  // the trace never reaches — so a tag there covers neither markers nor
+  // waveform. The CURRENT flag (see `currentFlagTs`) is drawn heavier, with a
+  // solid tag.
+  const FLAG_BAND_PX = 6
+  const FLAG_BAND_CURRENT_PX = 8
+  const FLAG_LINE_PX = 1.5
+  const FLAG_LINE_CURRENT_PX = 2.5
+  const FLAG_TAG_FONT_PX = 10
+  const FLAG_TAG_HEIGHT_PX = 13
+  const FLAG_TAG_PAD_X_PX = 4
+  const FLAG_TAG_GAP_PX = 4
+
+  // Fallbacks for when the custom properties can't be resolved (jsdom), the
+  // light-theme values from tokens.css.
+  const FLAG_FALLBACK_COLOR: Record<FlagKind, string> = { fp: '#ea580c', fn: '#0891b2', flag: '#a16207' }
+  const FLAG_FALLBACK_SOFT: Record<FlagKind, string> = {
+    fp: 'rgba(234, 88, 12, 0.14)',
+    fn: 'rgba(8, 145, 178, 0.14)',
+    flag: 'rgba(161, 98, 7, 0.14)',
+  }
+
+  function isSameFlagTime(a: number, b: number): boolean {
+    return Math.abs(a - b) < FLAG_BEAT_TOLERANCE_SECONDS
+  }
+
+  function isCurrentFlag(flag: FlaggedTime): boolean {
+    return currentFlagTs !== null && isSameFlagTime(flag.ts, currentFlagTs)
+  }
+
+  function flagColor(kind: FlagKind): string {
+    return cssVar(FLAG_KIND_COLOR_VAR[kind], FLAG_FALLBACK_COLOR[kind])
+  }
+
+  function flagSoftColor(kind: FlagKind): string {
+    return cssVar(FLAG_KIND_SOFT_VAR[kind], FLAG_FALLBACK_SOFT[kind])
+  }
+
+  // Text color for a solid tag: the flag colors run from near-black (black &
+  // white theme) to bright yellow (dark theme), so neither white nor dark text
+  // works on all of them.
+  function readableTextOn(color: string): string {
+    const rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(hexToRgba(color, 1))
+    if (!rgb) return '#ffffff'
+    const luma = (0.299 * Number(rgb[1]) + 0.587 * Number(rgb[2]) + 0.114 * Number(rgb[3])) / 255
+    return luma > 0.6 ? '#111827' : '#ffffff'
+  }
+
+  // The flags inside the visible x range (plus `marginPx` of slack for line
+  // width), left to right, with their x position in canvas pixels.
+  function visibleFlags(u: uPlot, marginPx: number): { flag: FlaggedTime; x: number }[] {
+    const visible: { flag: FlaggedTime; x: number }[] = []
+    const { min, max } = u.scales.x
+    if (min == null || max == null || !(max > min)) return visible
+    const left = u.bbox.left - marginPx
+    const right = u.bbox.left + u.bbox.width + marginPx
+    for (const flag of flaggedTimes) {
+      if (flag.ts < min || flag.ts > max) continue
+      const x = u.valToPos(flag.ts, 'x', true)
+      if (Number.isFinite(x) && x >= left && x <= right) visible.push({ flag, x })
+    }
+    return visible
+  }
+
+  function flagPlugin(): uPlot.Plugin {
+    return {
+      hooks: {
+        // Behind the waveform, like the bad-data shading, so the band never
+        // tints the trace being judged.
+        drawClear: (u) => {
+          if (flaggedTimes.length === 0) return
+          const { ctx } = u
+          // Decoration only — never take interaction down with it.
+          try {
+            const dpr = uPlot.pxRatio || 1
+            ctx.save()
+            try {
+              ctx.beginPath()
+              ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height)
+              ctx.clip()
+              for (const { flag, x } of visibleFlags(u, 0)) {
+                const half = ((isCurrentFlag(flag) ? FLAG_BAND_CURRENT_PX : FLAG_BAND_PX) * dpr) / 2
+                ctx.fillStyle = flagSoftColor(flag.kind)
+                ctx.fillRect(x - half, u.bbox.top, half * 2, u.bbox.height)
+              }
+            } finally {
+              ctx.restore()
+            }
+          } catch {
+            // ignore — see above
+          }
+        },
+        // On top of the series: the line and the tag.
+        draw: (u) => {
+          if (flaggedTimes.length === 0) return
+          const { ctx } = u
+          try {
+            const dpr = uPlot.pxRatio || 1
+            const visible = visibleFlags(u, 2 * dpr)
+            if (visible.length === 0) return
+            ctx.save()
+            try {
+              const { left, top, width, height } = u.bbox
+              ctx.beginPath()
+              ctx.rect(left, top, width, height)
+              ctx.clip()
+
+              ctx.lineCap = 'butt'
+              for (const { flag, x } of visible) {
+                ctx.strokeStyle = flagColor(flag.kind)
+                ctx.lineWidth = (isCurrentFlag(flag) ? FLAG_LINE_CURRENT_PX : FLAG_LINE_PX) * dpr
+                ctx.beginPath()
+                ctx.moveTo(x, top)
+                ctx.lineTo(x, top + height)
+                ctx.stroke()
+              }
+
+              // Tags sit under the marker lane (see above): the lane's own
+              // y, plus a reviewed marker's radius at this zoom, plus a gap.
+              const laneY = u.valToPos(MARKER_LANE_Y, MARKER_LANE_SCALE, true)
+              const tagH = FLAG_TAG_HEIGHT_PX * dpr
+              const tagTop = laneY + (9 * visibleMarkerScale(u) * dpr) / 2 + 3 * dpr
+              const padX = FLAG_TAG_PAD_X_PX * dpr
+              const gap = FLAG_TAG_GAP_PX * dpr
+              const right = left + width
+              const surface = cssVar('--color-surface', '#ffffff')
+              ctx.font = `600 ${FLAG_TAG_FONT_PX * dpr}px ${cssVar('--font-sans', 'system-ui, sans-serif')}`
+              ctx.textAlign = 'left'
+              ctx.textBaseline = 'middle'
+
+              // The current flag's tag is drawn last so it is never hidden
+              // by a neighbour's.
+              for (const currentPass of [false, true]) {
+                visible.forEach(({ flag, x }, i) => {
+                  const current = isCurrentFlag(flag)
+                  if (current !== currentPass) return
+                  const color = flagColor(flag.kind)
+                  const kindLabel = FLAG_KIND_LABEL[flag.kind]
+                  const score = formatPrediction(flag.prediction)
+                  // A tag has to end before the next flag's line (or the plot
+                  // edge); the current one is always drawn, over its neighbours.
+                  const limit = current || i + 1 >= visible.length ? right : visible[i + 1].x - gap
+                  const tagLeft = x + (current ? 3 : 2) * dpr
+                  let text = score ? `${kindLabel} ${score}` : kindLabel
+                  let tagW = ctx.measureText(text).width + padX * 2
+                  if (tagLeft + tagW > limit) {
+                    text = kindLabel
+                    tagW = ctx.measureText(text).width + padX * 2
+                  }
+                  let tagX = tagLeft
+                  if (tagLeft + tagW > limit) {
+                    // Not even the short form fits to the right: only the
+                    // current flag is worth squeezing in, to the line's left.
+                    if (!current) return
+                    tagX = x - 3 * dpr - tagW
+                  }
+
+                  ctx.beginPath()
+                  if (typeof ctx.roundRect === 'function') ctx.roundRect(tagX, tagTop, tagW, tagH, 2 * dpr)
+                  else ctx.rect(tagX, tagTop, tagW, tagH)
+                  if (current) {
+                    ctx.fillStyle = color
+                    ctx.fill()
+                  } else {
+                    ctx.globalAlpha = 0.92
+                    ctx.fillStyle = surface
+                    ctx.fill()
+                    ctx.globalAlpha = 1
+                  }
+                  ctx.lineWidth = dpr
+                  ctx.strokeStyle = color
+                  ctx.stroke()
+                  ctx.fillStyle = current ? readableTextOn(color) : color
+                  ctx.fillText(text, tagX + padX, tagTop + tagH / 2 + dpr * 0.5)
+                })
+              }
+            } finally {
+              ctx.restore()
+            }
+          } catch {
+            // ignore — see above
+          }
+        },
+      },
+    }
+  }
+
+  // The flag drawing reads `flaggedTimes` and `currentFlagTs` at draw time, so
+  // a change to either has to ask for a repaint explicitly.
+  $effect(() => {
+    flaggedTimes
+    currentFlagTs
+    chart?.redraw()
+  })
+
   // While bad-data mode is active, a left-drag on the plot selects a range
   // to mark instead of panning — the two behaviors are mutually exclusive
   // per drag, gated by `badDataMode` at drag-start. Uses the same
@@ -1735,6 +2020,78 @@
     void goToBeatOfInterest(beatsOfInterest.length - 1)
   }
 
+  // The flagged beat's full record, once the graph holds it — beat detection
+  // may still be queued (nothing to find), or the beat may be outside the
+  // loaded window until the move below has fetched it.
+  function findFlaggedBeat(ts: number): WindowBeat | undefined {
+    return lastBeats.find((beat) => isSameFlagTime(beat.ts, ts))
+  }
+
+  // Brings the flag at `ts` into view — centred, with the beats either side
+  // (see `flagFocusRange`) — makes it the current flag, and selects its beat
+  // so the detail panel and the confirm/reject controls act on it, the same
+  // way `goToBeatOfInterest` does. `keepZoom` holds a tighter zoom the
+  // technician already chose, like `focusOnTime`; the opening view of a
+  // recording ignores the zoom it happens to be at.
+  async function focusOnFlag(ts: number, keepZoom: boolean): Promise<void> {
+    if (!chart) return
+    currentFlagTs = ts
+
+    // Select immediately when the beat is already loaded, so the detail
+    // panel responds without waiting on the network.
+    const loaded = findFlaggedBeat(ts)
+    if (loaded) onBeatSelect?.(loaded)
+
+    const { min, max } = chart.scales.x
+    const maxWidth = keepZoom && min != null && max != null ? max - min : null
+    const { start, end } = flagFocusRange(ts, typicalRr, fullExtent, maxWidth)
+    const pending = setVisibleRange(start, end)
+
+    // Outside the loaded buffer (a long recording), the beat only arrives
+    // with this fetch. If detection hasn't produced beats yet there is still
+    // nothing to select afterwards, and the highlight on the trace is enough.
+    if (!loaded) {
+      await pending
+      const fetched = findFlaggedBeat(ts)
+      // Still the flag the technician asked for? A newer jump may have
+      // superseded this one while the fetch was in flight.
+      if (fetched && currentFlagTs !== null && isSameFlagTime(currentFlagTs, ts)) onBeatSelect?.(fetched)
+    }
+  }
+
+  function goToFlag(index: number) {
+    if (!chart || flaggedTimes.length === 0) return
+    const clamped = Math.max(0, Math.min(flaggedTimes.length - 1, index))
+    const ts = flaggedTimes[clamped].ts
+    // Reported straight away (not after the fetch) so the sidebar's
+    // highlight follows the click.
+    onFlagNavigate?.(ts)
+    void focusOnFlag(ts, true)
+  }
+
+  function handlePrevFlag() {
+    // From "no current flag yet", stepping back lands on the last one.
+    goToFlag(flagIndex <= 0 ? flaggedTimes.length - 1 : flagIndex - 1)
+  }
+
+  function handleNextFlag() {
+    goToFlag(flagIndex + 1 >= flaggedTimes.length ? 0 : flagIndex + 1)
+  }
+
+  // A request that arrives while the graph is already showing the recording
+  // (another flag clicked in the sidebar). One that arrives before the chart
+  // exists is picked up by `buildChart` instead; only a `seq` not yet handled
+  // counts, so `onFlagNavigate`'s own report (same `seq`, new `ts`) never
+  // moves the graph.
+  $effect(() => {
+    const request = focusRequest
+    if (!request || !chartReady) return
+    if (request.seq === handledFocusSeq) return
+    handledFocusSeq = request.seq
+    const ts = request.ts
+    untrack(() => void focusOnFlag(ts, true))
+  })
+
   // Time navigation across the file at the current zoom — the old app's
   // start-of-file / previous-window / next-window / end-of-file controls.
   function handleJumpToStart() {
@@ -2034,7 +2391,7 @@
             selectionHighlightSeries(),
             rejectedOverlaySeries(),
           ],
-          plugins: [panZoomPlugin(), badDataPlugin(), overlayAnchorPlugin(), pendingBeatPlugin()],
+          plugins: [panZoomPlugin(), badDataPlugin(), flagPlugin(), overlayAnchorPlugin(), pendingBeatPlugin()],
         },
         toChartData(merged),
         containerEl,
@@ -2046,6 +2403,17 @@
       sliderHalfWidth = (fullExtent.end - fullExtent.start) / 2
       applyFilters()
       chartReady = true
+
+      // FP/FN review: a recording opened for a flag (the sidebar, or the
+      // Home screen) opens zoomed on it rather than on the start of the file.
+      // Recorded as handled so the `focusRequest` effect below doesn't repeat
+      // it now that the chart exists.
+      const request = focusRequest
+      if (request) {
+        handledFocusSeq = request.seq
+        void focusOnFlag(request.ts, false)
+        return
+      }
 
       // Opens on the first few seconds of the file (Settings → Appearance)
       // rather than the whole recording, and never jumps to a beat of
@@ -2164,12 +2532,38 @@
         return
       }
 
-      if (shouldIgnoreShortcut(event)) return
+      // `[` and `]` are typed with AltGr (Windows, reported as Ctrl+Alt) or
+      // Option (macOS) on layouts such as German, which the shared guard
+      // would treat as a modifier combination and drop. For those two keys
+      // the produced character is what matters, so with Alt held the guard is
+      // asked about the keystroke without modifiers (it still checks for a
+      // text field or an open dialog). Ctrl+[ and Cmd+[ stay ignored.
+      const isBracket = event.key === '[' || event.key === ']'
+      const typedWithAlt = isBracket && event.altKey && !event.metaKey
+      if (
+        shouldIgnoreShortcut(
+          typedWithAlt
+            ? ({ metaKey: false, ctrlKey: false, altKey: false, target: event.target } as unknown as KeyboardEvent)
+            : event,
+        )
+      ) {
+        return
+      }
 
       // Walking hundreds of flagged beats is the core review loop, so it
       // shouldn't require moving the mouse between the graph and the panel
       // for every single one.
       switch (event.key) {
+        case ']':
+          if (flaggedTimes.length === 0) return
+          event.preventDefault()
+          handleNextFlag()
+          break
+        case '[':
+          if (flaggedTimes.length === 0) return
+          event.preventDefault()
+          handlePrevFlag()
+          break
         case 'n':
         case 'N':
         case 'ArrowRight':
@@ -2404,6 +2798,54 @@
       </button>
     </div>
 
+    <!-- FP/FN review: only for a recording some project flagged beats in.
+         Tinted with the current flag's kind color so it reads as a separate
+         tool from the beat-of-interest walk next to it. -->
+    {#if flaggedTimes.length > 0}
+      <div
+        class="beat-nav-controls flag-nav"
+        data-testid="flag-nav"
+        role="group"
+        aria-label="Model flags"
+        style={`--flag-nav-color: var(${FLAG_KIND_COLOR_VAR[currentFlag?.kind ?? 'flag']}); --flag-nav-soft: var(${FLAG_KIND_SOFT_VAR[currentFlag?.kind ?? 'flag']})`}
+      >
+        <span class="flag-nav-label" title="Beats the model got wrong, from the imported FP/FN list">
+          <Icon name="target" size={14} />
+          Model flags
+        </span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="flag-prev-button"
+          title="Previous model flag ([)"
+          onclick={handlePrevFlag}
+        >
+          <Icon name="chevron-left" size={14} />
+        </button>
+        <span
+          class="flag-nav-counter"
+          data-testid="flag-nav-counter"
+          title={currentFlag ? FLAG_KIND_TITLE[currentFlag.kind] : undefined}
+        >
+          {#if currentFlag}
+            {@const score = formatPrediction(currentFlag.prediction)}
+            {FLAG_KIND_LABEL[currentFlag.kind]} {flagIndex + 1} of {flaggedTimes.length} · {formatFlagTime(currentFlag.ts)}{score ? ` · ${score}` : ''}
+          {:else}
+            {flaggedTimes.length} flagged {flaggedTimes.length === 1 ? 'beat' : 'beats'}
+          {/if}
+        </span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="flag-next-button"
+          title="Next model flag (])"
+          onclick={handleNextFlag}
+        >
+          <Icon name="chevron-right" size={14} />
+        </button>
+      </div>
+    {/if}
+
     <div class="beat-nav-controls">
       <button
         type="button"
@@ -2448,12 +2890,19 @@
          screens. It stays even with no beats of interest (only the hints
          depend on those). -->
     <div class="nav-hint-row">
-      {#if beatsOfInterest.length > 0}
+      {#if beatsOfInterest.length > 0 || flaggedTimes.length > 0}
         <ul class="nav-hint" data-testid="beat-nav-hint" aria-label="Keyboard shortcuts">
-          <li><kbd>N</kbd> Next</li>
-          <li><kbd>P</kbd> Previous</li>
-          <li><kbd>C</kbd> Confirm arrhythmia</li>
-          <li><kbd>R</kbd> Reject</li>
+          {#if beatsOfInterest.length > 0}
+            <li><kbd>N</kbd> Next</li>
+            <li><kbd>P</kbd> Previous</li>
+          {/if}
+          {#if flaggedTimes.length > 0}
+            <li><kbd>[</kbd> <kbd>]</kbd> Model flags</li>
+          {/if}
+          {#if beatsOfInterest.length > 0}
+            <li><kbd>C</kbd> Confirm arrhythmia</li>
+            <li><kbd>R</kbd> Reject</li>
+          {/if}
         </ul>
       {/if}
       <div class="ecg-legend-review-filter" role="radiogroup" aria-label="Filter by review status">
@@ -2756,6 +3205,9 @@
         <li><kbd>C</kbd> Confirm</li>
         <li><kbd>R</kbd> Reject</li>
         <li><kbd>N</kbd>/<kbd>P</kbd> Next / Previous</li>
+        {#if flaggedTimes.length > 0}
+          <li><kbd>[</kbd>/<kbd>]</kbd> Model flags</li>
+        {/if}
       </ul>
     </div>
   {/if}
@@ -3198,6 +3650,38 @@
   .beat-nav-counter {
     min-width: 12rem;
     text-align: center;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* "Model flags": its own boxed group in the flag kind's color (set inline
+     as --flag-nav-color/-soft from the current flag), so it is not mistaken
+     for the beat-of-interest controls beside it. */
+  .flag-nav {
+    padding: 2px var(--space-1);
+    border: 1px solid var(--flag-nav-color, var(--color-flag));
+    border-radius: var(--radius-sm, 4px);
+    background: var(--flag-nav-soft, var(--color-flag-soft));
+  }
+
+  .flag-nav-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-1);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    color: var(--flag-nav-color, var(--color-flag));
+  }
+
+  .flag-nav-counter {
+    min-width: 15rem;
+    text-align: center;
+    white-space: nowrap;
     font-size: var(--font-size-sm);
     font-weight: 600;
     font-variant-numeric: tabular-nums;

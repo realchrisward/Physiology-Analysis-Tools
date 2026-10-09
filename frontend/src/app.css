@@ -113,6 +113,17 @@ button:disabled {
   color: var(--color-border);
 }
 
+.breadcrumb-project {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .breadcrumb-current {
   overflow: hidden;
   text-overflow: ellipsis;

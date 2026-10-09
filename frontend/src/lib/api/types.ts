@@ -263,3 +263,47 @@ export interface ReportResult {
   output_path: string | null
   error: string | null
 }
+
+// FP/FN lists: a model's false positives / negatives, one row per flagged
+// beat, keyed by animal ID (= a recording's file name without extension)
+// and the beat's timestamp in seconds. See backend/flag_lists.py.
+//   'fp'   - the model called it an arrhythmia, the annotators did not.
+//   'fn'   - the annotators called it an arrhythmia, the model did not.
+//   'flag' - the list didn't say which (no ground_truth/prediction/kind column).
+export type FlagKind = 'fp' | 'fn' | 'flag'
+
+export interface FlagListRow {
+  animal_id: string
+  ts: number
+  kind: FlagKind
+  prediction: number | null
+  ground_truth: number | null
+}
+
+export interface FlagListParseResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  filename?: string
+  rows?: FlagListRow[]
+  total_rows?: number
+  // Rows dropped because their animal ID or timestamp was blank/unreadable.
+  skipped_rows?: number
+}
+
+export interface FlagListMatch {
+  animal_id: string
+  // Every recording whose file name (minus extension) equals the animal ID,
+  // case-insensitively, .adicht first. Usually exactly one.
+  paths: string[]
+}
+
+export interface FlagListMatchResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  matches?: FlagListMatch[]
+  // Requested animal IDs with no matching recording in any folder.
+  missing?: string[]
+  // Requested folders that don't exist / aren't readable.
+  missing_folders?: string[]
+  scanned_files?: number
+}

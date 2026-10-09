@@ -32,6 +32,10 @@ export interface ReviewSelection {
   path: string
   channels: string[]
   defaultChannel: string
+  // Set when the file was opened from an FP/FN review project (see
+  // flagProjects.svelte.ts) — the breadcrumb shows the project, and the file
+  // is not added to Recent files.
+  projectId?: string | null
 }
 
 // Set by importQueue.svelte.ts whenever an explicit, user-initiated import

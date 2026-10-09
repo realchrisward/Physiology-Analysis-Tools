@@ -9,6 +9,7 @@ from backend.beats import router as beats_router
 from backend.beats_window import router as beats_window_router
 from backend.db_routes import router as db_router
 from backend.files import router as files_router
+from backend.flag_lists import router as flag_lists_router
 from backend.models import FileImportResult
 from backend.settings import router as settings_router
 from backend.windowing import router as windowing_router
@@ -57,6 +58,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.include_router(windowing_router)
     app.include_router(db_router)
     app.include_router(beat_editing_router)
+    app.include_router(flag_lists_router)
 
     return app
 

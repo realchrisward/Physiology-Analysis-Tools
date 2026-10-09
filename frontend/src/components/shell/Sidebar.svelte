@@ -16,8 +16,17 @@
     importQueue,
     openRecentFile,
   } from '../../lib/stores/importQueue.svelte'
+  import {
+    closeFlagProject,
+    openFlagProjects,
+    openProjectPaths,
+    startFlagListImport,
+  } from '../../lib/stores/flagProjects.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
+  import SidebarProjectTree from './SidebarProjectTree.svelte'
+  import SidebarRowStatus from './SidebarRowStatus.svelte'
+  import SidebarStatusDot from './SidebarStatusDot.svelte'
 
   let {
     collapsed = false,
@@ -96,7 +105,21 @@
     onReview?.({ path: row.path, channels: row.channels, defaultChannel: row.defaultChannel })
   }
 
+  // FP/FN review projects open this session. Their recordings are ordinary
+  // registry rows, but they are listed inside their project's tree, so the
+  // plain "Files" list leaves them out.
+  let projects = $derived(openFlagProjects())
+  let projectPaths = $derived(openProjectPaths())
+  let fileRows = $derived(fileRegistry.filter((row) => !projectPaths.has(row.path)))
+  let hasAnything = $derived(fileRegistry.length > 0 || projects.length > 0)
+  // The "Files" label heads the list unless only projects are open, in which
+  // case "FP/FN reviews" takes the top spot (and carries the Clear button).
+  let filesFirst = $derived(fileRows.length > 0 || projects.length === 0)
+
   function handleClearFiles() {
+    // Clear means everything: closing the projects also takes their
+    // recordings out of the registry; the rest goes with the registry itself.
+    for (const project of [...projects]) closeFlagProject(project.id)
     clearFileRegistry()
     onFilesCleared?.()
   }
@@ -161,6 +184,18 @@
       <Icon name="folder" size={16} />
       {#if !collapsed}<span>Import Folder</span>{/if}
     </button>
+    <button
+      type="button"
+      class="btn btn-sm sidebar-import-btn"
+      data-testid="sidebar-import-flag-list-button"
+      onclick={() => startFlagListImport()}
+      disabled={importQueue.importing}
+      title="Import FP/FN list"
+      aria-label="Import FP/FN list"
+    >
+      <Icon name="target" size={16} />
+      {#if !collapsed}<span>FP/FN list</span>{/if}
+    </button>
   </div>
 
   {#if importQueue.detecting && !collapsed}
@@ -172,13 +207,13 @@
 
   {#if !collapsed}
     <div class="sidebar-list-header">
-      <h3 class="sidebar-list-label">Files</h3>
-      {#if fileRegistry.length > 0}
+      <h3 class="sidebar-list-label">{filesFirst ? 'Files' : 'FP/FN reviews'}</h3>
+      {#if hasAnything}
         <button
           type="button"
           class="btn btn-sm sidebar-clear-button"
           data-testid="sidebar-clear-files-button"
-          title="Clear the file list (does not delete anything or discard saved review work)"
+          title="Clear the file list and close FP/FN reviews (does not delete anything or discard saved review work)"
           disabled={importQueue.importing || importQueue.detecting}
           onclick={handleClearFiles}
         >
@@ -188,7 +223,7 @@
     </div>
   {/if}
   <div class="sidebar-list" data-testid="sidebar-file-list">
-    {#each fileRegistry as row (row.path)}
+    {#each fileRows as row (row.path)}
       <!-- The whole row opens the file: a click anywhere on it, or Enter/Space
            when focused. The X inside it is its own button. -->
       <div
@@ -203,29 +238,11 @@
         onclick={() => handleReview(row)}
         onkeydown={(event) => handleRowKeydown(event, row)}
       >
-        <span class="sidebar-row-dot" data-status={row.status}></span>
+        <SidebarStatusDot status={row.status} />
         {#if !collapsed}
           <span class="sidebar-row-body">
             <span class="sidebar-row-name">{row.filename}</span>
-            {#if row.status === 'ready'}
-              <span class="sidebar-row-status text-muted">ready</span>
-            {:else if row.status === 'queued'}
-              <span class="sidebar-row-status text-muted">queued for detection…</span>
-            {:else if row.status === 'detecting'}
-              <span class="sidebar-row-status text-muted"
-                ><span class="spinner" aria-hidden="true"></span> detecting… <span data-testid="eta-badge"
-                  >{formatEta(row.size)}</span
-                ></span
-              >
-            {:else if row.status === 'detected'}
-              <span class="sidebar-row-status text-muted"
-                >{row.beatCount} beats detected{row.meanHr !== null ? `, mean HR ${row.meanHr}` : ''}</span
-              >
-            {:else if row.status === 'detection-error'}
-              <span class="sidebar-row-status text-danger">detection failed: {row.error}</span>
-            {:else}
-              <span class="sidebar-row-status text-danger">{row.error}</span>
-            {/if}
+            <SidebarRowStatus {row} />
             {#if openedLabel(row.path)}
               <span class="sidebar-row-opened text-muted" data-testid="file-row-opened">{openedLabel(row.path)}</span>
             {/if}
@@ -243,7 +260,13 @@
         {/if}
       </div>
     {/each}
-    {#if fileRegistry.length === 0 && !collapsed}
+    {#if projects.length > 0}
+      {#if filesFirst && !collapsed}
+        <h3 class="sidebar-list-label sidebar-group-label">FP/FN reviews</h3>
+      {/if}
+      <SidebarProjectTree {projects} {collapsed} {activePath} {onFileRemoved} />
+    {/if}
+    {#if !hasAnything && !collapsed}
       <p class="sidebar-empty text-muted">No files imported yet</p>
     {/if}
   </div>
@@ -398,6 +421,11 @@
     color: var(--color-text-muted);
   }
 
+  /* The "FP/FN reviews" label inside the scrolling list, under the files. */
+  .sidebar-group-label {
+    padding: var(--space-2) var(--space-1) 0;
+  }
+
   .sidebar-clear-button {
     margin-top: var(--space-2);
     font-size: 0.7rem;
@@ -447,63 +475,6 @@
     padding: var(--space-2) 0;
   }
 
-  .sidebar-row-dot {
-    flex-shrink: 0;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
-  }
-
-  .sidebar-row-dot[data-status='ready'] {
-    background: var(--color-text-muted);
-  }
-
-  .sidebar-row-dot[data-status='queued'] {
-    background: var(--color-warning);
-  }
-
-  .sidebar-row-dot[data-status='detecting'] {
-    background: var(--color-accent);
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-
-  .spinner {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border: 2px solid var(--color-border);
-    border-top-color: var(--color-accent);
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .sidebar-row-dot[data-status='detected'] {
-    background: var(--color-success);
-  }
-
-  .sidebar-row-dot[data-status='detection-error'],
-  .sidebar-row-dot[data-status='error'] {
-    background: var(--color-danger);
-  }
-
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
-  }
-
   .sidebar-row-body {
     flex: 1;
     min-width: 0;
@@ -516,13 +487,6 @@
     font-size: var(--font-size-sm);
     font-weight: 500;
     color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sidebar-row-status {
-    font-size: 0.75rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

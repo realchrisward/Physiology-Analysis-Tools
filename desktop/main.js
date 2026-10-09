@@ -91,6 +91,25 @@ app.whenReady().then(async () => {
       if (result.canceled) return []
       return findSupportedFiles(result.filePaths[0])
     })
+    // The FP/FN list import: one CSV of animal IDs + timestamps.
+    ipcMain.handle('pick-flag-list', async () => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'FP/FN lists', extensions: ['csv', 'tsv', 'txt'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      })
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    })
+    // A folder to search for recordings by name. Returns the folder itself,
+    // not its files (unlike pick-folder) - the backend does the matching.
+    ipcMain.handle('pick-directory', async () => {
+      const result = await dialog.showOpenDialog({
+        properties: ['openDirectory'],
+      })
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    })
     ipcMain.handle('pick-report-save-path', async (_event, defaultFileName) => {
       const result = await dialog.showSaveDialog({
         defaultPath: defaultFileName || 'report.xlsx',

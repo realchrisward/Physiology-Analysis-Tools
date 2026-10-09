@@ -335,3 +335,47 @@ class ReportResult(BaseModel):
     status: str
     output_path: str | None = None
     error: str | None = None
+
+
+class FlagListParseRequest(BaseModel):
+    path: str
+
+
+class FlagListRow(BaseModel):
+    # A recording's file name without extension, always a string (leading
+    # zeros preserved).
+    animal_id: str
+    ts: float
+    # "fp" | "fn" | "flag" ("flag" = the list didn't say which).
+    kind: str
+    prediction: float | None = None
+    ground_truth: int | None = None
+
+
+class FlagListParseResult(BaseModel):
+    status: str
+    error: str | None = None
+    filename: str | None = None
+    rows: list[FlagListRow] = []
+    total_rows: int = 0
+    # Rows dropped for a blank animal ID or an unreadable timestamp.
+    skipped_rows: int = 0
+
+
+class FlagListMatchRequest(BaseModel):
+    animal_ids: list[str]
+    folders: list[str]
+
+
+class FlagListMatch(BaseModel):
+    animal_id: str
+    paths: list[str]
+
+
+class FlagListMatchResult(BaseModel):
+    status: str
+    error: str | None = None
+    matches: list[FlagListMatch] = []
+    missing: list[str] = []
+    missing_folders: list[str] = []
+    scanned_files: int = 0

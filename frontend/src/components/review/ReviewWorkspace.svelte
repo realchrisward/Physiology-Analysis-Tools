@@ -17,6 +17,7 @@
   import Icon from '../shared/Icon.svelte'
   import { clearArrhythmiaRuns, getArrhythmiaRuns, markArrhythmiaRan } from '../../lib/stores/arrhythmiaRuns.svelte'
   import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
+  import { flagFocus, flagsForPath, reportFlagFocus } from '../../lib/stores/flagProjects.svelte'
   import type { BadDataMark, CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
@@ -220,6 +221,18 @@
   function refreshGraphBeats() {
     beatsRefreshToken += 1
   }
+
+  // FP/FN review: the beats a model flagged in THIS recording, if it belongs
+  // to an open project — highlighted on the graph, which also opens zoomed on
+  // the requested one. Plain `[]` for an ordinary recording, so the graph
+  // behaves exactly as before.
+  let flags = $derived(flagsForPath(path))
+  // `seq` bumps on every request to move the graph (a flag clicked in the
+  // sidebar or Home); the graph's own navigation only changes `ts` (see
+  // `reportFlagFocus`), which it must not answer by moving again.
+  let focusRequest = $derived(
+    flagFocus.path === path && flagFocus.ts !== null ? { ts: flagFocus.ts, seq: flagFocus.seq } : null,
+  )
 
   // Every flagged beat's timestamp for the whole file — what EcgGraph's
   // beat-of-interest navigation steps through, and the count its legend
@@ -876,6 +889,9 @@
             {typicalRr}
             {focusOverlay}
             onFocusModeChange={(on) => (focusMode = on)}
+            flaggedTimes={flags}
+            {focusRequest}
+            onFlagNavigate={(ts) => reportFlagFocus(path, ts)}
           />
         {/key}
       {/if}
