@@ -1,4 +1,4 @@
-import { getBackendUrl } from '../api'
+import { getBackendToken, getBackendUrl, hasBackendTokenSource } from '../api'
 
 type HttpMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -11,6 +11,8 @@ function buildQuery(params?: Record<string, string | number | boolean>): string 
     .join('&')
   return `?${query}`
 }
+
+const TOKEN_HEADER = 'X-PAT-Token'
 
 function errorResult<T>(message: string): T {
   return { status: 'error', error: message } as T
@@ -27,9 +29,14 @@ export async function apiGet<T>(
 ): Promise<T> {
   const backendUrl = await getBackendUrl()
   const url = `${backendUrl}${path}${buildQuery(query)}`
+  // The Electron backend requires its per-launch token on every request.
+  // Elsewhere there is nothing to look up, so don't await anything extra.
+  const token = hasBackendTokenSource() ? await getBackendToken() : null
 
   try {
-    const response = await fetch(url)
+    const response = token
+      ? await fetch(url, { headers: { [TOKEN_HEADER]: token } })
+      : await fetch(url)
     if (!response.ok) {
       return errorResult<T>(`HTTP ${response.status}`)
     }
@@ -46,11 +53,12 @@ export async function apiGet<T>(
 export async function apiPost<T>(path: string, method: HttpMethod, body?: unknown): Promise<T> {
   const backendUrl = await getBackendUrl()
   const url = `${backendUrl}${path}`
+  const token = hasBackendTokenSource() ? await getBackendToken() : null
 
   try {
     const response = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(token ? { [TOKEN_HEADER]: token } : {}) },
       body: JSON.stringify(body),
     })
     if (!response.ok) {

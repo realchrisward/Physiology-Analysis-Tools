@@ -56,7 +56,21 @@ async function waitForHealth(port, timeoutMs, state) {
   throw new Error(`Backend did not become healthy within ${timeoutMs}ms on port ${port}:\n${hint}`)
 }
 
-async function startBackend() {
+// Environment variable the backend reads its per-launch API token from (see
+// backend/app.py). The renderer gets the same token over IPC.
+const TOKEN_ENV = 'PAT_API_TOKEN'
+
+/**
+ * Spawn the backend and wait until it answers /health.
+ *
+ * @param {object} [options]
+ * @param {string} [options.token] Shared secret every API request must carry
+ *   (X-PAT-Token). Omitted = the backend runs unprotected.
+ * @param {(info: {code: number|null, signal: string|null, stderrTail: string}) => void} [options.onExit]
+ *   Called if the backend dies on its own after it became healthy. Not called
+ *   for a failed start (startBackend rejects instead) or after stop().
+ */
+async function startBackend({ token, onExit } = {}) {
   const port = await findFreePort()
   // A virtualenv puts its interpreter in a different place on Windows than
   // it does elsewhere, so hardcoding one layout makes `npm run dev` fail on
@@ -77,13 +91,19 @@ async function startBackend() {
     )
   }
 
+  // Never inherit a token from our own environment: the renderer only knows
+  // the one passed in here.
+  const env = { ...process.env }
+  delete env[TOKEN_ENV]
+  if (token) env[TOKEN_ENV] = token
+
   const proc = spawn(
     pythonBin,
     ['-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', String(port)],
-    { cwd: REPO_ROOT, stdio: 'pipe' },
+    { cwd: REPO_ROOT, stdio: 'pipe', env },
   )
 
-  const state = { exited: false, exitInfo: null, stderrTail: '' }
+  const state = { exited: false, exitInfo: null, stderrTail: '', healthy: false, stopping: false }
 
   let spawnError = null
   proc.on('error', (err) => {
@@ -94,6 +114,15 @@ async function startBackend() {
   proc.once('exit', (code, signal) => {
     state.exited = true
     state.exitInfo = { code, signal }
+    // A crash or OOM-kill mid-session: without this the renderer only ever
+    // sees "Failed to fetch".
+    if (state.healthy && !state.stopping && onExit) {
+      try {
+        onExit({ code, signal, stderrTail: state.stderrTail })
+      } catch (err) {
+        console.error('[backend] onExit handler failed:', err)
+      }
+    }
   })
 
   proc.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
@@ -109,8 +138,10 @@ async function startBackend() {
     if (!state.exited) proc.kill('SIGTERM')
     throw spawnError || err
   }
+  state.healthy = true
 
   const stop = () => {
+    state.stopping = true
     if (state.exited) return Promise.resolve()
     return new Promise((resolve) => {
       const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 3000)

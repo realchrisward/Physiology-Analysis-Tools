@@ -379,3 +379,18 @@ class FlagListMatchResult(BaseModel):
     missing: list[str] = []
     missing_folders: list[str] = []
     scanned_files: int = 0
+    # Sub-folders that could not be read (permissions, broken links), so
+    # recordings inside them can't have been found.
+    skipped_dirs: int = 0
+    # The scan stopped at its file/time limit before covering every folder.
+    truncated: bool = False
+
+
+class EvictRequest(BaseModel):
+    paths: list[str]
+
+
+class EvictResult(BaseModel):
+    status: str
+    evicted: int = 0
+    error: str | None = None
