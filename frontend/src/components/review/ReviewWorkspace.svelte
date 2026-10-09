@@ -272,8 +272,8 @@
   }
 
   // Runs arrhythmia detection automatically once a channel's beats are
-  // ready, so the graph can open focused on the first beat of interest
-  // instead of on the whole recording. Heuristic only: it's the fast,
+  // ready, so beats of interest are there to step through (N/P) as soon as
+  // the file opens. Heuristic only: it's the fast,
   // rule-based method, and works on any recording. The shape-based
   // unsupervised method needs enough usable beat epochs to cluster, takes
   // longer, and stays a deliberate "Run unsupervised" click.

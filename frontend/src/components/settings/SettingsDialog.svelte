@@ -11,6 +11,13 @@
   import { formatBytes } from '../../lib/format'
   import Icon from '../shared/Icon.svelte'
   import { setTheme, themeState, type ThemeMode } from '../../lib/stores/theme.svelte'
+  import {
+    DEFAULT_INITIAL_WINDOW_SECONDS,
+    MAX_INITIAL_WINDOW_SECONDS,
+    MIN_INITIAL_WINDOW_SECONDS,
+    graphPrefs,
+    setInitialWindowSeconds,
+  } from '../../lib/stores/graphPrefs.svelte'
 
   let { onClose }: { onClose: () => void } = $props()
 
@@ -28,6 +35,24 @@
     { id: 'database', label: 'Database', icon: 'folder' },
   ]
   let activeTab: TabId = $state('general')
+
+  // Graph opening window: applied as soon as a valid value is entered, like
+  // the theme — it only affects the next file/channel the graph loads.
+  let initialWindowInput: number = $state(graphPrefs.initialWindowSeconds)
+  let initialWindowError: string | null = $state(null)
+
+  function handleInitialWindowChange() {
+    if (setInitialWindowSeconds(Number(initialWindowInput))) {
+      initialWindowError = null
+    } else {
+      initialWindowError = `Enter a value between ${MIN_INITIAL_WINDOW_SECONDS} and ${MAX_INITIAL_WINDOW_SECONDS} seconds.`
+    }
+  }
+
+  function resetInitialWindow() {
+    initialWindowInput = DEFAULT_INITIAL_WINDOW_SECONDS
+    handleInitialWindowChange()
+  }
 
   // Single state value for the mount-time load, same "one clear state value"
   // discipline used elsewhere (ImportScreen's `queueState`,
@@ -431,6 +456,43 @@
               {/each}
             </div>
           </fieldset>
+
+          <fieldset>
+            <legend>Graph</legend>
+            <div class="field">
+              <label for="graph-initial-window-input">Initial view window (seconds)</label>
+              <div class="inline-input">
+                <input
+                  id="graph-initial-window-input"
+                  data-testid="graph-initial-window-input"
+                  type="number"
+                  step="0.5"
+                  min={MIN_INITIAL_WINDOW_SECONDS}
+                  max={MAX_INITIAL_WINDOW_SECONDS}
+                  bind:value={initialWindowInput}
+                  onchange={handleInitialWindowChange}
+                />
+                <button
+                  type="button"
+                  class="btn"
+                  data-testid="graph-initial-window-reset"
+                  disabled={graphPrefs.initialWindowSeconds === DEFAULT_INITIAL_WINDOW_SECONDS &&
+                    initialWindowError === null}
+                  onclick={resetInitialWindow}
+                >
+                  Reset to {DEFAULT_INITIAL_WINDOW_SECONDS}s
+                </button>
+              </div>
+            </div>
+            {#if initialWindowError}
+              <p data-testid="graph-initial-window-error" class="text-danger">{initialWindowError}</p>
+            {/if}
+            <p class="field-group-note">
+              How much of the recording the graph shows, from its start, each
+              time a file or channel is loaded. Zoom out on the graph to see
+              more.
+            </p>
+          </fieldset>
         </div>
       {:else}
         <div class="tab-panel" data-testid="settings-panel-database" role="tabpanel">
@@ -725,6 +787,16 @@
     border-color: var(--color-accent);
     background: var(--color-accent-soft);
     color: var(--color-accent);
+  }
+
+  .inline-input {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .inline-input input {
+    flex: 1;
   }
 
   .path-value {

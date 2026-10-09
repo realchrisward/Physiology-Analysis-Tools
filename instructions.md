@@ -27,40 +27,8 @@ cd Physiology-Analysis-Tools
 git checkout web-ui-redesign
 ```
 
-Then run **Common setup** below.
 
-## Setup B — from a zip of an existing working copy
-
-Unzip it, `cd` into the folder, then **delete the two directories that do
-not survive the trip** before running Common setup:
-
-Windows (PowerShell):
-
-```powershell
-Remove-Item -Recurse -Force .venv, node_modules, frontend\node_modules, desktop\node_modules
-```
-
-macOS / Linux:
-
-```bash
-rm -rf .venv node_modules frontend/node_modules desktop/node_modules
-```
-
-This matters even when moving between two machines of the same OS:
-
-- **`.venv` is not portable.** It hardcodes absolute paths to the machine
-  that created it, so it breaks as soon as the folder moves.
-- **`node_modules` is not portable either.** Electron ships a
-  platform-specific native binary, so a macOS copy will not run on Windows
-  (and vice versa).
-
-Everything else in the zip is fine to keep. Note there is no git history in
-this route, so you cannot pull updates or see what changed — prefer the
-clone route unless the machine has no network access.
-
----
-
-## Common setup
+## Setup
 
 Run from the repo root. Takes a few minutes, mostly downloading.
 

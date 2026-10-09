@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRawSnippet } from 'svelte'
 import EcgGraph, {
   buildBeatAlignedData,
@@ -9,10 +9,24 @@ import EcgGraph, {
   MARKER_LANE_Y,
 } from './EcgGraph.svelte'
 import type { BadDataMark, WindowBeat } from '../../lib/api/types'
+import {
+  DEFAULT_INITIAL_WINDOW_SECONDS,
+  MAX_INITIAL_WINDOW_SECONDS,
+  resetForTesting as resetGraphPrefs,
+  setInitialWindowSeconds,
+} from '../../lib/stores/graphPrefs.svelte'
+
+// Most tests here are about what happens after mount, so they open on the
+// whole (10 s) fixture recording with a single mount fetch. The opening
+// window itself is covered by the tests that restore the default.
+beforeEach(() => {
+  setInitialWindowSeconds(MAX_INITIAL_WINDOW_SECONDS)
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  resetGraphPrefs()
 })
 
 function channelWindowResponse(overrides: Partial<Record<string, unknown>> = {}) {
@@ -1127,10 +1141,17 @@ describe('EcgGraph beat-of-interest navigation', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest },
       }),
     )
-    // Mount fetches the channel window and beats; the auto-focus onto the
-    // first beat of interest then fetches its narrowed range.
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    // Mount fetches the channel window and beats — and nothing else: the
+    // graph never jumps to a beat of interest on its own.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     return result
+  }
+
+  // Jumps to the first beat of interest and waits for that jump's fetches.
+  async function jumpToFirst(fetchMock: ReturnType<typeof vi.fn>) {
+    const before = fetchMock.mock.calls.length
+    await fireEvent.click(screen.getByTestId('first-beat-of-interest-button'))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(before + 2))
   }
 
   it('shows the total count in the legend', async () => {
@@ -1150,7 +1171,8 @@ describe('EcgGraph beat-of-interest navigation', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: BEATS_OF_INTEREST, typicalRr },
       }),
     )
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await jumpToFirst(fetchMock)
     const focusCall = fetchMock.mock.calls
       .map((_, i) => fetchedUrl(fetchMock, i))
       .filter((url) => url.pathname === '/channels/window')
@@ -1159,9 +1181,9 @@ describe('EcgGraph beat-of-interest navigation', () => {
   }
 
   it('sizes the view it jumps to from the recording\'s typical RR', async () => {
-    const wide = await focusSpanFor(0.5) // 21 beats = 10.5 s
+    const wide = await focusSpanFor(0.6) // 5 beats = 3 s
     cleanup()
-    const narrow = await focusSpanFor(0.05) // 21 beats = 1.05 s
+    const narrow = await focusSpanFor(0.1) // 5 beats = 0.5 s
     cleanup()
     const fallback = await focusSpanFor(null) // 2 s
 
@@ -1169,28 +1191,69 @@ describe('EcgGraph beat-of-interest navigation', () => {
     expect(narrow).toBeLessThan(fallback)
   })
 
-  it('opens focused on the first beat of interest rather than the whole recording', async () => {
+  it('does not jump to a beat of interest on load', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     await renderWithBeatsOfInterest(fetchMock)
+    await new Promise((resolve) => setTimeout(resolve, 50))
 
-    // The mount fetch covers the full extent; the auto-focus fetch that
-    // follows must be a narrow window centred on the first flagged beat
-    // (ts=2), not the whole file again.
-    const focusCall = fetchMock.mock.calls
-      .map((call, i) => fetchedUrl(fetchMock, i))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('beat-of-interest-counter')).not.toHaveTextContent('Beat of interest 1 of 3')
+  })
+
+  it('opens on the configured window from the start of the recording', async () => {
+    resetGraphPrefs()
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: BEATS_OF_INTEREST },
+      }),
+    )
+    // Mount (whole file) and then the opening window — never a beat of interest.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+
+    const openCall = fetchMock.mock.calls
+      .map((_, i) => fetchedUrl(fetchMock, i))
       .filter((url) => url.pathname === '/channels/window')
       .at(-1)!
-    const start = Number(focusCall.searchParams.get('start'))
-    const end = Number(focusCall.searchParams.get('end'))
+    const fetchStart = Number(openCall.searchParams.get('start'))
+    const fetchEnd = Number(openCall.searchParams.get('end'))
+    const width = (fetchEnd - fetchStart) / 3
+    expect(width).toBeCloseTo(DEFAULT_INITIAL_WINDOW_SECONDS, 5)
+    expect(fetchStart + width).toBeCloseTo(0, 5)
+    expect(screen.getByTestId('beat-of-interest-counter')).not.toHaveTextContent('Beat of interest 1 of 3')
+  })
 
-    expect(start).toBeLessThan(2)
-    expect(end).toBeGreaterThan(2)
-    expect((start + end) / 2).toBeCloseTo(2, 5)
-    expect(end - start).toBeLessThan(10)
+  it('shows the beats before a beat of interest, not the ones after it', async () => {
+    const fetchMock = routedFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    withMockedClientWidth(800, () =>
+      render(EcgGraph, {
+        props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [5], typicalRr: 0.5 },
+      }),
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await jumpToFirst(fetchMock)
 
-    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+    const focusCall = fetchMock.mock.calls
+      .map((_, i) => fetchedUrl(fetchMock, i))
+      .filter((url) => url.pathname === '/channels/window')
+      .at(-1)!
+    // The fetch is padded by one view width on each side, so the view is
+    // its middle third.
+    const fetchStart = Number(focusCall.searchParams.get('start'))
+    const fetchEnd = Number(focusCall.searchParams.get('end'))
+    const width = (fetchEnd - fetchStart) / 3
+    const start = fetchStart + width
+    const end = fetchEnd - width
+
+    // 5 beats wide (2.5 s), ending half an RR after the beat at ts=5.
+    expect(width).toBeCloseTo(2.5, 5)
+    expect(end).toBeCloseTo(5.25, 5)
+    expect(start).toBeCloseTo(2.75, 5)
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 1')
   })
 
   it('steps forward, backward, and to either end of the list', async () => {
@@ -1198,6 +1261,9 @@ describe('EcgGraph beat-of-interest navigation', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await renderWithBeatsOfInterest(fetchMock)
+
+    await fireEvent.click(screen.getByTestId('next-beat-of-interest-button'))
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
 
     await fireEvent.click(screen.getByTestId('next-beat-of-interest-button'))
     expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 2 of 3')
@@ -1242,7 +1308,10 @@ describe('EcgGraph beat-of-interest navigation', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2], onBeatSelect },
       }),
     )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(onBeatSelect).not.toHaveBeenCalled()
 
+    await fireEvent.click(screen.getByTestId('first-beat-of-interest-button'))
     await waitFor(() => expect(onBeatSelect).toHaveBeenCalled())
     expect(onBeatSelect.mock.calls[0][0]).toMatchObject({ ts: 2, prem_beat: true })
   })
@@ -1276,8 +1345,8 @@ describe('EcgGraph beat-of-interest navigation', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     const callsBefore = fetchMock.mock.calls.length
 
-    // A reject removes a beat from the list — the auto-focus must not fire
-    // again and drag the technician back to the top of the recording.
+    // A reject removes a beat from the list — that must not drag the
+    // technician's view anywhere.
     await rerender({ path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5] })
 
     await Promise.resolve()
@@ -1506,17 +1575,13 @@ describe('EcgGraph bad-data marking UX', () => {
 })
 
 describe('focusWidthSeconds', () => {
-  it('shows ten beats either side of the beat of interest', () => {
-    expect(focusWidthSeconds(0.12)).toBeCloseTo(21 * 0.12)
-    expect(focusWidthSeconds(0.2)).toBeCloseTo(4.2)
+  it('shows the beat of interest plus four previous beats', () => {
+    expect(focusWidthSeconds(0.12)).toBeCloseTo(5 * 0.12)
+    expect(focusWidthSeconds(0.8)).toBeCloseTo(4)
   })
 
-  it('is wider than the old fixed 2 s for a mouse-rate recording', () => {
-    expect(focusWidthSeconds(0.12)).toBeGreaterThan(2)
-  })
-
-  it('never goes tighter than half a second or wider than fifteen', () => {
-    expect(focusWidthSeconds(0.01)).toBe(0.5)
+  it('never goes tighter than 0.3 s or wider than fifteen', () => {
+    expect(focusWidthSeconds(0.01)).toBe(0.3)
     expect(focusWidthSeconds(5)).toBe(15)
   })
 
@@ -1699,7 +1764,10 @@ describe('EcgGraph focus mode and shortcuts', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
       }),
     )
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    await fireEvent.keyDown(document, { key: 'n' })
+    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
 
     await fireEvent.keyDown(document, { key: 'n' })
     expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 2 of 3')
@@ -1754,7 +1822,7 @@ describe('EcgGraph focus mode and shortcuts', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
       }),
     )
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const hint = screen.getByTestId('beat-nav-hint')
     expect(hint).toHaveTextContent('N Next')
@@ -1787,14 +1855,14 @@ describe('EcgGraph focus mode and shortcuts', () => {
         props: { path: '/data/57.txt', channel: 'channel 1', beatsOfInterest: [2, 5, 8] },
       }),
     )
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     const input = document.createElement('input')
     document.body.appendChild(input)
     input.focus()
     await fireEvent.keyDown(input, { key: 'n' })
 
-    expect(screen.getByTestId('beat-of-interest-counter')).toHaveTextContent('Beat of interest 1 of 3')
+    expect(screen.getByTestId('beat-of-interest-counter')).not.toHaveTextContent('Beat of interest 1 of 3')
     input.remove()
   })
 })

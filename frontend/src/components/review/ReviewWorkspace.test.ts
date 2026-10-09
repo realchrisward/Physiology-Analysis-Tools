@@ -2247,8 +2247,10 @@ describe('ReviewWorkspace automatic beat-of-interest detection', () => {
         String(call[0]).includes('/beats/of-interest'),
       ).length
 
-      // The graph auto-selected the first beat of interest, so the review
+      // Jumping to the first beat of interest selects it, so the review
       // panel is acting on it.
+      await waitFor(() => expect(screen.getByTestId('first-beat-of-interest-button')).not.toBeDisabled())
+      await fireEvent.click(screen.getByTestId('first-beat-of-interest-button'))
       await waitFor(() => expect(screen.queryByTestId('reject-button')).toBeInTheDocument())
       await fireEvent.click(screen.getByTestId('reject-button'))
 

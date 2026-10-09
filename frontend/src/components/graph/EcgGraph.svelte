@@ -24,21 +24,31 @@
     return Math.min(MARKER_ZOOM_MAX, Math.max(1, scale))
   }
 
-  // The view a jump to a beat of interest lands on: this many beats of
-  // context either side of it, from the recording's own typical RR interval,
-  // so a mouse (~0.12 s) and a human (~0.8 s) both get a readable stretch of
-  // neighbouring beats. Clamped so an odd estimate can never give an absurdly
-  // tight or huge view, and 2 s (the old fixed window) when there is no
-  // estimate yet.
-  export const FOCUS_NEIGHBOUR_BEATS = 10
-  export const FOCUS_MIN_SECONDS = 0.5
+  // The view a jump to a beat of interest lands on: the beat itself plus
+  // this many PREVIOUS beats, from the recording's own typical RR interval,
+  // so a mouse (~0.12 s) and a human (~0.8 s) both see ~5 beats. Clamped so
+  // an odd estimate can never give an absurdly tight or huge view, and 2 s
+  // when there is no estimate yet. The technician can always zoom out.
+  export const FOCUS_PREVIOUS_BEATS = 4
+  export const FOCUS_MIN_SECONDS = 0.3
   export const FOCUS_MAX_SECONDS = 15
   export const FOCUS_FALLBACK_SECONDS = 2
+  // A beat of interest is reviewed against what came BEFORE it, never the
+  // beats after it, so it sits near the right edge with only half an RR
+  // interval after it — enough for its own complex, not the next beat's.
+  export const FOCUS_TRAILING_FRACTION = 0.5 / (FOCUS_PREVIOUS_BEATS + 1)
 
   export function focusWidthSeconds(typicalRr: number | null | undefined): number {
     if (typicalRr == null || !Number.isFinite(typicalRr) || typicalRr <= 0) return FOCUS_FALLBACK_SECONDS
-    const width = (2 * FOCUS_NEIGHBOUR_BEATS + 1) * typicalRr
+    const width = (FOCUS_PREVIOUS_BEATS + 1) * typicalRr
     return Math.min(FOCUS_MAX_SECONDS, Math.max(FOCUS_MIN_SECONDS, width))
+  }
+
+  // The [start, end] a view of `width` seconds takes to show `ts` with the
+  // beats before it rather than after it.
+  export function focusRange(ts: number, width: number): { start: number; end: number } {
+    const end = ts + width * FOCUS_TRAILING_FRACTION
+    return { start: end - width, end }
   }
 
   export interface BeatSeriesData {
@@ -160,6 +170,7 @@
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
   import { addBadData, addBeat, deleteBadData, snapBeat, updateBadData } from '../../lib/api/persistence'
   import { themeState } from '../../lib/stores/theme.svelte'
+  import { graphPrefs } from '../../lib/stores/graphPrefs.svelte'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
   import type { BadDataMark } from '../../lib/api/types'
@@ -727,14 +738,9 @@
   // so that clicking a beat directly on the graph doesn't scramble the
   // navigation's place in the list.
   let beatOfInterestIndex: number = $state(-1)
-  // Guards the one-time auto-focus on the first beat of interest, which has
-  // to wait for arrhythmia detection to resolve (usually after mount).
-  let hasAutoFocused = false
-  // `chart` itself is a plain (non-reactive) binding, so an effect that only
-  // read it would never re-run once the async mount finally created it.
-  // This is the reactive "the chart exists now" signal the auto-focus effect
-  // needs, since the beats of interest it waits for can arrive either before
-  // or after chart construction.
+  // `chart` itself is a plain (non-reactive) binding, so markup that only
+  // read it would never update once the async mount finally created it.
+  // This is the reactive "the chart exists now" signal.
   let chartReady: boolean = $state(false)
   // True while the first load (or a retry of it) is in flight, so the graph
   // area says "loading" rather than sitting blank.
@@ -1669,15 +1675,16 @@
     if (min != null && max != null) scheduleRefetch(min, max)
   }
 
-  // Centres the view on `ts`, keeping the current zoom level if the
-  // technician has already zoomed in tighter than the default focus window.
+  // Brings `ts` into view with the beats BEFORE it (see `focusRange`),
+  // keeping the current zoom level if the technician has already zoomed in
+  // tighter than the default focus window.
   function focusOnTime(ts: number): Promise<void> {
     if (!chart) return Promise.resolve()
     const { min, max } = chart.scales.x
     const focusWidth = focusWidthSeconds(typicalRr)
     const currentWidth = min != null && max != null ? max - min : focusWidth
-    const width = Math.min(currentWidth, focusWidth)
-    return setVisibleRange(ts - width / 2, ts + width / 2)
+    const { start, end } = focusRange(ts, Math.min(currentWidth, focusWidth))
+    return setVisibleRange(start, end)
   }
 
   // Jumping to a beat of interest also SELECTS it, so the detail panel shows
@@ -2039,6 +2046,14 @@
       sliderHalfWidth = (fullExtent.end - fullExtent.start) / 2
       applyFilters()
       chartReady = true
+
+      // Opens on the first few seconds of the file (Settings → Appearance)
+      // rather than the whole recording, and never jumps to a beat of
+      // interest on its own — the technician steps to those with N/P.
+      const openWidth = graphPrefs.initialWindowSeconds
+      if (fullExtent.end - fullExtent.start > openWidth) {
+        void setVisibleRange(fullExtent.start, fullExtent.start + openWidth)
+      }
   }
 
   // Reacts to `bind:clientWidth` changes on the container (window resizes,
@@ -2247,20 +2262,6 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     void refetch(min, max)
-  })
-
-  // Auto-focus the first beat of interest, once, as soon as one exists.
-  // Deliberately effect-driven rather than done inside `onMount`: arrhythmia
-  // detection normally resolves AFTER this component has mounted, so at
-  // mount time there is usually nothing to focus on yet. `hasAutoFocused`
-  // makes it strictly one-shot — re-running detection, or reviewing a beat
-  // away, must never yank the technician's view back to the top of the file.
-  $effect(() => {
-    const flagged = beatsOfInterest
-    const ready = chartReady
-    if (hasAutoFocused || flagged.length === 0 || !ready) return
-    hasAutoFocused = true
-    void goToBeatOfInterest(0)
   })
 
   function handleResetView() {
