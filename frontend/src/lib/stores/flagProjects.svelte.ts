@@ -19,8 +19,8 @@
 // downstream — detection, arrhythmia flags, review, reports — is unchanged.
 
 import type { FlagKind, FlagListRow } from '../api/types'
-import { autoOpenRequest, fileRegistry, removeFile } from './fileRegistry.svelte'
-import { importForProject } from './importQueue.svelte'
+import { autoOpenRequest, fileRegistry, removeFiles, reviewNavigation } from './fileRegistry.svelte'
+import { importForProject, importQueue } from './importQueue.svelte'
 
 export interface FlaggedTime {
   ts: number
@@ -66,12 +66,83 @@ export interface FlagProjectStats {
 const STORAGE_KEY = 'pat.flagProjects'
 const MAX_PROJECTS = 20
 
+const FLAG_KINDS: readonly FlagKind[] = ['fp', 'fn', 'flag']
+
+// Animal IDs name files, and recordings are matched to them
+// case-insensitively, so IDs differing only by case are one animal.
+function animalKey(animalId: string): string {
+  return animalId.trim().toLowerCase()
+}
+
+// Saved projects are rebuilt field by field rather than trusted: one entry
+// from an older version of this feature (or a hand-edited profile) missing
+// `animals` would otherwise make Home throw on every launch, and duplicate
+// ids / animal IDs / flag times would break the lists keyed by them.
+function sanitizeProject(raw: unknown): FlagProject | null {
+  if (!raw || typeof raw !== 'object') return null
+  const value = raw as Record<string, unknown>
+  if (typeof value.id !== 'string' || typeof value.csvPath !== 'string' || typeof value.name !== 'string') return null
+  if (!Array.isArray(value.animals)) return null
+
+  const animals: FlagProjectAnimal[] = []
+  const seenAnimals = new Set<string>()
+  for (const entry of value.animals) {
+    if (!entry || typeof entry !== 'object') continue
+    const animal = entry as Record<string, unknown>
+    if (typeof animal.animalId !== 'string' || !Array.isArray(animal.flags)) continue
+    const key = animalKey(animal.animalId)
+    if (seenAnimals.has(key)) continue
+    seenAnimals.add(key)
+
+    const flags = new Map<number, FlaggedTime>()
+    for (const item of animal.flags) {
+      if (!item || typeof item !== 'object') continue
+      const flag = item as Record<string, unknown>
+      if (typeof flag.ts !== 'number' || !Number.isFinite(flag.ts) || flags.has(flag.ts)) continue
+      flags.set(flag.ts, {
+        ts: flag.ts,
+        kind: FLAG_KINDS.includes(flag.kind as FlagKind) ? (flag.kind as FlagKind) : 'flag',
+        prediction: typeof flag.prediction === 'number' && Number.isFinite(flag.prediction) ? flag.prediction : null,
+      })
+    }
+    animals.push({
+      animalId: animal.animalId,
+      flags: Array.from(flags.values()).sort((a, b) => a.ts - b.ts),
+      selected: animal.selected !== false,
+      filePath: typeof animal.filePath === 'string' ? animal.filePath : null,
+    })
+  }
+
+  const folders = Array.isArray(value.folders)
+    ? [...new Set(value.folders.filter((folder): folder is string => typeof folder === 'string'))]
+    : []
+  const time = (field: unknown) => (typeof field === 'number' && Number.isFinite(field) ? field : 0)
+  return {
+    id: value.id,
+    csvPath: value.csvPath,
+    name: value.name,
+    folders,
+    animals,
+    createdAt: time(value.createdAt),
+    openedAt: time(value.openedAt),
+  }
+}
+
 function loadInitial(): FlagProject[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    const projects: FlagProject[] = []
+    const seenIds = new Set<string>()
+    for (const entry of parsed) {
+      const project = sanitizeProject(entry)
+      if (!project || seenIds.has(project.id)) continue
+      seenIds.add(project.id)
+      projects.push(project)
+    }
+    return projects
   } catch {
     return []
   }
@@ -93,27 +164,41 @@ export const flagImportDialog: { open: boolean; csvPath: string | null; projectI
   projectId: null,
 })
 
+// Set when the projects could not be saved (localStorage full or
+// unavailable) — Home shows it, since otherwise the latest changes would
+// silently vanish on restart. Cleared by the next successful save.
+export const flagStorage: { error: string | null } = $state({ error: null })
+
 function persist(): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(flagProjects))
-  } catch {
-    // localStorage unavailable or full — projects just won't survive a
-    // restart; nothing else depends on this succeeding.
+    flagStorage.error = null
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    flagStorage.error =
+      `FP/FN reviews could not be saved (${reason}). Recent changes will be lost when the app closes — ` +
+      'remove large lists you no longer need.'
   }
 }
 
+let pickingList = false
+
 /** Groups parsed CSV rows into one entry per animal (all selected, none matched yet). */
 export function buildAnimals(rows: FlagListRow[]): FlagProjectAnimal[] {
-  const byId = new Map<string, Map<number, FlaggedTime>>()
+  // Keyed case-insensitively (the first spelling wins): "M001" and "m001"
+  // match the same recording, and as two animals they would import and
+  // detect it twice.
+  const byId = new Map<string, { animalId: string; flags: Map<number, FlaggedTime> }>()
   for (const row of rows) {
-    let flags = byId.get(row.animal_id)
-    if (!flags) {
-      flags = new Map()
-      byId.set(row.animal_id, flags)
+    const key = animalKey(row.animal_id)
+    let entry = byId.get(key)
+    if (!entry) {
+      entry = { animalId: row.animal_id, flags: new Map() }
+      byId.set(key, entry)
     }
-    if (!flags.has(row.ts)) flags.set(row.ts, { ts: row.ts, kind: row.kind, prediction: row.prediction })
+    if (!entry.flags.has(row.ts)) entry.flags.set(row.ts, { ts: row.ts, kind: row.kind, prediction: row.prediction })
   }
-  return Array.from(byId, ([animalId, flags]) => ({
+  return Array.from(byId.values(), ({ animalId, flags }) => ({
     animalId,
     flags: Array.from(flags.values()).sort((a, b) => a.ts - b.ts),
     selected: true,
@@ -149,19 +234,25 @@ export function getFlagProject(id: string): FlagProject | undefined {
  * Adds or replaces (by id) a project, moves it to the top and persists. When
  * the project is open this session and an edit dropped some of its
  * recordings, those leave the file list too (unless another open project
- * uses them) instead of reappearing as loose files in the sidebar.
+ * uses them, or the technician imported them separately).
  */
 export function saveFlagProject(project: FlagProject): void {
   const index = flagProjects.findIndex((p) => p.id === project.id)
-  const before = index !== -1 && flagSession.openIds.includes(project.id) ? openProjectPaths() : null
   if (index !== -1) flagProjects.splice(index, 1)
   flagProjects.unshift({ ...project, openedAt: Date.now() })
-  if (flagProjects.length > MAX_PROJECTS) flagProjects.length = MAX_PROJECTS
+  // Over the cap, the oldest projects go — but never one that is open this
+  // session, which would strand its tree in the sidebar.
+  while (flagProjects.length > MAX_PROJECTS) {
+    let oldest = flagProjects.length - 1
+    while (oldest >= 0 && flagSession.openIds.includes(flagProjects[oldest].id)) oldest--
+    if (oldest < 0) break
+    flagProjects.splice(oldest, 1)
+  }
   persist()
 
-  if (before) {
-    const after = openProjectPaths()
-    for (const path of before) if (!after.has(path)) removeFile(path)
+  if (flagSession.openIds.includes(project.id)) {
+    releaseOrphanRecordings()
+    clearStaleFocus()
   }
 }
 
@@ -225,6 +316,24 @@ export function requestFlagFocus(path: string, ts: number | null): void {
   flagFocus.seq += 1
 }
 
+// A project recording belongs in the file list only while an open project
+// uses it; one the technician imported themselves (`fromProject` false)
+// always stays. Run whenever a project closes or loses recordings, so they
+// leave with it instead of turning into loose files.
+function releaseOrphanRecordings(): string[] {
+  const used = openProjectPaths()
+  return removeFiles(fileRegistry.filter((row) => row.fromProject && !used.has(row.path)).map((row) => row.path))
+}
+
+// The focused flag must belong to an open project's recording; otherwise the
+// next time that file is opened on its own it would still jump to the flag.
+function clearStaleFocus(): void {
+  if (flagFocus.path !== null && !openProjectPaths().has(flagFocus.path)) {
+    flagFocus.path = null
+    flagFocus.ts = null
+  }
+}
+
 /** Records that the graph's own flag navigation moved to `ts` (does not move the graph). */
 export function reportFlagFocus(path: string, ts: number): void {
   flagFocus.path = path
@@ -240,7 +349,7 @@ export function reportFlagFocus(path: string, ts: number): void {
 export function openProjectAnimal(projectId: string, animalId: string, ts?: number): boolean {
   const project = getFlagProject(projectId)
   const animal = project?.animals.find((a) => a.animalId === animalId)
-  if (!project || !animal?.filePath) return false
+  if (!project || !animal?.filePath || !flagSession.openIds.includes(projectId)) return false
   const row = fileRegistry.find((candidate) => candidate.path === animal.filePath)
   if (!row || row.status === 'error' || row.defaultChannel === null) return false
 
@@ -277,43 +386,66 @@ export async function openFlagProject(id: string, animalId?: string): Promise<vo
   const target = recordings.find((a) => a.animalId === animalId) ?? recordings[0]
   if (!target) return
   const ordered = [target, ...recordings.filter((a) => a !== target)]
+  const navigation = reviewNavigation.seq
   await importForProject(ordered.map((a) => a.filePath!))
+
+  // Loading dozens of recordings takes a while. If the project was closed or
+  // removed meanwhile, what just arrived must not linger as loose files…
+  if (!flagSession.openIds.includes(id) || !getFlagProject(id)) {
+    releaseOrphanRecordings()
+    return
+  }
+  // …and if the technician opened something else meanwhile, stay there.
+  if (reviewNavigation.seq !== navigation) return
 
   for (const animal of ordered) {
     if (openProjectAnimal(id, animal.animalId)) return
+  }
+
+  // Nothing could be shown. With nothing loaded at all the import itself
+  // failed (importQueue.error already says why) — close the project rather
+  // than leave a tree of recordings that will never arrive.
+  const loaded = ordered.some((a) => fileRegistry.some((row) => row.path === a.filePath))
+  if (!loaded) {
+    closeFlagProject(id)
+  } else if (!importQueue.error) {
+    importQueue.error =
+      `None of the recordings in ${project.name} could be opened — they may have moved. ` +
+      'Use Find recordings… to locate them again.'
   }
 }
 
 /**
  * Takes a project out of this session (the sidebar's X). Its recordings leave
- * the file list too, unless another open project still uses them. Like
- * removing a file, nothing on disk or in saved review work is touched.
- * Returns the paths removed from the file list.
+ * the file list too, unless another open project still uses them or the
+ * technician imported them separately. Like removing a file, nothing on disk
+ * or in saved review work is touched. Returns the paths removed from the
+ * file list.
  */
 export function closeFlagProject(id: string): string[] {
   const index = flagSession.openIds.indexOf(id)
   if (index === -1) return []
-  const project = getFlagProject(id)
   flagSession.openIds.splice(index, 1)
-  if (!project) return []
-
-  const stillUsed = openProjectPaths()
-  const removed: string[] = []
-  for (const animal of projectRecordings(project)) {
-    const path = animal.filePath!
-    if (stillUsed.has(path)) continue
-    if (removeFile(path)) removed.push(path)
-  }
+  const removed = releaseOrphanRecordings()
+  clearStaleFocus()
   return removed
 }
 
 /** Picks a CSV and opens the import dialog for it. */
 export async function startFlagListImport(): Promise<void> {
-  const csvPath = (await window.api?.pickFlagList()) ?? null
-  if (!csvPath) return
-  flagImportDialog.csvPath = csvPath
-  flagImportDialog.projectId = null
-  flagImportDialog.open = true
+  // One picker at a time: a double-click would otherwise open a second one
+  // whose answer silently replaces the first.
+  if (pickingList) return
+  pickingList = true
+  try {
+    const csvPath = (await window.api?.pickFlagList()) ?? null
+    if (!csvPath) return
+    flagImportDialog.csvPath = csvPath
+    flagImportDialog.projectId = null
+    flagImportDialog.open = true
+  } finally {
+    pickingList = false
+  }
 }
 
 /** Opens the import dialog on an existing project (e.g. to find missing recordings). */
@@ -332,6 +464,8 @@ export function closeFlagImportDialog(): void {
 /** Test-only: reset everything (and clear storage) so each test starts clean. */
 export function resetForTesting(): void {
   flagProjects.length = 0
+  flagStorage.error = null
+  pickingList = false
   flagSession.openIds.length = 0
   flagFocus.path = null
   flagFocus.ts = null

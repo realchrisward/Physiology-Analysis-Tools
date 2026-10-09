@@ -9,6 +9,7 @@
     formatPrediction,
   } from '../../lib/flags'
   import { fileRegistry, type FileRow } from '../../lib/stores/fileRegistry.svelte'
+  import { importQueue } from '../../lib/stores/importQueue.svelte'
   import {
     closeFlagProject,
     editFlagProject,
@@ -85,7 +86,15 @@
   function handleClose(event: MouseEvent, project: FlagProject) {
     // The X sits inside the clickable project row; closing must not also fold it.
     event.stopPropagation()
+    // Closing mid-import would leave the recordings still landing as loose
+    // files (and a late navigation opening a project that is already closed).
+    if (importQueue.importing) return
     for (const path of closeFlagProject(project.id)) onFileRemoved?.(path)
+  }
+
+  function handleFind(project: FlagProject) {
+    if (importQueue.importing) return
+    editFlagProject(project.id)
   }
 
   function openRecording(project: FlagProject, animal: FlagProjectAnimal, row: FileRow | undefined) {
@@ -146,8 +155,9 @@
             type="button"
             class="icon-btn project-close"
             data-testid="flag-project-close-button"
-            title="Close this review (nothing is deleted)"
+            title={importQueue.importing ? 'Wait for the import to finish' : 'Close this review (nothing is deleted)'}
             aria-label={`Close ${project.name}`}
+            disabled={importQueue.importing}
             onclick={(event) => handleClose(event, project)}
           >
             <Icon name="x" size={14} />
@@ -249,7 +259,9 @@
               type="button"
               class="missing-row"
               data-testid="flag-project-missing-row"
-              onclick={() => editFlagProject(project.id)}
+              disabled={importQueue.importing}
+              title={importQueue.importing ? 'Wait for the import to finish' : undefined}
+              onclick={() => handleFind(project)}
             >
               <Icon name="search" size={12} />
               <span>{missing} not found — Find…</span>
@@ -332,6 +344,13 @@
   .project-root:hover .project-close,
   .project-root:focus-within .project-close {
     opacity: 1;
+  }
+
+  /* Closing waits for an import in flight (see handleClose). */
+  .project-root .project-close:disabled {
+    opacity: 0.4;
+    background: transparent;
+    color: var(--color-text-muted);
   }
 
   /* One indent per level, with a faint guide line down the left edge. */
@@ -504,8 +523,12 @@
     transition: background var(--transition-fast), color var(--transition-fast);
   }
 
-  .missing-row:hover {
+  .missing-row:hover:not(:disabled) {
     background: var(--color-surface-hover);
     color: var(--color-text);
+  }
+
+  .missing-row:disabled {
+    opacity: 0.5;
   }
 </style>

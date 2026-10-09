@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { formatRelativeTime } from '../../lib/format'
-  import { clearFlagProjects, flagProjects, startFlagListImport } from '../../lib/stores/flagProjects.svelte'
+  import { clearFlagProjects, flagProjects, flagStorage, startFlagListImport } from '../../lib/stores/flagProjects.svelte'
   import {
     handleImportFiles,
     handleImportFolder,
@@ -94,6 +94,12 @@
     clearRecentFiles()
     ticked = []
   }
+
+  // Dropping the projects mid-import would race the recordings still landing.
+  function clearAllFlagProjects() {
+    if (importQueue.importing) return
+    clearFlagProjects()
+  }
 </script>
 
 <div class="welcome">
@@ -177,6 +183,9 @@
   {#if importQueue.error}
     <p class="banner banner-error import-error" data-testid="import-error">Import failed: {importQueue.error}</p>
   {/if}
+  {#if flagStorage.error}
+    <p class="banner banner-error import-error" data-testid="flag-storage-error">{flagStorage.error}</p>
+  {/if}
 
   {#if flagProjects.length > 0}
     <section class="home-section" data-testid="flag-projects-section">
@@ -201,8 +210,11 @@
               type="button"
               class="btn btn-sm btn-ghost btn-danger-text"
               data-testid="clear-all-flag-projects-button"
-              title="Remove every FP/FN review from this list"
-              onclick={() => clearFlagProjects()}
+              title={importQueue.importing
+                ? 'Wait for the import to finish'
+                : 'Remove every FP/FN review from this list'}
+              disabled={importQueue.importing}
+              onclick={clearAllFlagProjects}
             >
               Clear all
             </button>

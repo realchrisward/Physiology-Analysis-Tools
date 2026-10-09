@@ -19,6 +19,18 @@
   function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
     return count === 1 ? singular : pluralForm
   }
+
+  // Removing a project or reopening its dialog mid-import would race the
+  // recordings still landing, so both wait (the buttons are disabled too).
+  function handleRemove(id: string) {
+    if (importQueue.importing) return
+    removeFlagProjects([id])
+  }
+
+  function handleFind(id: string) {
+    if (importQueue.importing) return
+    editFlagProject(id)
+  }
 </script>
 
 <ul class="flag-project-list">
@@ -67,7 +79,9 @@
           type="button"
           class="btn btn-sm"
           data-testid="flag-project-edit-button"
-          onclick={() => editFlagProject(project.id)}
+          disabled={importQueue.importing}
+          title={importQueue.importing ? 'Wait for the import to finish' : undefined}
+          onclick={() => handleFind(project.id)}
         >
           <Icon name="search" size={14} /> Find recordings…
         </button>
@@ -76,8 +90,9 @@
           class="icon-btn"
           data-testid="flag-project-remove-button"
           aria-label={`Remove ${project.name} from the list`}
-          title="Remove from this list"
-          onclick={() => removeFlagProjects([project.id])}
+          title={importQueue.importing ? 'Wait for the import to finish' : 'Remove from this list'}
+          disabled={importQueue.importing}
+          onclick={() => handleRemove(project.id)}
         >
           <Icon name="x" size={16} />
         </button>
@@ -172,6 +187,12 @@
     align-items: center;
     flex-shrink: 0;
     gap: var(--space-2);
+  }
+
+  .flag-project-actions .icon-btn:disabled {
+    opacity: 0.4;
+    background: transparent;
+    color: var(--color-text-muted);
   }
 
   /* Narrow list (small window, or sidebar open): actions drop under the text

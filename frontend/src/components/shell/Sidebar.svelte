@@ -128,6 +128,13 @@
     recentSectionOpen = !recentSectionOpen
   }
 
+  // Opening another file mid-import would race the one still landing (and a
+  // double-click could register it twice), so recent files wait for it.
+  function handleRecent(path: string) {
+    if (importQueue.importing) return
+    void openRecentFile(path)
+  }
+
   // `openRecentFile` (see importQueue.svelte.ts) sets the shared
   // `autoOpenRequest` rather than calling back into this component
   // directly — App.svelte owns navigation and is the sole consumer of that
@@ -293,8 +300,9 @@
                 type="button"
                 class="sidebar-recent-row"
                 data-testid="sidebar-recent-file"
-                title={file.filename}
-                onclick={() => openRecentFile(file.path)}
+                title={importQueue.importing ? 'Wait for the import to finish' : file.filename}
+                disabled={importQueue.importing}
+                onclick={() => handleRecent(file.path)}
               >
                 <Icon name="file-text" size={14} />
                 <span class="sidebar-recent-name">{file.filename}</span>
@@ -552,9 +560,13 @@
     text-align: left;
   }
 
-  .sidebar-recent-row:hover {
+  .sidebar-recent-row:hover:not(:disabled) {
     background: var(--color-surface-hover);
     color: var(--color-text);
+  }
+
+  .sidebar-recent-row:disabled {
+    opacity: 0.5;
   }
 
   .sidebar-recent-name {

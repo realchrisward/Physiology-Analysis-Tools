@@ -306,4 +306,14 @@ export interface FlagListMatchResult {
   // Requested folders that don't exist / aren't readable.
   missing_folders?: string[]
   scanned_files?: number
+  // Sub-folders that could not be read, so recordings in them can't have been found.
+  skipped_dirs?: number
+  // The scan stopped at its file/time limit before covering every folder.
+  truncated?: boolean
+}
+
+export interface EvictResult {
+  status: string
+  evicted?: number
+  error?: string | null
 }

@@ -7,9 +7,9 @@
   import Icon from './components/shared/Icon.svelte'
   import FlagListImportDialog from './components/flags/FlagListImportDialog.svelte'
   import { themeState } from './lib/stores/theme.svelte'
-  import { autoOpenRequest, fileRegistry, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
+  import { autoOpenRequest, fileRegistry, reviewNavigation, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
   import { recordRecentFile } from './lib/stores/recentFiles.svelte'
-  import { closeFlagImportDialog, flagImportDialog, getFlagProject } from './lib/stores/flagProjects.svelte'
+  import { closeFlagImportDialog, flagImportDialog, flagSession, getFlagProject } from './lib/stores/flagProjects.svelte'
 
   const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
   const MIN_SIDEBAR_WIDTH = 180
@@ -42,6 +42,7 @@
   function handleReview(row: ReviewSelection) {
     selectedFile = row
     shownFile = row
+    reviewNavigation.seq += 1
     view = 'review'
     // Every way of opening a file lands here, so this is the one place that
     // keeps its "last opened" time current. FP/FN project recordings stay out
@@ -49,8 +50,12 @@
     if (!row.projectId) recordRecentFile(row.path, fileNameOf(row.path))
   }
 
+  // Only while that project is still open: a recording another open project
+  // also uses stays on screen when the first one closes, and must not keep
+  // naming it.
   function projectOf(selection: ReviewSelection | null) {
-    return selection?.projectId ? getFlagProject(selection.projectId) : undefined
+    const id = selection?.projectId
+    return id && flagSession.openIds.includes(id) ? getFlagProject(id) : undefined
   }
 
   let selectedProject = $derived(projectOf(selectedFile))

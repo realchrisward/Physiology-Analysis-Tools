@@ -17,7 +17,7 @@
 import { detectBeats } from '../api/beats'
 import { importFiles } from '../api/files'
 import { estimate, recordSample } from './eta'
-import { autoOpenRequest, fileRegistry, type FileRow } from './fileRegistry.svelte'
+import { autoOpenRequest, fileRegistry, removeFiles, type FileRow } from './fileRegistry.svelte'
 import { recordRecentFile } from './recentFiles.svelte'
 
 export const importQueue: { importing: boolean; detecting: boolean; error: string; autoRun: boolean } = $state({
@@ -40,60 +40,118 @@ const pendingDetection: FileRow[] = []
 let workerRunning = false
 let stopRequested = false
 
-async function importPaths(paths: string[], autoOpen: boolean = true, recordRecent: boolean = true): Promise<void> {
-  if (paths.length === 0) return
+// Paths whose `POST /files/import` is in flight. A second request for the
+// same file (a double-click, or a project needing a file another import is
+// already loading) waits for that one instead of listing the file twice.
+const inFlight = new Map<string, Promise<unknown>>()
+// Import Files/Folder, Recent files and FP/FN projects can overlap, so
+// `importing` is derived from a count of running imports — a single flag
+// would be cleared by whichever finished first while another still ran.
+let activeImports = 0
+
+function beginImport(): void {
+  activeImports += 1
+  importQueue.importing = true
+}
+
+function endImport(): void {
+  activeImports = Math.max(0, activeImports - 1)
+  importQueue.importing = activeImports > 0
+}
+
+interface ImportOptions {
+  // Show the first requested file that can be opened (see `autoOpenRequest`).
+  autoOpen?: boolean
+  recordRecent?: boolean
+  // Loaded for an FP/FN review project rather than by the technician.
+  fromProject?: boolean
+}
+
+/**
+ * Adds files to this session and queues them for detection. A path already
+ * listed is never imported again — every list of registry rows is keyed by
+ * path and Svelte throws on a duplicate key — except a row whose import
+ * failed, which is retried (the drive may be back, the folder restored).
+ * Returns the paths this call added.
+ */
+async function importPaths(
+  paths: string[],
+  { autoOpen = true, recordRecent = true, fromProject = false }: ImportOptions = {},
+): Promise<string[]> {
+  const requested = [...new Set(paths)]
+  if (requested.length === 0) return []
+
+  const failed = requested.filter((path) => fileRegistry.some((row) => row.path === path && row.status === 'error'))
+  if (failed.length > 0) removeFiles(failed)
+
+  const waiting = requested.filter((path) => inFlight.has(path)).map((path) => inFlight.get(path)!)
+  const fresh = requested.filter((path) => !inFlight.has(path) && !fileRegistry.some((row) => row.path === path))
 
   importQueue.error = ''
-  const result = await importFiles(paths)
-
-  if ('error' in result) {
-    importQueue.error = result.error
-    return
-  }
-
   const newRows: FileRow[] = []
-  // The first successfully-imported file with a channel gets opened
-  // automatically once this call finishes — see `autoOpenRequest`'s own
-  // comment. Only the first: an "Import Folder" of many files still opens
-  // just one, the rest simply appear in the sidebar as usual.
-  let autoOpenCandidate: FileRow | null = null
-  for (const fileResult of result.results) {
-    fileRegistry.push({
-      path: fileResult.path,
-      filename: fileResult.filename,
-      status: fileResult.status === 'ok' ? 'ready' : 'error',
-      channels: fileResult.channels,
-      defaultChannel: fileResult.default_channel,
-      size: fileResult.size,
-      error: fileResult.error,
-      beatCount: null,
-      meanHr: null,
-    })
-    // Capture the reference back out of the reactive registry (rather than
-    // holding onto the plain object literal above) so mutations made later
-    // in the detection queue are tracked by Svelte's state proxy.
-    const row = fileRegistry[fileRegistry.length - 1]
-    newRows.push(row)
+  if (fresh.length > 0) {
+    const request = importFiles(fresh)
+    for (const path of fresh) inFlight.set(path, request)
+    let result: Awaited<typeof request>
+    try {
+      result = await request
+    } finally {
+      for (const path of fresh) if (inFlight.get(path) === request) inFlight.delete(path)
+    }
 
-    if (fileResult.status === 'ok') {
-      if (recordRecent) recordRecentFile(fileResult.path, fileResult.filename)
-      if (!autoOpenCandidate && row.defaultChannel !== null) {
-        autoOpenCandidate = row
+    if ('error' in result) {
+      importQueue.error = result.error
+    } else {
+      for (const fileResult of result.results) {
+        if (fileRegistry.some((row) => row.path === fileResult.path)) continue
+        fileRegistry.push({
+          path: fileResult.path,
+          filename: fileResult.filename,
+          status: fileResult.status === 'ok' ? 'ready' : 'error',
+          channels: fileResult.channels,
+          defaultChannel: fileResult.default_channel,
+          size: fileResult.size,
+          error: fileResult.error,
+          beatCount: null,
+          meanHr: null,
+          fromProject,
+        })
+        // Capture the reference back out of the reactive registry (rather than
+        // holding onto the plain object literal above) so mutations made later
+        // in the detection queue are tracked by Svelte's state proxy.
+        newRows.push(fileRegistry[fileRegistry.length - 1])
+        if (fileResult.status === 'ok' && recordRecent) recordRecentFile(fileResult.path, fileResult.filename)
       }
     }
   }
+  if (waiting.length > 0) await Promise.allSettled(waiting)
 
-  if (autoOpen && autoOpenCandidate) {
-    autoOpenRequest.value = {
-      path: autoOpenCandidate.path,
-      channels: autoOpenCandidate.channels,
-      defaultChannel: autoOpenCandidate.defaultChannel!,
+  // A file the technician imported themselves is theirs from now on, even if
+  // an FP/FN project loaded it first — closing the project must not take it.
+  if (!fromProject) {
+    for (const path of requested) {
+      const row = fileRegistry.find((candidate) => candidate.path === path)
+      if (row?.fromProject) row.fromProject = false
+    }
+  }
+
+  // The first requested file that can be shown opens automatically — see
+  // `autoOpenRequest`'s own comment. Only the first: an "Import Folder" of
+  // many files still opens just one, the rest simply appear in the sidebar.
+  if (autoOpen) {
+    for (const path of requested) {
+      const row = fileRegistry.find((candidate) => candidate.path === path)
+      if (row && row.status !== 'error' && row.defaultChannel !== null) {
+        autoOpenRequest.value = { path: row.path, channels: row.channels, defaultChannel: row.defaultChannel }
+        break
+      }
     }
   }
 
   if (importQueue.autoRun) {
     enqueueDetection(newRows)
   }
+  return newRows.map((row) => row.path)
 }
 
 function enqueueDetection(rows: FileRow[]): void {
@@ -172,25 +230,25 @@ export function formatEta(size: number | null): string {
 }
 
 export async function handleImportFiles(): Promise<void> {
-  // Set synchronously, before awaiting the picker, so the buttons are
+  // Begun synchronously, before awaiting the picker, so the buttons are
   // disabled from the very first click — covering the picker-open window
   // and the import round trip, nothing more.
-  importQueue.importing = true
+  beginImport()
   try {
     const paths = (await window.api?.pickFiles()) ?? []
     await importPaths(paths)
   } finally {
-    importQueue.importing = false
+    endImport()
   }
 }
 
 export async function handleImportFolder(): Promise<void> {
-  importQueue.importing = true
+  beginImport()
   try {
     const paths = (await window.api?.pickFolder()) ?? []
     await importPaths(paths)
   } finally {
-    importQueue.importing = false
+    endImport()
   }
 }
 
@@ -223,16 +281,13 @@ export async function openRecentFile(path: string): Promise<void> {
 export async function openFiles(paths: string[]): Promise<void> {
   if (paths.length === 0) return
 
-  const missing = paths.filter((path) => !fileRegistry.some((row) => row.path === path))
-  if (missing.length > 0) {
-    importQueue.importing = true
-    try {
-      // Not auto-opened here: the file to show is the first one REQUESTED,
-      // which is not necessarily the first one that needed importing.
-      await importPaths(missing, false)
-    } finally {
-      importQueue.importing = false
-    }
+  beginImport()
+  try {
+    // Not auto-opened here: the file to show is the first one REQUESTED that
+    // can be opened, and it gets recorded as recent below.
+    await importPaths(paths, { autoOpen: false })
+  } finally {
+    endImport()
   }
 
   for (const path of paths) {
@@ -258,14 +313,12 @@ export async function openFiles(paths: string[]): Promise<void> {
  * recordings and would otherwise push everything else off that list.
  * Files already in this session are left as they are.
  */
-export async function importForProject(paths: string[]): Promise<void> {
-  const missing = paths.filter((path) => !fileRegistry.some((row) => row.path === path))
-  if (missing.length === 0) return
-  importQueue.importing = true
+export async function importForProject(paths: string[]): Promise<string[]> {
+  beginImport()
   try {
-    await importPaths(missing, false, false)
+    return await importPaths(paths, { autoOpen: false, recordRecent: false, fromProject: true })
   } finally {
-    importQueue.importing = false
+    endImport()
   }
 }
 
@@ -275,6 +328,8 @@ export function resetForTesting(): void {
   importQueue.detecting = false
   importQueue.error = ''
   importQueue.autoRun = true
+  activeImports = 0
+  inFlight.clear()
   pendingDetection.length = 0
   workerRunning = false
   stopRequested = false

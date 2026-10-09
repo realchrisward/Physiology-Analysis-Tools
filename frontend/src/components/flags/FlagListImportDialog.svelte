@@ -115,7 +115,8 @@
     const needle = filter.trim().toLowerCase()
     return needle ? animals.filter((animal) => animal.animalId.toLowerCase().includes(needle)) : animals
   })
-  let selectedIds = $derived(animals.filter((animal) => animal.selected).map((animal) => animal.animalId))
+  let selectedAnimals = $derived(animals.filter((animal) => animal.selected))
+  let selectedIds = $derived(selectedAnimals.map((animal) => animal.animalId))
   let allVisibleSelected = $derived(visibleAnimals.length > 0 && visibleAnimals.every((animal) => animal.selected))
 
   // Whole-list figures for the summary line (not just the chosen animals).
@@ -169,9 +170,14 @@
 
   // ---- Step 2: find recordings ----
 
-  // Animal ID -> every recording found for it (first is the one used).
-  let matches: Record<string, string[]> = $state({})
+  // Animal ID -> every recording found for it. A Map, not a plain object, so an
+  // animal ID like "constructor" can't read an inherited property.
+  let matches: Map<string, string[]> = $state.raw(new Map())
   let missingFolders: string[] = $state([])
+  // The scan couldn't cover everything: sub-folders it couldn't read, or it
+  // stopped at its file limit.
+  let skippedDirs = $state(0)
+  let truncated = $state(false)
   type MatchState = 'idle' | 'searching' | 'done' | 'error'
   let matchState = $state<MatchState>('idle')
   let matchError: string | null = $state(null)
@@ -187,9 +193,62 @@
   // without changing anything doesn't rescan every folder.
   let lastMatchKey = ''
 
-  let foundIds = $derived(selectedIds.filter((id) => (matches[id]?.length ?? 0) > 0))
-  let missingIds = $derived(selectedIds.filter((id) => (matches[id]?.length ?? 0) === 0))
+  let foundIds = $derived(selectedIds.filter((id) => (matches.get(id)?.length ?? 0) > 0))
+  let missingIds = $derived(selectedIds.filter((id) => (matches.get(id)?.length ?? 0) === 0))
   let searching = $derived(matchState === 'searching')
+
+  // Paths compare the way Windows sees them: case-insensitive, `/` = `\`.
+  function pathKey(path: string): string {
+    return path.replace(/[\\/]+/g, '/').toLowerCase()
+  }
+
+  function samePath(a: string, b: string): boolean {
+    return pathKey(a) === pathKey(b)
+  }
+
+  function isUnder(path: string, folder: string): boolean {
+    return pathKey(path).startsWith(`${pathKey(folder).replace(/\/+$/, '')}/`)
+  }
+
+  // The recording a selected animal is opened with. Saved review work is keyed
+  // by the exact recording path, so an animal keeps the recording it already
+  // has — rather than flipping to another copy that merely sorts first — as
+  // long as that recording was found again, or its folder couldn't be searched
+  // (unreachable, or a scan that skipped sub-folders / stopped early) and so
+  // proves nothing. Otherwise the first match is used (null when there is none).
+  function chosenPath(animal: FlagProjectAnimal): string | null {
+    if (!animal.selected) return null
+    const found = matches.get(animal.animalId) ?? []
+    const current = animal.filePath
+    if (current) {
+      if (found.some((path) => samePath(path, current))) return current
+      if (matchState === 'done') {
+        if (missingFolders.some((folder) => isUnder(current, folder))) return current
+        const scanIncomplete = skippedDirs > 0 || truncated
+        if (scanIncomplete && (draft?.folders ?? []).some((folder) => isUnder(current, folder))) return current
+      }
+    }
+    return found[0] ?? null
+  }
+
+  // What Open will load: one row per selected animal that ends up with a
+  // recording, and which of its other copies were not used.
+  let usedRows = $derived.by(() => {
+    const rows: { animalId: string; used: string; others: string[]; usingFirst: boolean; searched: boolean }[] = []
+    for (const animal of selectedAnimals) {
+      const used = chosenPath(animal)
+      if (used === null) continue
+      const paths = matches.get(animal.animalId) ?? []
+      rows.push({
+        animalId: animal.animalId,
+        used,
+        others: paths.filter((path) => !samePath(path, used)),
+        usingFirst: paths.length > 0 && samePath(paths[0], used),
+        searched: paths.length > 0,
+      })
+    }
+    return rows
+  })
 
   async function runMatch() {
     if (!draft) return
@@ -201,8 +260,10 @@
     const requestId = ++matchRequestId
 
     if (ids.length === 0 || folders.length === 0) {
-      matches = {}
+      matches = new Map()
       missingFolders = []
+      skippedDirs = 0
+      truncated = false
       matchError = null
       matchState = 'idle'
       return
@@ -214,18 +275,22 @@
     if (requestId !== matchRequestId) return // superseded by a newer search
 
     if (result.status === 'error') {
-      matches = {}
+      matches = new Map()
       missingFolders = []
+      skippedDirs = 0
+      truncated = false
       matchError = result.error || 'The folders could not be searched.'
       matchState = 'error'
       return
     }
-    const found: Record<string, string[]> = {}
+    const found = new Map<string, string[]>()
     for (const match of result.matches ?? []) {
-      if (match.paths.length > 0) found[match.animal_id] = match.paths
+      if (match.paths.length > 0) found.set(match.animal_id, match.paths)
     }
     matches = found
     missingFolders = result.missing_folders ?? []
+    skippedDirs = result.skipped_dirs ?? 0
+    truncated = result.truncated ?? false
     matchState = 'done'
   }
 
@@ -249,11 +314,17 @@
   }
 
   function handleOpen() {
-    if (!draft || foundIds.length === 0 || searching) return
-    // Selected animals get their recording; everything else is left unmatched.
-    for (const animal of draft.animals) {
-      animal.filePath = animal.selected ? (matches[animal.animalId]?.[0] ?? null) : null
+    if (!draft || usedRows.length === 0 || searching) return
+    // Opened on a project that has since been removed from Home's list:
+    // saving would quietly bring it back, so say so instead.
+    if (editing && !getFlagProject(draft.id)) {
+      loadError = 'This FP/FN list was removed from your list, so it can’t be updated. Import it again to review it.'
+      phase = 'error'
+      return
     }
+    // Selected animals get their recording (see chosenPath); everything else
+    // is left unmatched.
+    for (const animal of draft.animals) animal.filePath = chosenPath(animal)
     const project = $state.snapshot(draft) as FlagProject
     saveFlagProject(project)
     onClose()
@@ -275,10 +346,24 @@
     return () => document.removeEventListener('keydown', handleKeydown)
   })
 
-  // Only closes when the backdrop itself (not a click bubbling up from the
-  // card) was the actual click target.
+  // Only closes when the whole click, press and release, was on the backdrop
+  // itself. A press inside the card (say, drag-selecting text in the filter
+  // box) that ends over the backdrop also produces a click whose target is the
+  // backdrop, and must not throw away the technician's choices.
+  let pressedOnBackdrop = false
+
+  function handleBackdropMouseDown(event: MouseEvent) {
+    pressedOnBackdrop = event.target === event.currentTarget
+  }
+
+  function handleBackdropMouseUp(event: MouseEvent) {
+    if (event.target !== event.currentTarget) pressedOnBackdrop = false
+  }
+
   function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) onClose()
+    const closes = pressedOnBackdrop && event.target === event.currentTarget
+    pressedOnBackdrop = false
+    if (closes) onClose()
   }
 </script>
 
@@ -287,7 +372,13 @@
 <!-- Escape is handled globally via the onMount keydown listener above; this
      backdrop only needs to catch a direct click on itself to dismiss, so it is
      deliberately not a focusable control. -->
-<div class="flag-backdrop" data-testid="flag-import-backdrop" onclick={handleBackdropClick}>
+<div
+  class="flag-backdrop"
+  data-testid="flag-import-backdrop"
+  onmousedown={handleBackdropMouseDown}
+  onmouseup={handleBackdropMouseUp}
+  onclick={handleBackdropClick}
+>
   <div
     class="flag-dialog"
     data-testid="flag-import-dialog"
@@ -492,6 +583,26 @@
                   </p>
                 {/if}
 
+                {#if skippedDirs > 0}
+                  <p class="flag-warning" data-testid="flag-skipped-dirs">
+                    <Icon name="alert-triangle" size={16} />
+                    <span>
+                      {skippedDirs}
+                      {plural(skippedDirs, 'sub-folder')} couldn't be read — recordings inside
+                      {plural(skippedDirs, 'it', 'them')} can't be found
+                    </span>
+                  </p>
+                {/if}
+
+                {#if truncated}
+                  <p class="flag-warning" data-testid="flag-truncated">
+                    <Icon name="alert-triangle" size={16} />
+                    <span>
+                      The search stopped early — the folders hold too many files. Pick a more specific folder.
+                    </span>
+                  </p>
+                {/if}
+
                 {#if missingIds.length > 0}
                   <div class="flag-warning">
                     <Icon name="alert-triangle" size={16} />
@@ -532,7 +643,7 @@
                   </p>
                 {/if}
 
-                {#if foundIds.length > 0}
+                {#if usedRows.length > 0}
                   <button
                     type="button"
                     class="flag-disclosure"
@@ -545,14 +656,23 @@
                   </button>
                   {#if showMatched}
                     <ul class="flag-matched-list" data-testid="flag-matched-list">
-                      {#each foundIds as id (id)}
+                      {#each usedRows as row (row.animalId)}
                         <li class="flag-matched-row">
-                          <span class="flag-animal-id">{id}</span>
+                          <span class="flag-animal-id">{row.animalId}</span>
                           <span class="flag-matched-arrow text-muted" aria-hidden="true">→</span>
-                          <span class="flag-matched-file" title={matches[id][0]}>{fileName(matches[id][0])}</span>
-                          {#if matches[id].length > 1}
-                            <span class="flag-matched-more text-muted" title={matches[id].slice(1).join('\n')}>
-                              +{matches[id].length - 1} more (using the first)
+                          <span class="flag-matched-file" title={row.used}>{fileName(row.used)}</span>
+                          {#if !row.searched}
+                            <span
+                              class="flag-matched-more text-muted"
+                              title="Its folder couldn't be fully searched, so the recording already in use is kept"
+                            >
+                              (kept — folder not fully searched)
+                            </span>
+                          {:else if row.others.length > 0}
+                            <span class="flag-matched-more text-muted" title={row.others.join('\n')}>
+                              +{row.others.length} more ({row.usingFirst
+                                ? 'using the first'
+                                : 'keeping the one already in use'})
                             </span>
                           {/if}
                         </li>
@@ -593,11 +713,11 @@
             type="button"
             class="btn btn-primary"
             data-testid="flag-open-button"
-            disabled={foundIds.length === 0 || searching || importQueue.importing}
+            disabled={usedRows.length === 0 || searching || importQueue.importing}
             onclick={handleOpen}
           >
-            {foundIds.length > 0
-              ? `Open ${foundIds.length} ${plural(foundIds.length, 'recording')}`
+            {usedRows.length > 0
+              ? `Open ${usedRows.length} ${plural(usedRows.length, 'recording')}`
               : 'Open recordings'}
           </button>
         {/if}
