@@ -135,7 +135,9 @@ the repo, so it does not come along in a zip or a clone. A new machine
 starts with an empty review history; the app just re-detects on first open.
 
 Deleting that file resets every file's saved review. Per-file, the in-app
-**Start fresh** button does the same thing for one recording.
+**Start fresh** button does the same thing for one recording. The database
+runs in WAL mode, so recent writes can sit in `state.db-wal` beside it while
+the app is open — close the app before copying or deleting `state.db`.
 
 FP/FN reviews (imported false positive / negative lists, the animals chosen
 and the folders searched) and Recent files are kept in the Electron

@@ -12,6 +12,7 @@ import scipy.signal
 from fastapi import APIRouter, Request
 
 from backend import db
+from backend.locks import path_lock
 from backend.models import (
     BeatAddRequest,
     BeatAddResult,
@@ -222,6 +223,15 @@ def snap_beat(payload: BeatSnapRequest, request: Request) -> BeatSnapResult:
 def add_beat(payload: BeatAddRequest, request: Request) -> BeatAddResult:
     """Insert a beat at the sample nearest `ts`. Saved to SQLite and to the
     in-memory beat cache; the neighbouring beat's RR/HR are recomputed."""
+    # The beat frame is read, extended and stored back as one step, so the lock
+    # is taken before `_prepare` reads it: a concurrent arrhythmia run, delete
+    # or review would otherwise have its result overwritten by (or overwrite)
+    # this frame.
+    with path_lock(payload.path):
+        return _add_beat_locked(payload, request)
+
+
+def _add_beat_locked(payload: BeatAddRequest, request: Request) -> BeatAddResult:
     ctx, error = _prepare(request, payload)
     if error:
         return BeatAddResult(status="error", error=error)

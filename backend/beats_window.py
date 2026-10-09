@@ -22,6 +22,10 @@ def get_beat_window(
         )
 
     filtered = df[(df["ts"] >= start) & (df["ts"] <= end)]
+    # Which optional columns exist is read from the frame actually being
+    # iterated (writers replace the cached frame rather than editing it, but
+    # this way the checks below can never disagree with the rows).
+    columns = set(filtered.columns)
 
     beats = []
     for row in filtered.itertuples():
@@ -31,22 +35,23 @@ def get_beat_window(
             "r_amplitude": row.R_amplitude,
             "hr": row.HR,
         }
-        if "manual_added_at" in df.columns:
+        if "manual_added_at" in columns:
             value = row.manual_added_at
             kwargs["manual_added_at"] = None if pd.isna(value) else str(value)
         for col in OPTIONAL_COLUMNS:
-            if col in df.columns:
+            if col in columns:
                 value = getattr(row, col)
                 kwargs[col] = None if pd.isna(value) else bool(value)
         # `review_state`/`reassigned_category` are only ever added to
-        # beat_cache[path] by a review action or a reopen/re-persist sync
-        # (see backend/db_routes.py) — absent (a never-reviewed file this
-        # session) or NaN (a row that sync didn't have a value for) both
-        # mean the beat itself is genuinely unreviewed.
-        if "review_state" in df.columns:
+        # beat_cache[path] by a review action, a re-detect that restores saved
+        # review state, or a reopen/re-persist sync (see backend/db_routes.py)
+        # — absent (a never-reviewed file this session) or NaN (a row that
+        # sync didn't have a value for) both mean the beat itself is
+        # genuinely unreviewed.
+        if "review_state" in columns:
             value = row.review_state
             kwargs["review_state"] = "unreviewed" if pd.isna(value) else value
-        if "reassigned_category" in df.columns:
+        if "reassigned_category" in columns:
             value = row.reassigned_category
             kwargs["reassigned_category"] = None if pd.isna(value) else value
         beats.append(WindowBeat(**kwargs))
@@ -70,7 +75,10 @@ def typical_rr_for(request: Request, path: str, df: pd.DataFrame) -> float | Non
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
     value = ml_tools.estimate_typical_rr(ts, bandwidth=bandwidth)
-    cache[path] = (fingerprint, value)
+    # Only remember it while the file still has beats: an evicted path must
+    # not get an entry re-created by a request that was already in flight.
+    if path in request.app.state.beat_cache:
+        cache[path] = (fingerprint, value)
     return value
 
 

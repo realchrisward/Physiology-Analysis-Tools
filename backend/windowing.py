@@ -1,3 +1,5 @@
+import threading
+
 import numpy
 import pandas
 from fastapi import APIRouter, Request
@@ -6,6 +8,12 @@ from physiology_analysis_tools.modules import heartbeat_detection
 from backend.models import ChannelWindowResult
 
 router = APIRouter(prefix="/channels", tags=["channels"])
+
+# Every distinct zoom/pan is a new window_cache key (~450 KB of result), so an
+# uncapped cache grows for as long as the app is open. Oldest-inserted entries
+# go first; a re-request just recomputes.
+WINDOW_CACHE_MAX_ENTRIES = 256
+_window_cache_write_lock = threading.Lock()
 
 
 def min_max_downsample(x_val, y_val, n_bins):
@@ -93,8 +101,9 @@ def get_filtered_channel(request, path, channel, cache_entry):
 
     cache_key = (path, channel, order, cutoff)
     cache = request.app.state.filtered_signal_cache
-    if cache_key in cache:
-        return cache[cache_key]
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     df = cache_entry["df"]
     time_values = df[cache_entry["time_column"]]
@@ -106,8 +115,35 @@ def get_filtered_channel(request, path, channel, cache_entry):
     # basic_filter returns a bare array; re-attach the frame's own index so
     # the windowing filter below aligns row-for-row with the time column.
     series = pandas.Series(filtered, index=df.index)
-    cache[cache_key] = series
+    # Don't resurrect an entry for a file that was evicted or re-imported
+    # while this filter ran; the next request recomputes against the live data.
+    if request.app.state.signal_cache.get(path) is cache_entry:
+        # Changing the filter settings leaves this channel's copies for the
+        # old order/cutoff unreachable (each is a whole-channel array), so
+        # drop them rather than let them pile up.
+        for key in list(cache):
+            if key[0] == path and key[1] == channel and key != cache_key:
+                cache.pop(key, None)
+        cache[cache_key] = series
     return series
+
+
+def remember_window(window_cache, cache_key, result) -> None:
+    """Memoize a window result, keeping the cache under its size cap.
+
+    Lookups stay lock-free (`.get`); only inserts and the trim are serialized
+    so two inserting threads don't both trim the same overshoot.
+    """
+    with _window_cache_write_lock:
+        window_cache[cache_key] = result
+        while len(window_cache) > WINDOW_CACHE_MAX_ENTRIES:
+            try:
+                oldest = next(iter(window_cache))
+            except (StopIteration, RuntimeError):
+                # Emptied, or a concurrent eviction resized the dict under the
+                # iterator: the next insert trims again.
+                break
+            window_cache.pop(oldest, None)
 
 
 @router.get("/window", response_model=ChannelWindowResult)
@@ -131,12 +167,16 @@ def get_channel_window(
     )
     cache_key = (path, channel, start, end, resolution, filter_params)
     window_cache = request.app.state.window_cache
-    if cache_key in window_cache:
-        return window_cache[cache_key]
 
+    # Checked before the memo so a path that was evicted never serves a window
+    # that an in-flight request managed to re-insert after the eviction.
     cache_entry = request.app.state.signal_cache.get(path)
     if cache_entry is None:
         return ChannelWindowResult(status="error", error=f"File not imported: {path}")
+
+    cached = window_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     if channel not in cache_entry["df"].columns:
         return ChannelWindowResult(status="error", error=f"Unknown channel: {channel}")
@@ -174,5 +214,9 @@ def get_channel_window(
         point_count=len(x),
         downsampled=downsampled,
     )
-    window_cache[cache_key] = result
+    # Only memoize while this is still the file's live data: a re-import or
+    # eviction that landed while the window was computing must not be undone
+    # by a stale result (the invalidation already ran).
+    if request.app.state.signal_cache.get(path) is cache_entry:
+        remember_window(window_cache, cache_key, result)
     return result

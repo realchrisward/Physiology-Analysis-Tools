@@ -1,5 +1,7 @@
+import itertools
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -71,17 +73,58 @@ def default_db_path() -> str:
     return os.path.join(directory, "state.db")
 
 
+# Stored in the database file itself (PRAGMA user_version), so a file that is
+# deleted and recreated (Settings > reset database) is correctly seen as
+# un-initialised again, which a per-path in-process flag would not notice.
+SCHEMA_VERSION = 1
+_schema_lock = threading.Lock()
+
+# How long a connection waits on another writer before "database is locked".
+# The default (5 s) is shorter than a large persist or a burst of them.
+BUSY_TIMEOUT_SECONDS = 30
+
+
 def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA_SQL)
-    # Databases created before manual beat editing lack this column;
-    # CREATE TABLE IF NOT EXISTS above will not add it to an existing table.
-    beat_columns = {row["name"] for row in conn.execute("PRAGMA table_info(beats)")}
-    if "manual_added_at" not in beat_columns:
-        conn.execute("ALTER TABLE beats ADD COLUMN manual_added_at TEXT")
-    conn.commit()
+    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_SECONDS)
+    try:
+        conn.row_factory = sqlite3.Row
+        # WAL lets readers and the one writer run side by side instead of
+        # every write locking everyone out. It is stored in the database file,
+        # so this is a no-op after the first connection to a file.
+        journal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(journal_mode).lower() == "wal":
+            # Safe (no corruption) in WAL mode; only the last commits can be
+            # lost on power failure. Not worth the fsync per commit here.
+            conn.execute("PRAGMA synchronous=NORMAL")
+        if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+            _init_schema(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    """Create/upgrade the tables. Runs once per database file, not per request."""
+    with _schema_lock:
+        # Another thread may have finished while this one waited for the lock.
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            return
+        conn.executescript(SCHEMA_SQL)
+        # Databases created before manual beat editing lack this column;
+        # CREATE TABLE IF NOT EXISTS above will not add it to an existing table.
+        beat_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(beats)")
+        }
+        if "manual_added_at" not in beat_columns:
+            try:
+                conn.execute("ALTER TABLE beats ADD COLUMN manual_added_at TEXT")
+            except sqlite3.OperationalError as e:
+                # Another process upgraded the file between the check and here.
+                if "duplicate column" not in str(e).lower():
+                    raise
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.commit()
 
 
 def get_file_row(
@@ -368,6 +411,48 @@ def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -
     return cursor.rowcount > 0
 
 
+def load_review_state(
+    conn: sqlite3.Connection, file_id: int
+) -> dict[float, tuple[str, str | None]]:
+    """`ts -> (review_state, reassigned_category)` for every beat of the file
+    that has been confirmed/rejected/reassigned. Unreviewed beats are absent."""
+    return {
+        row["ts"]: (row["review_state"], row["reassigned_category"])
+        for row in conn.execute(
+            "SELECT ts, review_state, reassigned_category FROM beats "
+            "WHERE file_id=? AND review_state != 'unreviewed'",
+            (file_id,),
+        ).fetchall()
+    }
+
+
+def with_review_state(
+    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None]]
+) -> pd.DataFrame:
+    """A NEW frame with `review_state`/`reassigned_category` filled in from
+    `review_state` by exact `ts` (default unreviewed/None), same matching rule
+    as `replace_beats`. Never touches `beat_df`: it may be the frame other
+    requests are reading from `beat_cache` right now.
+    """
+    default = ("unreviewed", None)
+    return beat_df.assign(
+        review_state=beat_df["ts"].map(lambda ts: review_state.get(ts, default)[0]),
+        reassigned_category=beat_df["ts"].map(
+            lambda ts: review_state.get(ts, default)[1]
+        ),
+    )
+
+
+def _nullable_bools(beat_df: pd.DataFrame, column: str) -> list:
+    """`column` as a list of bool/None (NaN -> None), or all None when the
+    frame has no such column."""
+    if column not in beat_df.columns:
+        return [None] * len(beat_df)
+    series = beat_df[column]
+    missing = series.isna().to_numpy()
+    return [None if m else bool(v) for v, m in zip(series.tolist(), missing)]
+
+
 def replace_beats(
     conn: sqlite3.Connection, file_id: int, beat_df, *, commit: bool = True
 ) -> dict[float, tuple[str, str | None]]:
@@ -404,53 +489,45 @@ def replace_beats(
     a redetect+re-persist would keep showing as "unreviewed" in the graph
     even though SQLite correctly preserved it.
     """
-    preserved_state: dict[float, tuple[str, str | None]] = {
-        row["ts"]: (row["review_state"], row["reassigned_category"])
-        for row in conn.execute(
-            "SELECT ts, review_state, reassigned_category FROM beats "
-            "WHERE file_id=? AND review_state != 'unreviewed'",
-            (file_id,),
-        ).fetchall()
-    }
+    preserved_state = load_review_state(conn, file_id)
 
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 
-    for row in beat_df.itertuples():
-        optional_values = []
-        for col in OPTIONAL_BEAT_COLUMNS:
-            if col in beat_df.columns:
-                value = getattr(row, col)
-                optional_values.append(None if pd.isna(value) else bool(value))
-            else:
-                optional_values.append(None)
+    # One executemany over precomputed column lists, not an execute per beat:
+    # at ~150k beats the per-row version held the write lock for many seconds,
+    # which is what made every concurrent request time out.
+    ts_values = beat_df["ts"].tolist()
+    optional_columns = [_nullable_bools(beat_df, col) for col in OPTIONAL_BEAT_COLUMNS]
+    default_review = ("unreviewed", None)
+    review_values = [preserved_state.get(ts, default_review) for ts in ts_values]
+    if "manual_added_at" in beat_df.columns:
+        added = beat_df["manual_added_at"]
+        added_missing = added.isna().to_numpy()
+        manual_added_at = [
+            None if m else str(v) for v, m in zip(added.tolist(), added_missing)
+        ]
+    else:
+        manual_added_at = [None] * len(ts_values)
 
-        review_state, reassigned_category = preserved_state.get(
-            row.ts, ("unreviewed", None)
-        )
-        manual_added_at = None
-        if "manual_added_at" in beat_df.columns:
-            value = row.manual_added_at
-            manual_added_at = None if pd.isna(value) else str(value)
-
-        conn.execute(
-            "INSERT INTO beats ("
-            "file_id, ts, rr, r_amplitude, hr, "
-            "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
-            "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
-            "review_state, reassigned_category, manual_added_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                file_id,
-                row.ts,
-                row.RR,
-                row.R_amplitude,
-                row.HR,
-                *optional_values,
-                review_state,
-                reassigned_category,
-                manual_added_at,
-            ),
-        )
+    conn.executemany(
+        "INSERT INTO beats ("
+        "file_id, ts, rr, r_amplitude, hr, "
+        "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
+        "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
+        "review_state, reassigned_category, manual_added_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        zip(
+            itertools.repeat(file_id),
+            ts_values,
+            beat_df["RR"].tolist(),
+            beat_df["R_amplitude"].tolist(),
+            beat_df["HR"].tolist(),
+            *optional_columns,
+            (state for state, _ in review_values),
+            (category for _, category in review_values),
+            manual_added_at,
+        ),
+    )
 
     if commit:
         conn.commit()

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,7 +23,9 @@ def test_real_beats_detected(real_beats_txt_file):
     assert result["mean_hr"] == pytest.approx(650.96, abs=0.01)
     assert result["duration"] == pytest.approx(1.435, abs=0.001)
     assert result["elapsed_seconds"] > 0
-    assert result["file_size_bytes"] == 45877
+    # The on-disk size, not a constant: git checks text examples out with
+    # CRLF line endings on Windows, which changes the byte count.
+    assert result["file_size_bytes"] == os.path.getsize(real_beats_txt_file)
 
     first_beat = result["beats"][0]
     assert first_beat["ts"] == pytest.approx(0.0855, abs=1e-4)

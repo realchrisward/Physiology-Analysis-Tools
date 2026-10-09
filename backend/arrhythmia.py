@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from physiology_analysis_tools.modules import arrhythmia_detection
 
 from backend import categories
+from backend.locks import path_lock
 from backend.models import (
     ArrhythmiaBeat,
     ArrhythmiaDetectionResult,
@@ -30,53 +31,63 @@ def detect_arrhythmias(
             status="error", error=f"Unrecognized method: {payload.method}"
         )
 
-    beat_df = request.app.state.beat_cache.get(payload.path)
-    if beat_df is None:
-        return ArrhythmiaDetectionResult(
-            status="error", error="Beat detection has not been run for this file yet"
-        )
+    # The whole snapshot -> compute -> store sequence holds the path's lock. The
+    # run can take many seconds (unsupervised), and a beat deleted, added or
+    # reviewed meanwhile would otherwise be silently undone when this stores
+    # its result over the frame it started from. Those edits now wait here and
+    # apply on top of the new result instead. (Window reads don't take the
+    # lock: they keep serving the previous frame until this one is swapped in.)
+    with path_lock(payload.path):
+        beat_df = request.app.state.beat_cache.get(payload.path)
+        if beat_df is None:
+            return ArrhythmiaDetectionResult(
+                status="error",
+                error="Beat detection has not been run for this file yet",
+            )
 
-    cache_entry = request.app.state.signal_cache.get(payload.path)
-    if cache_entry is None:
-        return ArrhythmiaDetectionResult(
-            status="error", error="Signal data is not available for this file"
-        )
+        cache_entry = request.app.state.signal_cache.get(payload.path)
+        if cache_entry is None:
+            return ArrhythmiaDetectionResult(
+                status="error", error="Signal data is not available for this file"
+            )
 
-    start = time.monotonic()
-    try:
-        df = arrhythmia_detection.call_arrhythmias(
-            beat_df.copy(),
-            request.app.state.arrhythmia_settings,
-            signals=cache_entry["df"],
-            selected_signal=payload.channel,
-            selected_time=cache_entry["time_column"],
-            arr_methods=mapped_method,
-        )
-    except Exception as e:
-        return ArrhythmiaDetectionResult(
-            status="error", error=str(e), elapsed_seconds=time.monotonic() - start
-        )
+        start = time.perf_counter()
+        try:
+            df = arrhythmia_detection.call_arrhythmias(
+                beat_df.copy(),
+                request.app.state.arrhythmia_settings,
+                signals=cache_entry["df"],
+                selected_signal=payload.channel,
+                selected_time=cache_entry["time_column"],
+                arr_methods=mapped_method,
+            )
+        except Exception as e:
+            return ArrhythmiaDetectionResult(
+                status="error",
+                error=str(e),
+                elapsed_seconds=time.perf_counter() - start,
+            )
 
-    elapsed_seconds = time.monotonic() - start
+        elapsed_seconds = time.perf_counter() - start
 
-    optional_columns = categories.BASE_CATEGORIES
-    present_optional_columns = [c for c in optional_columns if c in df.columns]
-    if present_optional_columns:
-        # any_arrhythmia is computed internally by call_arrhythmias() as
-        # df[categories].any(axis=1, bool_only=True). If any optional
-        # category column ends up with even one real NaN mixed in with real
-        # booleans (e.g. abn_cluster for a beat too close to the signal's
-        # start/end for ml_tools.beatepocher()'s epoch window), pandas gives
-        # that column dtype=object, and bool_only=True silently drops the
-        # ENTIRE column from the aggregation rather than just the NaN rows.
-        # Recompute defensively, OR'd with the library's own value, so this
-        # can only make any_arrhythmia MORE true, never mask a category the
-        # library already reported via a fully-populated column.
-        df["any_arrhythmia"] = df["any_arrhythmia"] | df[
-            present_optional_columns
-        ].fillna(False).astype(bool).any(axis=1)
+        optional_columns = categories.BASE_CATEGORIES
+        present_optional_columns = [c for c in optional_columns if c in df.columns]
+        if present_optional_columns:
+            # any_arrhythmia is computed internally by call_arrhythmias() as
+            # df[categories].any(axis=1, bool_only=True). If any optional
+            # category column ends up with even one real NaN mixed in with real
+            # booleans (e.g. abn_cluster for a beat too close to the signal's
+            # start/end for ml_tools.beatepocher()'s epoch window), pandas gives
+            # that column dtype=object, and bool_only=True silently drops the
+            # ENTIRE column from the aggregation rather than just the NaN rows.
+            # Recompute defensively, OR'd with the library's own value, so this
+            # can only make any_arrhythmia MORE true, never mask a category the
+            # library already reported via a fully-populated column.
+            df["any_arrhythmia"] = df["any_arrhythmia"] | df[
+                present_optional_columns
+            ].fillna(False).astype(bool).any(axis=1)
 
-    request.app.state.beat_cache[payload.path] = df
+        request.app.state.beat_cache[payload.path] = df
 
     beats = []
     for row in df.itertuples():

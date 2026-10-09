@@ -10,6 +10,7 @@ from physiology_analysis_tools.modules import (
 )
 
 from backend import beat_editing, categories, db
+from backend.locks import path_lock
 from backend.models import (
     ArrhythmiaSettingsModel,
     BadDataAddRequest,
@@ -53,10 +54,61 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
         if row is None:
             return FileStateResult(status="ok", found=False)
 
-        beat_rows = conn.execute(
-            "SELECT * FROM beats WHERE file_id=? ORDER BY ts",
-            (row["id"],),
-        ).fetchall()
+        # The cache restore below replaces beat_cache[path] with what SQLite
+        # held when it was read, so the read and the swap must be one step
+        # under the path's lock (an edit landing in between would be undone).
+        # It never WAITS for it though: a lock that is busy means an edit or
+        # arrhythmia run is mid-flight on this file, whose frame is newer than
+        # this snapshot, so skipping the restore is the right answer and a
+        # request that only wants the saved state is not held up behind it.
+        lock = path_lock(path)
+        holding_lock = lock.acquire(blocking=False)
+        try:
+            beat_rows = conn.execute(
+                "SELECT * FROM beats WHERE file_id=? ORDER BY ts",
+                (row["id"],),
+            ).fetchall()
+
+            # Best-effort restore of the in-memory beat_cache entry every other
+            # beat-reading endpoint relies on. This is a side effect on top of
+            # this endpoint's normal response contract, so a malformed restore
+            # must never turn an otherwise-successful GET into an error.
+            # A path evicted since the check above is not restored: nothing
+            # would ever free it.
+            if holding_lock and request.app.state.imported_files.get(path) is imported:
+                try:
+                    if beat_rows:
+                        cache_df = pd.DataFrame(
+                            {
+                                "ts": [beat_row["ts"] for beat_row in beat_rows],
+                                "RR": [beat_row["rr"] for beat_row in beat_rows],
+                                "R_amplitude": [
+                                    beat_row["r_amplitude"] for beat_row in beat_rows
+                                ],
+                                "HR": [beat_row["hr"] for beat_row in beat_rows],
+                            }
+                        )
+                        for col in categories.ALL_OPTIONAL_COLUMNS:
+                            col_values = [beat_row[col] for beat_row in beat_rows]
+                            if any(value is not None for value in col_values):
+                                cache_df[col] = [_to_bool(value) for value in col_values]
+                        if any(beat_row["manual_added_at"] for beat_row in beat_rows):
+                            cache_df["manual_added_at"] = [
+                                beat_row["manual_added_at"] for beat_row in beat_rows
+                            ]
+                        cache_df["review_state"] = [
+                            beat_row["review_state"] for beat_row in beat_rows
+                        ]
+                        cache_df["reassigned_category"] = [
+                            beat_row["reassigned_category"] for beat_row in beat_rows
+                        ]
+                        request.app.state.beat_cache[path] = cache_df
+                except Exception:
+                    pass
+        finally:
+            if holding_lock:
+                lock.release()
+
         beats = [
             PersistedBeat(
                 ts=beat_row["ts"],
@@ -87,40 +139,6 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             )
             for mark_row in mark_rows
         ]
-
-        # Best-effort restore of the in-memory beat_cache entry every other
-        # beat-reading endpoint relies on. This is a side effect on top of
-        # this endpoint's normal response contract, so a malformed restore
-        # must never turn an otherwise-successful GET into an error.
-        try:
-            if beat_rows:
-                cache_df = pd.DataFrame(
-                    {
-                        "ts": [beat_row["ts"] for beat_row in beat_rows],
-                        "RR": [beat_row["rr"] for beat_row in beat_rows],
-                        "R_amplitude": [
-                            beat_row["r_amplitude"] for beat_row in beat_rows
-                        ],
-                        "HR": [beat_row["hr"] for beat_row in beat_rows],
-                    }
-                )
-                for col in categories.ALL_OPTIONAL_COLUMNS:
-                    col_values = [beat_row[col] for beat_row in beat_rows]
-                    if any(value is not None for value in col_values):
-                        cache_df[col] = [_to_bool(value) for value in col_values]
-                if any(beat_row["manual_added_at"] for beat_row in beat_rows):
-                    cache_df["manual_added_at"] = [
-                        beat_row["manual_added_at"] for beat_row in beat_rows
-                    ]
-                cache_df["review_state"] = [
-                    beat_row["review_state"] for beat_row in beat_rows
-                ]
-                cache_df["reassigned_category"] = [
-                    beat_row["reassigned_category"] for beat_row in beat_rows
-                ]
-                request.app.state.beat_cache[path] = cache_df
-        except Exception:
-            pass
 
         beat_settings = (
             BeatSettingsModel(**json.loads(row["beat_settings_json"]))
@@ -182,6 +200,15 @@ def put_channel(
 def persist_beats(
     payload: PersistBeatsRequest, request: Request
 ) -> PersistBeatsResult:
+    # Snapshot, SQLite write and cache swap are one step under the path's lock,
+    # so an edit made during the write cannot be lost from the cache.
+    with path_lock(payload.path):
+        return _persist_beats_locked(payload, request)
+
+
+def _persist_beats_locked(
+    payload: PersistBeatsRequest, request: Request
+) -> PersistBeatsResult:
     imported = request.app.state.imported_files.get(payload.path)
     if imported is None or imported.status != "ok":
         return PersistBeatsResult(
@@ -211,22 +238,18 @@ def persist_beats(
         preserved_state = db.replace_beats(conn, file_id, beat_df, commit=False)
         conn.commit()
 
-        # Sync review_state/reassigned_category onto the SAME beat_cache[path]
+        # Sync review_state/reassigned_category onto the beat_cache[path]
         # DataFrame `/beats/window` reads from — replace_beats above only
         # preserved them in SQLite; without this, a beat reviewed before this
         # redetect+persist would show as "unreviewed" on the graph until
         # individually touched again. Every row gets a value (defaulting to
-        # unreviewed/None) — beat_df's index isn't guaranteed to be 0-based
-        # after upstream filtering, so this goes by `ts` via .items() rather
-        # than positional assignment.
-        review_states = {}
-        reassigned_categories = {}
-        for ts in beat_df["ts"]:
-            state, category = preserved_state.get(ts, ("unreviewed", None))
-            review_states[ts] = state
-            reassigned_categories[ts] = category
-        beat_df["review_state"] = beat_df["ts"].map(review_states)
-        beat_df["reassigned_category"] = beat_df["ts"].map(reassigned_categories)
+        # unreviewed/None), matched by `ts`. This builds a NEW frame and swaps
+        # it in rather than adding the columns to the cached one: window
+        # requests iterate that frame while this runs, and columns appearing
+        # under them mid-iteration made them fail.
+        request.app.state.beat_cache[payload.path] = db.with_review_state(
+            beat_df, preserved_state
+        )
 
         return PersistBeatsResult(status="ok", count=len(beat_df))
     except Exception as e:
@@ -238,6 +261,16 @@ def persist_beats(
 
 @router.patch("/beats/category", response_model=CategoryUpdateResult)
 def update_beat_category(
+    payload: CategoryUpdateRequest, request: Request
+) -> CategoryUpdateResult:
+    # SQLite write + cache update as one step per path (see backend/locks.py):
+    # a review made while an arrhythmia run is computing waits for it and then
+    # applies to the new frame, instead of being overwritten by it.
+    with path_lock(payload.path):
+        return _update_beat_category_locked(payload, request)
+
+
+def _update_beat_category_locked(
     payload: CategoryUpdateRequest, request: Request
 ) -> CategoryUpdateResult:
     if payload.action not in {"confirm", "reject", "reassign", "remove_flag"}:
@@ -288,14 +321,28 @@ def update_beat_category(
         # confirm/reject/reassign is visible immediately without a restart.
         # No cache entry yet is a no-op, not an error — the DB write above
         # already succeeded regardless.
+        # The edit goes on a copy that then replaces the cache entry: window
+        # requests may be iterating the cached frame right now.
         cached_df = request.app.state.beat_cache.get(payload.path)
         if cached_df is not None:
             mask = cached_df["ts"] == updated["ts"]
             if mask.any():
+                new_df = cached_df.copy()
                 for col in categories.ALL_OPTIONAL_COLUMNS:
-                    cached_df.loc[mask, col] = _to_bool(updated[col])
-                cached_df.loc[mask, "review_state"] = updated["review_state"]
-                cached_df.loc[mask, "reassigned_category"] = updated["reassigned_category"]
+                    value = _to_bool(updated[col])
+                    # A flag SQLite has as NULL (arrhythmia ran after the last
+                    # persist) can't be written into a plain bool column; make
+                    # that column nullable first instead of failing the review.
+                    if (
+                        value is None
+                        and col in new_df.columns
+                        and new_df[col].dtype == bool
+                    ):
+                        new_df[col] = new_df[col].astype(object)
+                    new_df.loc[mask, col] = value
+                new_df.loc[mask, "review_state"] = updated["review_state"]
+                new_df.loc[mask, "reassigned_category"] = updated["reassigned_category"]
+                request.app.state.beat_cache[payload.path] = new_df
 
         return CategoryUpdateResult(
             status="ok",
@@ -318,6 +365,13 @@ def delete_beat(payload: BeatDeleteRequest, request: Request) -> BeatDeleteResul
     every beat-reading endpoint serves from, so it disappears from the
     graph, the counts, and the exported report.
     """
+    # SQLite delete + cache rebuild as one step per path (see backend/locks.py),
+    # so a concurrent arrhythmia run cannot put the beat back afterwards.
+    with path_lock(payload.path):
+        return _delete_beat_locked(payload, request)
+
+
+def _delete_beat_locked(payload: BeatDeleteRequest, request: Request) -> BeatDeleteResult:
     imported = request.app.state.imported_files.get(payload.path)
     if imported is None or imported.status != "ok":
         return BeatDeleteResult(
@@ -373,6 +427,13 @@ def discard_file_state(
     Also drops the in-memory beat cache, so nothing survives in one place
     after being discarded from the other.
     """
+    with path_lock(payload.path):
+        return _discard_file_state_locked(payload, request)
+
+
+def _discard_file_state_locked(
+    payload: DiscardStateRequest, request: Request
+) -> DiscardStateResult:
     imported = request.app.state.imported_files.get(payload.path)
     if imported is None or imported.status != "ok":
         return DiscardStateResult(
