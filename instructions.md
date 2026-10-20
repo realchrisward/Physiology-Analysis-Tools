@@ -1,175 +1,169 @@
-# Dev / Testing Setup
+# Setup and running
 
-Branch: `web-ui-redesign`.
+The app has two halves that live in this one repo:
 
-**Prerequisites** (install these first, on any machine):
+- a **Python backend** (`backend/` + the analysis library in `src/`), run from
+  a virtual environment in `.venv`;
+- a **desktop app** (Svelte frontend in `frontend/`, Electron shell in
+  `desktop/`), installed with one `npm install` at the repo root (npm
+  workspaces).
 
-| | Version | Windows check | macOS / Linux check |
-|---|---|---|---|
-| Python | 3.12+ | `py --version` | `python3 --version` |
-| Node.js | 20+ (tested on 22) | `node --version` | `node --version` |
-| Git | any | `git --version` — only needed for the clone route | `git --version` — only needed for the clone route |
-
-Always use the project's own `.venv` — never the bare system `python3`. The
-package is also published to PyPI, so a system interpreter may silently
-resolve to a stale, separately-installed copy of the analysis library
-instead of this working tree.
+`npm run dev` starts everything; Electron launches the Python backend itself.
 
 ---
 
-## Setup A — from a fresh `git clone`
+## What you need
 
-Same commands on every OS:
+| Tool | Version | Check with |
+|---|---|---|
+| Git | any recent | `git --version` |
+| Python | **3.12** (tested; newer versions are untested) | Windows: `py -3.12 --version` · macOS: `python3.12 --version` |
+| Node.js | **22.12 or newer** (22 or 24 LTS recommended) | `node --version` |
+
+**Windows:** install [Python 3.12](https://www.python.org/downloads/) (keep
+"py launcher" ticked), the [Node.js LTS](https://nodejs.org/) installer and
+[Git for Windows](https://git-scm.com/download/win).
+
+**macOS:** with [Homebrew](https://brew.sh/):
 
 ```bash
+brew install python@3.12 node git
+```
+
+---
+
+## First-time setup — Windows
+
+Run these in PowerShell (or the VS Code terminal). The installs take a few
+minutes, mostly downloading.
+
+```powershell
+# 1. Get the code
 git clone https://github.com/realchrisward/Physiology-Analysis-Tools.git
 cd Physiology-Analysis-Tools
 git checkout web-ui-redesign
-```
 
+# 2. Python environment (no need to "activate" it)
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -e . -r backend/requirements.txt
 
-## Setup
+# 3. Node packages: one install covers the frontend and Electron
+npm install
 
-Run from the repo root. Takes a few minutes, mostly downloading.
-
-### 1. Python backend
-
-Windows (PowerShell / cmd):
-
-```bash
-py -m venv .venv
-.venv\Scripts\activate
-
-pip install -e .                            # the analysis library (pyproject.toml)
-pip install -r backend/requirements.txt     # FastAPI backend + test deps
-```
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -e .
-pip install -r backend/requirements.txt
-```
-
-`pip install -e .` pulls in PySide6 and pyqtgraph. Those belong to the old
-desktop app and the new one does not use them, but they are still declared
-in `pyproject.toml`, so expect a large download.
-
-### 2. Node (frontend + Electron)
-
-There are no npm workspaces yet, so install in all three places (same
-commands on every OS):
-
-```bash
-npm install                     # repo root (concurrently, wait-on)
-npm install --prefix frontend
-npm install --prefix desktop
-```
-
-### 3. Verify the setup
-
-All four should pass before you start changing anything.
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-pytest backend/ -q                     # 110 passed, 1 skipped
-npm --prefix frontend run test         # 204 passed
-npm --prefix frontend run check        # 0 errors (2 known warnings)
-npm --prefix desktop run test          # 5 passed
-```
-
-macOS / Linux:
-
-```bash
-source .venv/bin/activate
-pytest backend/ -q
-npm --prefix frontend run test
-npm --prefix frontend run check
-npm --prefix desktop run test
+# 4. Run
+npm run dev
 ```
 
 ---
 
-## Running the app
+## First-time setup — macOS
 
-Same command on every OS, from the repo root:
+```bash
+# 1. Get the code
+git clone https://github.com/realchrisward/Physiology-Analysis-Tools.git
+cd Physiology-Analysis-Tools
+git checkout web-ui-redesign
+
+# 2. Python environment (no need to "activate" it)
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e . -r backend/requirements.txt
+
+# 3. Node packages: one install covers the frontend and Electron
+npm install
+
+# 4. Run
+npm run dev
+```
+
+**macOS limitation:** `.adicht` (LabChart) recordings can only be opened on
+Windows — the reader library ships Windows-only binaries. Everything else
+works; export recordings as `.txt`, `.edf` or `.mat` to use them on a Mac.
+
+---
+
+## Running it again (every time after setup)
+
+From the repo folder:
 
 ```bash
 npm run dev
 ```
 
-Starts Vite and Electron together. Electron spawns the Python backend
-itself, on an automatically chosen free port — no separate `uvicorn` needed.
-It runs `.venv`'s interpreter directly, so the venv does **not** need to be
-activated in the shell you launch from, but it does need to exist at
-`<repo root>/.venv`.
+That's all — the virtual environment does not need activating; Electron finds
+`.venv` by itself.
 
-To poke at the API on its own:
-
-Windows:
-
-```powershell
-.venv\Scripts\activate
-uvicorn backend.app:app --reload        # http://127.0.0.1:8000/docs
-```
-
-macOS / Linux:
+### Getting the latest code
 
 ```bash
-source .venv/bin/activate
-uvicorn backend.app:app --reload
+git pull
+npm install
 ```
+
+then reinstall the Python packages in case they changed:
+
+- Windows: `.venv\Scripts\python -m pip install -e . -r backend/requirements.txt`
+- macOS: `.venv/bin/python -m pip install -e . -r backend/requirements.txt`
+
+and `npm run dev` as usual. Both installs are quick when nothing changed.
+
+---
+
+## Checking the install (optional)
+
+| | Windows | macOS |
+|---|---|---|
+| Frontend + Electron tests | `npm test` | `npm test` |
+| Type check | `npm run check` | `npm run check` |
+| Backend tests | `.venv\Scripts\python -m pytest backend/tests -q` | `.venv/bin/python -m pytest backend/tests -q` |
+
+The backend's `.adicht` test skips itself on macOS.
+
+To run the backend API on its own (interactive docs at
+http://127.0.0.1:8000/docs):
+
+- Windows: `.venv\Scripts\python -m uvicorn backend.app:app --reload`
+- macOS: `.venv/bin/python -m uvicorn backend.app:app --reload`
+
+---
+
+## Troubleshooting
+
+- **"Python virtual environment not found"** when the app starts — `.venv`
+  is missing or was created somewhere else. It must be in the repo root:
+  re-run step 2 from inside the `Physiology-Analysis-Tools` folder.
+- **`py` is not recognised (Windows)** — reinstall Python from python.org with
+  the py launcher ticked, then open a new terminal.
+- **`npm install` complains about the Node version** — Electron needs Node
+  22.12+. Install the current LTS and open a new terminal.
+- **First start is slow** — the first `npm run dev` downloads Electron
+  (~100 MB) and the backend's first launch can take a while (antivirus scans
+  the new packages). Later starts are fast.
+- **Port 5173 already in use** — another dev server is running; close it.
+- **The Python install is big** — `pip install -e .` also pulls in PySide6 and
+  pyqtgraph for the original desktop app; the new app doesn't use them.
 
 ---
 
 ## Where state lives
 
-Review state (channel choice, beats, confirm/reject decisions, bad-data
-marks) is in SQLite at `~/.physiology_analysis_tools/state.db` — **outside**
-the repo, so it does not come along in a zip or a clone. A new machine
-starts with an empty review history; the app just re-detects on first open.
-
-Deleting that file resets every file's saved review. Per-file, the in-app
-**Start fresh** button does the same thing for one recording. The database
-runs in WAL mode, so recent writes can sit in `state.db-wal` beside it while
-the app is open — close the app before copying or deleting `state.db`.
-
-FP/FN reviews (imported false positive / negative lists, the animals chosen
-and the folders searched) and Recent files are kept in the Electron
-profile's localStorage, not in SQLite. A list is read once when it is
-imported, so moving the CSV afterwards is fine; the recordings it matched
-must stay where they were found (**Find recordings…** on Home searches
-again).
-
-Sample recordings for manual testing are in
-`src/physiology_analysis_tools/examples/` (`57 long.txt` and `9 long.txt`
-are the most useful — real traces with a decent number of beats).
+- **Review work** (channel choice, beats, confirm/reject decisions, bad-data
+  marks) is in SQLite at `~/.physiology_analysis_tools/state.db`, outside the
+  repo. Deleting it resets every file's saved review; **Start fresh** in the
+  app does the same for one recording. It runs in WAL mode — close the app
+  before copying or deleting it.
+- **Recent files, FP/FN review projects and report links** (which report goes
+  with which recording) are kept in the app's own profile storage. FP/FN lists
+  and reports are read when loaded, but the recordings must stay where they
+  were found (**Find recordings…** on Home searches again).
+- **Sample recordings** for trying the app are in
+  `src/physiology_analysis_tools/examples/`.
 
 ---
 
-## Known environment gaps
+## Known limitations
 
-- **`.adicht` support is unverified here.** `adi-reader` has a native
-  extension that does not build on macOS, so that import path needs a real
-  Windows machine to test. The backend test for it self-skips when the
-  package is unavailable.
-- **Nothing is packaged yet.** There is no installer or bundled build —
-  `npm run dev` from a checkout is the only way to run the app. Bundling the
-  Python backend (PyInstaller/Nuitka) has not been started.
-- **`backend/requirements.txt` mixes runtime and test dependencies**
-  (`pytest`, `openpyxl` are test-only). Worth splitting before anyone builds
-  a distributable.
-
----
-
-## Further reading
-
-- `BACKEND_OVERVIEW.md` — API reference, SQLite schema, design decisions.
-- `FRONTEND_OVERVIEW.md` — component structure and frontend conventions.
-- `FEATURE_PARITY.md` — what the new app does vs. the original PySide6 one.
-- `algo.md` — the beat-of-interest detection algorithm.
+- `.adicht` files open on Windows only (see above).
+- There is no installer yet — the app runs from a checkout with
+  `npm run dev`.

@@ -2,8 +2,15 @@
   "name": "physiology-analysis-tools",
   "private": true,
   "version": "0.0.0",
+  "workspaces": [
+    "frontend",
+    "desktop"
+  ],
   "scripts": {
-    "dev": "concurrently -k -n vite,electron \"npm run dev --prefix frontend\" \"wait-on http://localhost:5173 && npm start --prefix desktop\""
+    "dev": "concurrently -k -n vite,electron \"npm run dev -w frontend\" \"wait-on http://localhost:5173 && npm start -w desktop\"",
+    "build": "npm run build -w frontend",
+    "check": "npm run check -w frontend",
+    "test": "npm run test -w frontend && npm run test -w desktop"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",
