@@ -114,9 +114,13 @@ function beatsOfInterestOk(ts: number[]) {
 //   GET /channels/window    - EcgGraph's initial waveform load
 //   GET /beats/window       - EcgGraph's initial marker load
 //   GET /beats/of-interest  - the beat-of-interest navigation list
+//   GET /reports/state      - report labels: does the backend still have a report
+//   POST /reports/candidates - report labels: is there one named after the recording
+// (the last two fall through to the tests' generic answer, which carries no
+// report: "none attached, none suggested".)
 // Tests wait for exactly this many calls to know the mount has settled, and
 // then assert further calls relative to it.
-const MOUNT_FETCH_COUNT = 4
+const MOUNT_FETCH_COUNT = 6
 
 // The mounted EcgGraph (see ecg-graph tests for its own coverage) fetches
 // `/channels/window` on mount independently of whatever `/beats/detect`
@@ -132,6 +136,7 @@ function mockFetch(beatsResponse: { ok: boolean; json: () => Promise<unknown> })
     if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
     if (url.includes('/files/state')) return Promise.resolve(fileStateResponse())
     if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
+    if (url.includes('/reports/')) return Promise.resolve({ ok: true, json: async () => ({ status: 'ok' }) })
     return Promise.resolve(beatsResponse)
   })
 }

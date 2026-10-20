@@ -14,11 +14,25 @@
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
+  import ReportBeatInfo from './ReportBeatInfo.svelte'
+  import ReportControl from './ReportControl.svelte'
   import Icon from '../shared/Icon.svelte'
   import { clearArrhythmiaRuns, getArrhythmiaRuns, markArrhythmiaRan } from '../../lib/stores/arrhythmiaRuns.svelte'
   import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import { flagFocus, flagsForPath, reportFlagFocus } from '../../lib/stores/flagProjects.svelte'
-  import type { BadDataMark, CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
+  import {
+    attachReport,
+    detachReport,
+    dismissReportSuggestion,
+    getReportSession,
+    getReportSuggestion,
+    isReportKept,
+    keepReport,
+    refreshReportNavigation,
+    restoreLinkedReport,
+    suggestReport,
+  } from '../../lib/stores/reports.svelte'
+  import type { BadDataMark, CategoryUpdateResult, ReportFilter, WindowBeat } from '../../lib/api/types'
 
   interface DetectionSummary {
     status: 'pending' | 'ok' | 'error' | null
@@ -229,6 +243,166 @@
 
   function refreshGraphBeats() {
     beatsRefreshToken += 1
+    // Every change to OUR beats or review also changes how they compare with
+    // the report loaded for this recording (matches, disagreements).
+    scheduleReportSync()
+  }
+
+  // ---- Report labels ------------------------------------------------------
+  // An xlsx report shown read-only over the recording (see
+  // lib/stores/reports.svelte.ts — not to be confused with `report` further
+  // down, the "Generate Report" export of OUR review). The store owns the
+  // state, keyed by recording path; this component derives what the graph and
+  // the panels need from it and keeps it in step with our beats.
+  const NO_TARGETS: Partial<Record<ReportFilter, number[]>> = {}
+  const NO_MARKS: { start: number; stop: number }[] = []
+
+  let reportSession = $derived(getReportSession(path))
+  let reportLoaded = $derived(reportSession.status === 'ready')
+  // Bumped (debounced, see `scheduleReportSync`) when the graph should re-read
+  // the report's beats against our changed ones.
+  let reportRefreshToken = $state(0)
+  let reportBadData = $derived(reportSession.summary?.bad_data_marks ?? NO_MARKS)
+  let reportTargets = $derived(
+    reportSession.navigation?.status === 'ok' ? (reportSession.navigation.targets ?? NO_TARGETS) : NO_TARGETS,
+  )
+  let suggestedReport = $derived(getReportSuggestion(path))
+  // Set while the loaded report's file name is not the recording's: it stays
+  // loaded, but the technician is asked once whether it is the right one.
+  let nameMismatch = $derived(
+    reportSession.status === 'ready' &&
+      reportSession.summary &&
+      reportSession.summary.name_matches_recording === false &&
+      !isReportKept(path, reportSession.summary.report_path)
+      ? reportSession.summary
+      : null,
+  )
+  // A report beat the graph navigated to that we have no beat for (so there is
+  // no selection to describe it): the beat panel shows it instead.
+  let reportFocusTs: number | null = $state(null)
+
+  function fileNameOf(filePath: string): string {
+    return filePath.split(/[\\/]/).pop() ?? filePath
+  }
+
+  // A burst of changes (ten quick confirms, a re-detection followed by an
+  // arrhythmia run) must cost one report refresh, not ten: trailing debounce,
+  // but never later than `MAX_WAIT` after the first change of the burst.
+  const REPORT_SYNC_DELAY_MS = 300
+  const REPORT_SYNC_MAX_WAIT_MS = 1500
+  let reportSyncTimer: ReturnType<typeof setTimeout> | null = null
+  let reportSyncFirstAt = 0
+  // A change that happened while the report itself was still loading.
+  let reportSyncWaitingForLoad = false
+
+  function scheduleReportSync() {
+    if (destroyed) return
+    const status = getReportSession(path).status
+    if (status === 'loading') {
+      reportSyncWaitingForLoad = true
+      return
+    }
+    if (status !== 'ready') return
+    const now = Date.now()
+    if (reportSyncTimer === null) reportSyncFirstAt = now
+    else clearTimeout(reportSyncTimer)
+    const wait = Math.max(0, Math.min(REPORT_SYNC_DELAY_MS, reportSyncFirstAt + REPORT_SYNC_MAX_WAIT_MS - now))
+    reportSyncTimer = setTimeout(runReportSync, wait)
+  }
+
+  function runReportSync() {
+    reportSyncTimer = null
+    if (destroyed || getReportSession(path).status !== 'ready') return
+    reportRefreshToken += 1
+    void refreshReportNavigation(path)
+  }
+
+  // The report finished loading after a change to our beats was noted: that
+  // load may predate the change, so refresh once it is there. Deferred a
+  // microtask like the other effect-driven refreshes in this file.
+  $effect(() => {
+    if (reportSession.status === 'ready' && reportSyncWaitingForLoad) {
+      reportSyncWaitingForLoad = false
+      queueMicrotask(scheduleReportSync)
+    }
+  })
+
+  // Beats added by hand have no event of their own (the graph adds them and
+  // then selects the new beat), so the first selection of one is the cue.
+  const syncedManualBeats = new Set<number>()
+
+  // Opening a recording: the report this recording had (still on the backend,
+  // or re-loaded from its saved link), and otherwise a suggestion for one.
+  async function initReportLabels() {
+    if (destroyed) return
+    await restoreLinkedReport(path)
+    if (destroyed) return
+    await suggestReport(path)
+  }
+
+  // Dropping a report file anywhere on the workspace attaches it.
+  let dragging = $state(false)
+  let dragDepth = 0
+  let dropMessage: string | null = $state(null)
+  let dropMessageTimer: ReturnType<typeof setTimeout> | null = null
+
+  function carriesFiles(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  }
+
+  function handleDragEnter(event: DragEvent) {
+    if (!carriesFiles(event)) return
+    event.preventDefault()
+    dragDepth += 1
+    dragging = true
+  }
+
+  function handleDragOver(event: DragEvent) {
+    if (!carriesFiles(event)) return
+    // Without this the browser refuses the drop (and, in Electron, navigates
+    // to the dropped file).
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function handleDragLeave(event: DragEvent) {
+    if (!carriesFiles(event)) return
+    dragDepth = Math.max(0, dragDepth - 1)
+    if (dragDepth === 0) dragging = false
+  }
+
+  function showDropMessage(message: string) {
+    dropMessage = message
+    if (dropMessageTimer !== null) clearTimeout(dropMessageTimer)
+    dropMessageTimer = setTimeout(() => {
+      dropMessageTimer = null
+      if (!destroyed) dropMessage = null
+    }, 8000)
+  }
+
+  function handleDrop(event: DragEvent) {
+    if (!carriesFiles(event)) return
+    event.preventDefault()
+    dragDepth = 0
+    dragging = false
+
+    const files = Array.from(event.dataTransfer?.files ?? [])
+    if (files.length !== 1) {
+      showDropMessage('Drop a single .xlsx report to load it as report labels.')
+      return
+    }
+    const file = files[0]
+    if (!/\.(xlsx|xlsm)$/i.test(file.name)) {
+      showDropMessage(`${file.name} is not an .xlsx report, so it was ignored.`)
+      return
+    }
+    const filePath = window.api?.getPathForFile?.(file) ?? ''
+    if (!filePath) {
+      showDropMessage(`Could not find ${file.name} on disk. Use "Load report…" to choose it instead.`)
+      return
+    }
+    dropMessage = null
+    void attachReport(path, filePath)
   }
 
   // FP/FN review: the beats a model flagged in THIS recording, if it belongs
@@ -279,6 +453,12 @@
   let destroyed = false
   onMount(() => () => {
     destroyed = true
+    // Report work is the store's (it lands in this recording's slot whenever
+    // it finishes); what must stop here is this screen reacting to it.
+    if (reportSyncTimer !== null) clearTimeout(reportSyncTimer)
+    reportSyncTimer = null
+    if (dropMessageTimer !== null) clearTimeout(dropMessageTimer)
+    dropMessageTimer = null
   })
 
   // Resolves to whether the backend actually has beats for this file. An
@@ -519,6 +699,9 @@
       // but this stays defensive about regardless — lands here. See
       // `hydrationChecked`'s own declaration above for what this unblocks.
       hydrationChecked = true
+      // The report is looked for only now: matching it against our beats
+      // needs the backend to have restored them, which the state check above did.
+      void initReportLabels()
     }
   })
 
@@ -535,6 +718,7 @@
   $effect(() => {
     activeChannel
     selectedBeat = null
+    reportFocusTs = null
     persistPending = false
     persistError = null
   })
@@ -574,6 +758,11 @@
 
   function handleBeatSelect(beat: WindowBeat) {
     selectedBeat = beat
+    reportFocusTs = null
+    if (beat.manual_added_at && !syncedManualBeats.has(beat.ts)) {
+      syncedManualBeats.add(beat.ts)
+      scheduleReportSync()
+    }
     if (lastPersistedChannel !== activeChannel) {
       void ensureChannelPersisted(activeChannel)
     }
@@ -669,6 +858,8 @@
       // keyed/mounted against.
       activeChannel = channel
       clearArrhythmiaRuns(path)
+      // A different channel is a different set of beats for the report to match.
+      scheduleReportSync()
       // Remember this channel choice for next time this file is reopened
       // (F5's `GET /files/state` hydration above reads it back). Deliberately
       // fire-and-forget: `putChannel`/`apiPost` never throws (see http.ts),
@@ -740,11 +931,22 @@
   }
 </script>
 
-<div class="review-workspace" data-testid="review-workspace">
-  <!-- One merged bar: channel choice, beat detection, and arrhythmia
-       detection used to be two separate stacked toolbar rows — now three
-       labeled groups (divided by a thin rule) in a single wrapping row, so
-       the vertical space the second row used to take is freed up for the
+<!-- Dropping a report file anywhere on the workspace loads it as report labels.
+     Drag events only — nothing here reacts to the mouse, so the graph's own
+     pan/zoom/mark gestures are untouched — and only drags that carry files. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="review-workspace"
+  data-testid="review-workspace"
+  ondragenter={handleDragEnter}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+>
+  <!-- One merged bar: channel choice, beat detection, arrhythmia detection
+       and report labels used to be two separate stacked toolbar rows — now
+       four labeled groups (divided by a thin rule) in a single wrapping row,
+       so the vertical space the second row used to take is freed up for the
        graph below instead. -->
   <div class="review-toolbar">
     <div class="toolbar-group">
@@ -838,7 +1040,80 @@
         </span>
       {/if}
     </div>
+
+    <span class="toolbar-divider" aria-hidden="true"></span>
+
+    <!-- Report labels: an xlsx report with per-beat labels, shown read-only
+         over this recording. A per-file action like the two groups above. -->
+    <div class="toolbar-group">
+      <span class="toolbar-group-label">Report labels</span>
+      <ReportControl {path} />
+    </div>
   </div>
+
+  {#if nameMismatch}
+    <div class="banner report-strip report-strip-warn" data-testid="report-name-mismatch" role="status">
+      <Icon name="alert-triangle" size={14} />
+      <span>
+        This report is named {nameMismatch.filename} but the open recording is {fileRow?.filename ?? fileNameOf(path)}. Keep
+        it?
+      </span>
+      <button type="button" class="btn btn-sm" data-testid="report-keep-button" onclick={() => keepReport(path)}>
+        Keep
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="report-mismatch-remove-button"
+        onclick={() => void detachReport(path)}
+      >
+        Remove
+      </button>
+    </div>
+  {/if}
+
+  {#if suggestedReport}
+    {@const candidate = suggestedReport}
+    <div class="banner report-strip report-strip-info" data-testid="report-suggestion" role="status">
+      <Icon name="file-text" size={14} />
+      <span>
+        Found a report for this recording:
+        <strong title={candidate}>{fileNameOf(candidate)}</strong>
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="report-suggestion-load-button"
+        onclick={() => void attachReport(path, candidate)}
+      >
+        Load
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="report-suggestion-dismiss-button"
+        aria-label="Dismiss suggestion"
+        onclick={() => dismissReportSuggestion(path)}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
+
+  {#if dropMessage}
+    <div class="banner report-strip report-strip-warn" data-testid="report-drop-message" role="status">
+      <Icon name="alert-circle" size={14} />
+      <span>{dropMessage}</span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        aria-label="Dismiss"
+        onclick={() => (dropMessage = null)}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
 
   {#if restored}
     <div class="restore-banner" data-testid="restored-session-banner">
@@ -909,6 +1184,11 @@
             flaggedTimes={flags}
             {focusRequest}
             onFlagNavigate={(ts) => reportFlagFocus(path, ts)}
+            {reportLoaded}
+            {reportRefreshToken}
+            {reportTargets}
+            {reportBadData}
+            onReportNavigate={(ts) => (reportFocusTs = ts)}
           />
         {/key}
       {/if}
@@ -917,6 +1197,9 @@
     {#snippet focusOverlay()}
       {#if selectedBeat && !persistPending && !(persistError && lastPersistedChannel !== activeChannel)}
         {#key selectedBeat.ts}
+          {#if reportLoaded}
+            <ReportBeatInfo {path} ts={selectedBeat.ts} refreshToken={reportRefreshToken} />
+          {/if}
           <BeatCategoryPanel
             {path}
             beat={selectedBeat}
@@ -958,6 +1241,13 @@
               {/if}
             </p>
           </div>
+          {#if reportLoaded && reportFocusTs !== null}
+            <!-- The graph stepped to a report beat none of ours sits on, so
+                 there is no selection: say what the report has there. -->
+            <div class="report-focus">
+              <ReportBeatInfo {path} ts={reportFocusTs} refreshToken={reportRefreshToken} />
+            </div>
+          {/if}
         {:else if persistPending}
           <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
         {:else if persistError && lastPersistedChannel !== activeChannel}
@@ -976,6 +1266,9 @@
           <p class="text-muted" data-testid="beat-panel-in-focus">Beat details are shown on the graph in focus mode.</p>
         {:else}
           {#key selectedBeat.ts}
+            {#if reportLoaded}
+              <ReportBeatInfo {path} ts={selectedBeat.ts} refreshToken={reportRefreshToken} />
+            {/if}
             <BeatCategoryPanel
               {path}
               beat={selectedBeat}
@@ -1010,16 +1303,73 @@
       {/if}
     </div>
   </div>
+
+  {#if dragging}
+    <div class="drop-overlay" data-testid="report-drop-overlay">
+      <Icon name="upload" size={28} />
+      <span>Drop to load as report labels</span>
+    </div>
+  {/if}
 </div>
 
 <style>
   .review-workspace {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
     padding: var(--space-4);
     height: 100%;
     box-sizing: border-box;
+  }
+
+  /* Slim notices under the toolbar: report name check, suggestion, bad drop. */
+  .report-strip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+  }
+
+  .report-strip span {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .report-strip-warn {
+    border-color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, var(--color-surface));
+  }
+
+  .report-strip-info {
+    border-color: var(--color-accent);
+    background: var(--color-accent-soft);
+  }
+
+  .report-focus {
+    margin-top: var(--space-3);
+  }
+
+  /* Covers the workspace while files are dragged over it. Never takes pointer
+     events itself, so the drop lands on whatever is underneath. */
+  .drop-overlay {
+    position: absolute;
+    inset: var(--space-2);
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    border: 2px dashed var(--color-accent);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-surface) 85%, transparent);
+    color: var(--color-accent);
+    font-size: var(--font-size-lg);
+    font-weight: 600;
+    pointer-events: none;
   }
 
   .placeholder-hint {

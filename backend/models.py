@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -394,3 +396,122 @@ class EvictResult(BaseModel):
     status: str
     evicted: int = 0
     error: str | None = None
+
+
+# ---- Report labels: an xlsx report (e.g. from the original PySide app, or
+# edited by hand) whose per-beat labels are shown over the open recording.
+# Labels: 2 = confirmed arrhythmia, 1 = detected but not confirmed/rejected,
+# 0 = not detected (normal), -1 = rejected (normal). See backend/reports.py.
+
+
+class ReportLoadRequest(BaseModel):
+    recording_path: str
+    report_path: str
+
+
+class ReportUnloadRequest(BaseModel):
+    recording_path: str
+
+
+class ReportSettingDifference(BaseModel):
+    name: str
+    report_value: str
+    our_value: str
+
+
+class ReportBadDataRange(BaseModel):
+    start: float
+    stop: float
+
+
+class ReportSummary(BaseModel):
+    report_path: str
+    filename: str
+    sheet: str
+    label_column: str
+    # Per-category flag columns found (e.g. annot_prem_beat), in sheet order.
+    category_columns: list[str] = []
+    total_beats: int = 0
+    # Keyed "2", "1", "0", "-1".
+    counts: dict[str, int] = {}
+    ts_start: float | None = None
+    ts_end: float | None = None
+    # The report's file name (minus extension) equals the recording's.
+    name_matches_recording: bool = True
+    # The report's settings sheet (first row), values as strings.
+    settings: dict[str, str] = {}
+    # Detection settings where the report differs from the current ones.
+    settings_differences: list[ReportSettingDifference] = []
+    bad_data_marks: list[ReportBadDataRange] = []
+    # Rows dropped (blank/unreadable ts or label), duplicate ts, etc.
+    skipped_rows: int = 0
+    warnings: list[str] = []
+
+
+class ReportLoadResult(BaseModel):
+    status: str
+    error: str | None = None
+    # None when no report is loaded for the recording (GET /reports/state).
+    summary: ReportSummary | None = None
+
+
+class ReportUnloadResult(BaseModel):
+    status: str
+    error: str | None = None
+
+
+class ReportBeat(BaseModel):
+    ts: float
+    # 2, 1, 0 or -1.
+    label: int
+    # Categories that flagged this beat in the report (annot_<category> != 0,
+    # excluding any_arrhythmia), e.g. ["prem_beat"].
+    categories: list[str] = []
+    # 'exact' | 'near' (within tolerance) | 'none' (no beat of ours there)
+    # | 'unknown' (our beats aren't detected yet).
+    match: str
+    our_ts: float | None = None
+    # 'agree' | 'report_only' (report: arrhythmia, ours: normal/rejected)
+    # | 'ours_only' (ours: confirmed, report: normal/rejected)
+    # | 'pending' (either side detected-but-unreviewed) | 'unmatched' | 'unknown'.
+    agreement: str
+
+
+class ReportWindowResult(BaseModel):
+    status: str
+    error: str | None = None
+    beats: list[ReportBeat] = []
+
+
+class ReportNavigationResult(BaseModel):
+    status: str
+    error: str | None = None
+    # Ascending ts per filter: 'arrhythmia' (label 2), 'unreviewed' (1),
+    # 'rejected' (-1), 'disagreements' (report_only/ours_only), 'not_detected'
+    # (match none).
+    targets: dict[str, list[float]] = {}
+    # Report beats matched to one of our beats (exact or near).
+    matched: int = 0
+    total: int = 0
+    # Our beats with no report beat within tolerance.
+    extra_ours: int = 0
+    # False until our beats exist (detection not run yet).
+    has_our_beats: bool = False
+
+
+class ReportBeatResult(BaseModel):
+    status: str
+    error: str | None = None
+    # The report beat nearest the given ts within tolerance, if any.
+    beat: ReportBeat | None = None
+
+
+class ReportCandidatesRequest(BaseModel):
+    recording_path: str
+    folders: list[str] = []
+
+
+class ReportCandidatesResult(BaseModel):
+    status: str
+    error: str | None = None
+    paths: list[str] = []

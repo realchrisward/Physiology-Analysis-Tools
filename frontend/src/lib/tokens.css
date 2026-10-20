@@ -64,6 +64,14 @@
   --color-flag-fn-soft: rgba(8, 145, 178, 0.14);
   --color-flag-soft: rgba(161, 98, 7, 0.14);
 
+  /* Report labels (an imported xlsx shown under our own marker lane). */
+  --color-report-arr: #be123c;
+  --color-report-pending: #b45309;
+  --color-report-rejected: #64748b;
+  --color-report-normal: #94a3b8;
+  --color-report-unmatched: #7c3aed;
+  --color-report-disagree-soft: rgba(190, 18, 60, 0.12);
+
   /* Spacing scale */
   --space-1: 4px;
   --space-2: 8px;
@@ -141,6 +149,13 @@
     --color-flag-fn-soft: rgba(34, 211, 238, 0.18);
     --color-flag-soft: rgba(250, 204, 21, 0.18);
 
+    --color-report-arr: #fb7185;
+    --color-report-pending: #fbbf24;
+    --color-report-rejected: #94a3b8;
+    --color-report-normal: #64748b;
+    --color-report-unmatched: #c4b5fd;
+    --color-report-disagree-soft: rgba(251, 113, 133, 0.16);
+
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
@@ -195,6 +210,13 @@
   --color-flag-fn-soft: rgba(34, 211, 238, 0.18);
   --color-flag-soft: rgba(250, 204, 21, 0.18);
 
+  --color-report-arr: #fb7185;
+  --color-report-pending: #fbbf24;
+  --color-report-rejected: #94a3b8;
+  --color-report-normal: #64748b;
+  --color-report-unmatched: #c4b5fd;
+  --color-report-disagree-soft: rgba(251, 113, 133, 0.16);
+
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
@@ -248,6 +270,13 @@
   --color-flag-fp-soft: rgba(0, 0, 0, 0.1);
   --color-flag-fn-soft: rgba(0, 0, 0, 0.06);
   --color-flag-soft: rgba(0, 0, 0, 0.06);
+
+  --color-report-arr: #000000;
+  --color-report-pending: #4d4d4d;
+  --color-report-rejected: #737373;
+  --color-report-normal: #a3a3a3;
+  --color-report-unmatched: #262626;
+  --color-report-disagree-soft: rgba(0, 0, 0, 0.1);
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);

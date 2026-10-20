@@ -214,6 +214,7 @@
   import uPlot from 'uplot'
   import 'uplot/dist/uPlot.min.css'
   import { getChannelWindow, getBeatsWindow } from '../../lib/api/windowing'
+  import { getReportBeat, getReportWindow } from '../../lib/api/reports'
   import { addBadData, addBeat, deleteBadData, snapBeat, updateBadData } from '../../lib/api/persistence'
   import { themeState } from '../../lib/stores/theme.svelte'
   import { graphPrefs } from '../../lib/stores/graphPrefs.svelte'
@@ -221,7 +222,38 @@
   import { FLAG_KIND_COLOR_VAR, FLAG_KIND_LABEL, FLAG_KIND_SOFT_VAR, FLAG_KIND_TITLE, formatFlagTime, formatPrediction } from '../../lib/flags'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
-  import type { BadDataMark, FlagKind } from '../../lib/api/types'
+  import type { BadDataMark, FlagKind, ReportBeat, ReportFilter, ReportLabel } from '../../lib/api/types'
+  import {
+    REPORT_AGREEMENT_TEXT,
+    REPORT_FILTERS,
+    REPORT_FILTER_NAME,
+    REPORT_FILTER_TITLE,
+    REPORT_LABELS,
+    REPORT_LABEL_COLOR_VAR,
+    REPORT_LABEL_NAME,
+    REPORT_LABEL_TITLE,
+  } from '../../lib/reports'
+  import {
+    REPORT_FILTER_STORAGE_KEY,
+    REPORT_LANE_HEADROOM,
+    REPORT_LANE_STORAGE_KEY,
+    REPORT_LANE_Y,
+    REPORT_NORMAL_MAX_SPAN_SECONDS,
+    REPORT_NORMAL_STORAGE_KEY,
+    REPORT_TARGET_TOLERANCE_SECONDS,
+    allowsNormalBeats,
+    defaultReportFilter,
+    findReportBeat,
+    indexOfTarget,
+    loadStoredBool,
+    loadStoredString,
+    markKindFor,
+    parseStoredReportFilter,
+    reportLanePlugin,
+    stepTarget,
+    storeString,
+    type ReportLaneState,
+  } from './reportLane'
   import {
     CATEGORY_COLOR_VAR,
     DISPLAY_CATEGORIES,
@@ -246,6 +278,11 @@
     focusRequest = null,
     onFlagNavigate,
     onBeatClear,
+    reportLoaded = false,
+    reportRefreshToken = 0,
+    reportTargets = {},
+    reportBadData = [],
+    onReportNavigate,
   }: {
     path: string
     channel: string
@@ -320,6 +357,27 @@
     // the view has moved on, but the confirm/reject keys would still act on
     // that old, off-screen beat.
     onBeatClear?: () => void
+    // Report labels: an imported xlsx report attached to this recording, shown
+    // read-only under the app's own marker lane (see `reportLane.ts`). False —
+    // the default, and every ordinary recording — means no report request is
+    // ever made and nothing of it is drawn. A live prop: a report can be
+    // loaded, replaced or removed while the graph stays mounted.
+    reportLoaded?: boolean
+    // Bumped by the parent when the report window has to be refetched for what
+    // is already on screen: the report was loaded/replaced/removed, or this
+    // app's own beats changed (matching and agreement depend on them). Same
+    // skip-the-first-value, react-to-changes shape as `beatsRefreshToken`;
+    // refetches the report ONLY — no trace refetch, no viewport change.
+    reportRefreshToken?: number
+    // The report navigator's targets per filter — the report's own timestamps,
+    // ascending, for the WHOLE file (from `GET /reports/navigation`).
+    reportTargets?: Partial<Record<ReportFilter, number[]>>
+    // The report's own bad-data ranges, hatched behind the trace so they read
+    // differently from this app's red marks.
+    reportBadData?: { start: number; stop: number }[]
+    // The graph's own report navigation (the buttons, `,` / `.`) landed on the
+    // report beat at `ts`.
+    onReportNavigate?: (ts: number) => void
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -838,6 +896,55 @@
   // another channel or beat settings, a deleted beat, or detection not
   // finished yet. Shown next to the flag counter.
   let flagBeatMissing: boolean = $state(false)
+
+  // ---- Report labels state (see `reportLane.ts`) -------------------------------
+  // The legend's switch for the report lane (and the disagreement bands and
+  // bad-data hatching that belong to it). Hiding it leaves the navigation
+  // working. Remembered across channel switches, which remount this component.
+  let showReportLane: boolean = $state(loadStoredBool(REPORT_LANE_STORAGE_KEY, true))
+  // Normal (label 0) report beats are nearly every beat, so they are fetched
+  // and drawn only on request.
+  let showReportNormal: boolean = $state(loadStoredBool(REPORT_NORMAL_STORAGE_KEY, false))
+  // True while a report is attached and its lane is switched on: what decides
+  // whether the y scale makes room for the second lane.
+  let reportLaneActive: boolean = $derived(reportLoaded && showReportLane)
+  // The technician's own filter choice (remembered), else a default taken from
+  // what the report has to show: disagreements when there are any.
+  let reportFilterChoice: ReportFilter | null = $state(
+    parseStoredReportFilter(loadStoredString(REPORT_FILTER_STORAGE_KEY), REPORT_FILTERS),
+  )
+  let reportFilter: ReportFilter = $derived(reportFilterChoice ?? defaultReportFilter(reportTargets))
+  let reportFilterTargets: number[] = $derived(reportTargets?.[reportFilter] ?? [])
+  // The report beat (`ts`) the navigator was last on, or null before any. A
+  // `ts` rather than an index so it stays right when the targets change
+  // underneath it (our beats were edited, a report was replaced).
+  let currentReportTs: number | null = $state(null)
+  let reportIndex: number = $derived(indexOfTarget(reportFilterTargets, currentReportTs))
+  // True while the current report beat has no beat of ours to select (the
+  // report beat was not matched to any detected beat).
+  let reportBeatUnmatched: boolean = $state(false)
+  // A failed report fetch is never an error of the trace: the lane just stays
+  // empty, and this says why.
+  let reportFetchFailed: boolean = $state(false)
+  // True while "show normal beats" is on but the window on screen is too wide
+  // to have them fetched (the legend then says to zoom in).
+  let reportNormalSkipped: boolean = $state(false)
+  // The report beats of the window on screen (the plugin's data). Plain, like
+  // `lastBeats`: only drawing and event handlers read it.
+  let lastReportBeats: ReportBeat[] = []
+  // Bumped whenever something a report fetch depends on changes (report
+  // loaded/removed/replaced, our beats changed, normal beats shown or hidden):
+  // a fetch that began under an older value is stale when it lands and is
+  // followed by a fresh report-only fetch.
+  let reportEpoch = 0
+  // Ordering guard for report-only refreshes, like `beatsRefreshId`.
+  let reportRefreshId = 0
+  // The report beat whose matched beat of ours the graph still has to select —
+  // `pendingFlagSelectTs`'s counterpart for the report navigator.
+  let pendingReportSelectTs: number | null = null
+  // The values the inputs of a report refresh had last time the effect ran.
+  let previousReportInputs: { loaded: boolean; token: number; normal: boolean } | undefined
+  let previousReportLaneActive: boolean | undefined
   // `chart` itself is a plain (non-reactive) binding, so markup that only
   // read it would never update once the async mount finally created it.
   // This is the reactive "the chart exists now" signal.
@@ -1035,6 +1142,59 @@
     return result.beats
   }
 
+  // The report's beats for [start, end], matched against the recording's
+  // current beats by the backend. Asked for only while a report is attached
+  // (an ordinary recording makes no report request at all), and it can never
+  // fail the caller: like a beats failure it only means nothing is drawn for
+  // that range — but unlike one it is reported (`failed`) so the legend can
+  // say why the lane is empty. `epoch` is what `reportEpoch` was when the
+  // request was made (see there). Normal beats are asked for only while the
+  // window is narrow enough (see REPORT_NORMAL_MAX_SPAN_SECONDS);
+  // `normalSkipped` says they were wanted but the window was too wide.
+  type ReportFetch = { beats: ReportBeat[]; failed: boolean; epoch: number; normalSkipped: boolean }
+
+  async function loadReportBeats(start: number, end: number): Promise<ReportFetch> {
+    const epoch = reportEpoch
+    if (!reportLoaded) return { beats: [], failed: false, epoch, normalSkipped: false }
+    const wantNormal = showReportNormal
+    const includeNormal = wantNormal && allowsNormalBeats(start, end)
+    const normalSkipped = wantNormal && !includeNormal
+    try {
+      const result = await getReportWindow(path, start, end, includeNormal)
+      if (result && result.status === 'ok' && !result.error && Array.isArray(result.beats)) {
+        return { beats: result.beats, failed: false, epoch, normalSkipped }
+      }
+    } catch {
+      // fall through: no report lane for this range
+    }
+    return { beats: [], failed: true, epoch, normalSkipped }
+  }
+
+  // Makes a fetched report window the one on screen. Called only by a caller
+  // that has confirmed its own request is still the current one.
+  function commitReportFetch(report: ReportFetch) {
+    // The report was removed while this request was in flight.
+    if (!reportLoaded) {
+      lastReportBeats = []
+      reportFetchFailed = false
+      reportNormalSkipped = false
+      return
+    }
+    lastReportBeats = report.beats
+    reportFetchFailed = report.failed
+    reportNormalSkipped = report.normalSkipped
+  }
+
+  // Whether a report fetch that just landed has to be followed by a fresh one
+  // for the window now loaded: something it depends on changed while it was in
+  // flight, or the normal beats were left out of a window (the whole-file first
+  // fetch is always "too wide") that turns out narrow enough to have them.
+  function reportNeedsRefetch(report: ReportFetch): boolean {
+    if (!reportLoaded) return false
+    if (report.epoch !== reportEpoch) return true
+    return report.normalSkipped && loadedRange !== undefined && allowsNormalBeats(loadedRange.start, loadedRange.end)
+  }
+
   async function fetchMergedWindow(
     start: number,
     end: number,
@@ -1043,18 +1203,51 @@
     channel: { x: number[]; y: number[] }
     beats: WindowBeat[]
     merged: BeatSeriesData
+    report: ReportFetch
   } | null> {
     const channelData = await loadWindow(start, end, width)
     if (!channelData) return null
     const beats = await loadBeats(start, end)
-    // `lastChannelWindow`/`lastBeats` are assigned by the caller, after its
-    // staleness check — committing them here would let a superseded fetch
-    // leave the retained state describing a window that is no longer shown.
+    // After the beats, so the backend matches the report against beats at
+    // least as fresh as the ones about to be drawn next to it.
+    const report = await loadReportBeats(start, end)
+    // `lastChannelWindow`/`lastBeats`/`lastReportBeats` are assigned by the
+    // caller, after its staleness check — committing them here would let a
+    // superseded fetch leave the retained state describing a window that is no
+    // longer shown.
     return {
       channel: channelData,
       beats,
       merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs, hideRejected),
+      report,
     }
+  }
+
+  // Re-fetches ONLY `/reports/window` for the range the chart currently has
+  // loaded and redraws — no trace or beats request, no viewport change.
+  // Triggered by `reportRefreshToken`, the report being attached or removed,
+  // and the "show normal beats" switch (see the `$effect` below). Unlike
+  // `refreshBeatsOnly` it does not stand aside for a refetch in flight: that
+  // refetch may have asked for the report before whatever changed, and
+  // answers it again afterwards if so (see `refetch`).
+  async function refreshReportOnly() {
+    if (!chart || !loadedRange || mountCancelled) return
+    const requestId = ++reportRefreshId
+    if (!reportLoaded) {
+      commitReportFetch({ beats: [], failed: false, epoch: reportEpoch, normalSkipped: false })
+      chart.redraw()
+      return
+    }
+    const range = { start: loadedRange.start, end: loadedRange.end }
+    const report = await loadReportBeats(range.start, range.end)
+    // Superseded by a newer refresh, or the graph is gone (unmounted, or
+    // remounted for another channel — that instance has its own state).
+    if (requestId !== reportRefreshId || mountCancelled || !chart) return
+    // A refetch moved the loaded window meanwhile: it carries its own report.
+    if (!loadedRange || loadedRange.start !== range.start || loadedRange.end !== range.end) return
+    commitReportFetch(report)
+    settleReportBeat()
+    chart.redraw()
   }
 
   // Re-fetches ONLY `/beats/window` for the currently visible x-scale range
@@ -1086,6 +1279,7 @@
     applyFilters()
     // Detection may only just have produced the beats the open flag waits on.
     settleFlagBeat()
+    settleReportBeat()
   }
 
   // Re-applies just the selection-highlight ring against whatever waveform
@@ -1195,7 +1389,7 @@
     if (requestId !== dataRequestId) return
 
     if (result && chart) {
-      const { channel: channelData, beats, merged } = result
+      const { channel: channelData, beats, merged, report } = result
       // Commit the retained window/beats only now that this response is
       // confirmed current — these drive click hit-testing and every later
       // local re-merge, so stale values here cause silently wrong behaviour
@@ -1203,6 +1397,7 @@
       lastChannelWindow = channelData
       lastBeats = beats
       lastBeatsRange = { start: fetchStart, end: fetchEnd }
+      commitReportFetch(report)
       // uPlot derives the y range from the data it holds AT THE MOMENT the
       // x scale changes. Every jump/zoom sets x first and only then fetches
       // that window's data, so y ends up ranged against the PREVIOUS
@@ -1226,6 +1421,10 @@
       loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth, pixelWidth: fetchWidth }
       applyFilters() // setData resets series visibility; re-apply the active category/review filters
       settleFlagBeat()
+      settleReportBeat()
+      // Whatever the report depends on changed while this was in flight, so
+      // its report beats are out of date: ask again for the window now shown.
+      if (reportNeedsRefetch(report)) void refreshReportOnly()
     }
   }
 
@@ -1603,7 +1802,9 @@
 
               // Tags sit under the marker lane (see above): the lane's own
               // y, plus a reviewed marker's radius at this zoom, plus a gap.
-              const laneY = u.valToPos(MARKER_LANE_Y, MARKER_LANE_SCALE, true)
+              // While the report lane is shown they hang under that one, so
+              // they cover neither lane.
+              const laneY = u.valToPos(reportLaneActive ? REPORT_LANE_Y : MARKER_LANE_Y, MARKER_LANE_SCALE, true)
               const tagH = FLAG_TAG_HEIGHT_PX * dpr
               const tagTop = laneY + (9 * visibleMarkerScale(u) * dpr) / 2 + 3 * dpr
               const padX = FLAG_TAG_PAD_X_PX * dpr
@@ -2141,6 +2342,7 @@
   function noteManualSelection() {
     selectionEpoch += 1
     pendingFlagSelectTs = null
+    pendingReportSelectTs = null
   }
 
   // Reconciles the current flag with the beats the graph holds right now, and
@@ -2194,6 +2396,8 @@
     const epoch = ++selectionEpoch
     currentFlagTs = ts
     pendingFlagSelectTs = ts
+    // A flag jump replaces a report jump still waiting for its beat.
+    pendingReportSelectTs = null
     flagBeatMissing = false
 
     // Select immediately when the beat is already loaded, so the detail
@@ -2260,6 +2464,176 @@
     const ts = request.ts
     untrack(() => void focusOnFlag(ts, true))
   })
+
+  // ---- Report navigator ------------------------------------------------------
+  // Steps through the report's beats for the chosen filter. A jump centres the
+  // view on the report beat (`flagFocusRange`, keeping a tighter zoom the
+  // technician already chose) and selects OUR beat matched to it, so the beat
+  // panel and C / R act on the beat the report is talking about. A report beat
+  // with no beat of ours (not detected here) selects nothing — and clears the
+  // previous selection, so C / R can never act on a beat the view has left.
+
+  // What the plugin draws, read at every draw.
+  function reportLaneState(): ReportLaneState {
+    return {
+      active: reportLaneActive,
+      beats: lastReportBeats,
+      showNormal: showReportNormal,
+      badData: reportBadData ?? [],
+      currentTs: currentReportTs,
+    }
+  }
+
+  // Selects our beat matched to the report beat `rb`, if the graph holds it and
+  // a selection is owed (`pendingReportSelectTs`); returns whether that beat
+  // is held. A report beat that cannot have a beat of ours (`match: 'none'`)
+  // owes nothing; one whose beats are not detected yet keeps the selection
+  // pending until they are.
+  function selectMatchedBeat(rb: ReportBeat | undefined, requireInView: boolean): boolean {
+    if (!rb) return false
+    if (rb.match === 'none') {
+      reportBeatUnmatched = true
+      pendingReportSelectTs = null
+      return false
+    }
+    if (rb.our_ts == null) return false
+    reportBeatUnmatched = false
+    const ours = findFlaggedBeat(rb.our_ts)
+    if (!ours) return false
+    if (
+      pendingReportSelectTs !== null &&
+      currentReportTs !== null &&
+      pendingReportSelectTs === currentReportTs &&
+      (!requireInView || isInView(rb.ts))
+    ) {
+      pendingReportSelectTs = null
+      onBeatSelect?.(ours)
+    }
+    return true
+  }
+
+  // `settleFlagBeat`'s counterpart: reconciles the current report beat with the
+  // report beats and beats the graph holds right now. Called when a jump starts
+  // and every time freshly fetched data is committed, so a beat that only
+  // arrives later (detection finishing, the jump's own fetch) is still
+  // selected — provided the report beat is on screen by then.
+  function settleReportBeat(requireInView: boolean = true): boolean {
+    const ts = currentReportTs
+    if (!reportLoaded) {
+      pendingReportSelectTs = null
+      return false
+    }
+    if (ts === null) return false
+    return selectMatchedBeat(findReportBeat(lastReportBeats, ts), requireInView)
+  }
+
+  // The report's entry for a target the loaded window does not contain (a
+  // normal-labelled beat while those are not fetched).
+  async function lookupReportBeat(ts: number): Promise<ReportBeat | undefined> {
+    try {
+      const result = await getReportBeat(path, ts)
+      const beat = result?.status === 'ok' && !result.error ? result.beat : null
+      if (beat && Math.abs(beat.ts - ts) < REPORT_TARGET_TOLERANCE_SECONDS) return beat
+    } catch {
+      // no entry: the selection stays cleared
+    }
+    return undefined
+  }
+
+  async function focusOnReportBeat(ts: number): Promise<void> {
+    if (!chart) return
+    const epoch = ++selectionEpoch
+    // A report jump replaces a flag jump still waiting for its beat.
+    pendingFlagSelectTs = null
+    currentReportTs = ts
+    pendingReportSelectTs = ts
+    reportBeatUnmatched = false
+
+    // Select immediately when the beat is already held, so the detail panel
+    // responds without waiting on the network; otherwise drop the old
+    // selection right away.
+    const settled = settleReportBeat(false)
+    if (!settled) onBeatClear?.()
+
+    const { min, max } = chart.scales.x
+    const maxWidth = min != null && max != null ? max - min : null
+    const { start, end } = flagFocusRange(ts, typicalRr, fullExtent, maxWidth)
+    const pending = setVisibleRange(start, end)
+    if (settled) return
+
+    // Outside the loaded buffer the beats only arrive with this fetch. Gone (the
+    // graph was unmounted), or superseded by a newer jump or a beat the
+    // technician chose while it was in flight?
+    await pending
+    if (mountCancelled || !chart || epoch !== selectionEpoch) return
+    if (settleReportBeat() || reportBeatUnmatched) return
+    if (findReportBeat(lastReportBeats, ts)) return // known, but our beat is not detected/loaded yet
+    const entry = await lookupReportBeat(ts)
+    if (mountCancelled || !chart || epoch !== selectionEpoch) return
+    selectMatchedBeat(entry, true)
+  }
+
+  function goToReportTarget(index: number) {
+    if (!chart || index < 0 || index >= reportFilterTargets.length) return
+    const ts = reportFilterTargets[index]
+    // Reported straight away (not after the fetch), like a flag jump.
+    onReportNavigate?.(ts)
+    void focusOnReportBeat(ts)
+  }
+
+  function handlePrevReport() {
+    goToReportTarget(stepTarget(reportFilterTargets, currentReportTs, -1))
+  }
+
+  function handleNextReport() {
+    goToReportTarget(stepTarget(reportFilterTargets, currentReportTs, 1))
+  }
+
+  // Dropping the navigator's place: another filter was chosen, or the report
+  // went away. Supersedes a jump still waiting on its fetch.
+  function resetReportNavigation() {
+    selectionEpoch += 1
+    pendingReportSelectTs = null
+    currentReportTs = null
+    reportBeatUnmatched = false
+  }
+
+  function handleReportFilterChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement
+    const value = select.value as ReportFilter
+    if (!REPORT_FILTERS.includes(value)) return
+    reportFilterChoice = value
+    storeString(REPORT_FILTER_STORAGE_KEY, value)
+    resetReportNavigation()
+    // A focused <select> would swallow `,` / `.` (see `shouldIgnoreShortcut`).
+    select.blur()
+  }
+
+  function toggleReportLane() {
+    showReportLane = !showReportLane
+    storeString(REPORT_LANE_STORAGE_KEY, showReportLane ? '1' : '0')
+  }
+
+  function toggleReportNormal() {
+    showReportNormal = !showReportNormal
+    storeString(REPORT_NORMAL_STORAGE_KEY, showReportNormal ? '1' : '0')
+  }
+
+  // The second lane needs room above the trace (see the y scale's `range`), which
+  // uPlot only works out when it re-ranges.
+  function rerangeForReportLane() {
+    if (!chart) return
+    // A refetch on its way re-ranges when it lands, against the new headroom;
+    // a y scale the technician zoomed by hand is theirs to keep.
+    if (channelFetchInFlight > 0 || yManuallyZoomed) {
+      chart.redraw()
+      return
+    }
+    const { min, max } = chart.scales.x
+    chart.setData(chart.data, true)
+    if (min != null && max != null) chart.setScale('x', { min, max })
+    applyFilters()
+  }
 
   // Time navigation across the file at the current zoom — the old app's
   // start-of-file / previous-window / next-window / end-of-file controls.
@@ -2480,14 +2854,16 @@
     channel: { x: number[]; y: number[] }
     beats: WindowBeat[]
     merged: BeatSeriesData
+    report: ReportFetch
   }): void {
       const width = measuredWidth()
-      const { channel: data, beats, merged } = result
+      const { channel: data, beats, merged, report } = result
       // `fetchMergedWindow` deliberately leaves these to its caller (see its
       // own comment), so the mount path has to commit them too — they are
       // what click hit-testing and every later local re-merge read from.
       lastChannelWindow = data
       lastBeats = beats
+      commitReportFetch(report)
       // The mount fetch asks for the whole file (see `initialLoad`).
       lastBeatsRange = { start: -Infinity, end: Infinity }
 
@@ -2515,12 +2891,14 @@
           // has.
           scales: {
             x: { time: false },
-            // Leaves headroom above the trace for the marker lane (below).
+            // Leaves headroom above the trace for the marker lane (below),
+            // and for the report lane under it while one is shown.
             y: {
               auto: true,
               range: (_u, dataMin, dataMax) => {
                 const span = dataMax - dataMin || 1
-                return [dataMin - span * 0.05, dataMax + span * MARKER_LANE_HEADROOM]
+                const headroom = reportLaneActive ? REPORT_LANE_HEADROOM : MARKER_LANE_HEADROOM
+                return [dataMin - span * 0.05, dataMax + span * headroom]
               },
             },
             [MARKER_LANE_SCALE]: { auto: false, range: [0, 1] },
@@ -2562,7 +2940,19 @@
             selectionHighlightSeries(),
             rejectedOverlaySeries(),
           ],
-          plugins: [panZoomPlugin(), badDataPlugin(), flagPlugin(), overlayAnchorPlugin(), pendingBeatPlugin()],
+          plugins: [
+            panZoomPlugin(),
+            badDataPlugin(),
+            flagPlugin(),
+            reportLanePlugin(reportLaneState, {
+              cssVar,
+              laneScale: MARKER_LANE_SCALE,
+              ourLaneY: MARKER_LANE_Y,
+              markerScale: visibleMarkerScale,
+            }),
+            overlayAnchorPlugin(),
+            pendingBeatPlugin(),
+          ],
         },
         toChartData(merged),
         containerEl,
@@ -2574,6 +2964,13 @@
       sliderHalfWidth = (fullExtent.end - fullExtent.start) / 2
       applyFilters()
       chartReady = true
+
+      // The report changed (loaded, removed, replaced, our beats edited) while
+      // the first load was in flight, so the report beats it brought are out
+      // of date: ask again for what is now shown. The same when the first
+      // (whole-file) window had to leave the normal beats out but the file is
+      // short enough to have them.
+      if (reportNeedsRefetch(report)) void refreshReportOnly()
 
       // FP/FN review: a recording opened for a flag (the sidebar, or the
       // Home screen) opens zoomed on it rather than on the start of the file.
@@ -2656,6 +3053,54 @@
     void refreshBeatsOnly()
   })
 
+  // Report labels: re-fetches the report window — and only that — when what
+  // it depends on changes: the parent's `reportRefreshToken` (the report was
+  // loaded, replaced or removed, or our own beats changed), `reportLoaded`
+  // itself, or the "show normal beats" switch (which changes what the
+  // backend is asked for). One effect for all three, so changes arriving
+  // together cost one request. The first run only records the starting values:
+  // the initial fetch in `onMount` already asked for the report. The work is
+  // `untrack`ed, so nothing it reads or writes can retrigger this effect.
+  $effect(() => {
+    const inputs = { loaded: reportLoaded, token: reportRefreshToken, normal: showReportNormal }
+    const previous = previousReportInputs
+    previousReportInputs = inputs
+    if (!previous) return
+    if (previous.loaded === inputs.loaded && previous.token === inputs.token && previous.normal === inputs.normal) return
+    untrack(() => {
+      reportEpoch += 1
+      if (!inputs.loaded) resetReportNavigation()
+      void refreshReportOnly()
+    })
+  })
+
+  // The lane, the disagreement bands, the hatching and the current beat's ring
+  // are drawn from state the plugin reads at draw time, so a change to any of
+  // it has to ask for a repaint explicitly.
+  $effect(() => {
+    reportLoaded
+    showReportLane
+    showReportNormal
+    reportBadData
+    currentReportTs
+    untrack(() => chart?.redraw())
+  })
+
+  // The second lane takes room off the top of the plot, so the y scale has to
+  // be re-ranged when it appears or goes away (a fetch landing re-ranges by
+  // itself; this is for the switch). The first run only records the value —
+  // the chart is built against whatever it already is.
+  $effect(() => {
+    const active = reportLaneActive
+    if (previousReportLaneActive === undefined) {
+      previousReportLaneActive = active
+      return
+    }
+    if (active === previousReportLaneActive) return
+    previousReportLaneActive = active
+    untrack(() => rerangeForReportLane())
+  })
+
   // Re-draws the selection-highlight ring whenever the parent's selected
   // beat changes — see `applySelectionHighlight`'s own comment. Runs once
   // (harmlessly, as a no-op — see that function's own `chart`/
@@ -2734,6 +3179,18 @@
           if (flaggedTimes.length === 0) return
           event.preventDefault()
           handlePrevFlag()
+          break
+        // The report navigator: `,` and `.` are the unshifted "<" and ">" of
+        // most layouts, so they read as previous / next.
+        case ',':
+          if (!reportLoaded || reportFilterTargets.length === 0) return
+          event.preventDefault()
+          handlePrevReport()
+          break
+        case '.':
+          if (!reportLoaded || reportFilterTargets.length === 0) return
+          event.preventDefault()
+          handleNextReport()
           break
         case 'n':
         case 'N':
@@ -3020,6 +3477,71 @@
       </div>
     {/if}
 
+    <!-- Report labels: only for a recording an xlsx report is attached to.
+         Steps through the report's own beats (by filter) and selects OUR beat
+         matched to each, so the report can be compared with this review. -->
+    {#if reportLoaded}
+      <div
+        class="beat-nav-controls report-nav"
+        data-testid="report-nav"
+        role="group"
+        aria-label="Report labels"
+      >
+        <span class="report-nav-label" title="Beats labelled by the imported report">
+          <Icon name="file-text" size={14} />
+          Report
+        </span>
+        <select
+          class="report-filter-select"
+          data-testid="report-filter-select"
+          aria-label="Report beats to step through"
+          title={REPORT_FILTER_TITLE[reportFilter]}
+          value={reportFilter}
+          onchange={handleReportFilterChange}
+        >
+          {#each REPORT_FILTERS as filter (filter)}
+            <option value={filter} title={REPORT_FILTER_TITLE[filter]} selected={filter === reportFilter}>
+              {REPORT_FILTER_NAME[filter]} ({reportTargets?.[filter]?.length ?? 0})
+            </option>
+          {/each}
+        </select>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="report-prev-button"
+          title="Previous report beat (,)"
+          disabled={reportFilterTargets.length === 0}
+          onclick={handlePrevReport}
+        >
+          <Icon name="chevron-left" size={14} />
+        </button>
+        <span class="report-nav-counter" data-testid="report-nav-counter">
+          {#if reportFilterTargets.length === 0}
+            None
+          {:else if reportIndex < 0}
+            {reportFilterTargets.length} {reportFilterTargets.length === 1 ? 'beat' : 'beats'}
+          {:else}
+            {reportIndex + 1} of {reportFilterTargets.length}
+            {#if reportBeatUnmatched}
+              <span class="report-nav-missing" data-testid="report-no-beat" title={REPORT_AGREEMENT_TEXT.unmatched}>
+                · no beat here
+              </span>
+            {/if}
+          {/if}
+        </span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="report-next-button"
+          title="Next report beat (.)"
+          disabled={reportFilterTargets.length === 0}
+          onclick={handleNextReport}
+        >
+          <Icon name="chevron-right" size={14} />
+        </button>
+      </div>
+    {/if}
+
     <div class="beat-nav-controls">
       <button
         type="button"
@@ -3064,7 +3586,7 @@
          screens. It stays even with no beats of interest (only the hints
          depend on those). -->
     <div class="nav-hint-row">
-      {#if beatsOfInterest.length > 0 || flaggedTimes.length > 0}
+      {#if beatsOfInterest.length > 0 || flaggedTimes.length > 0 || reportLoaded}
         <ul class="nav-hint" data-testid="beat-nav-hint" aria-label="Keyboard shortcuts">
           {#if beatsOfInterest.length > 0}
             <li><kbd>N</kbd> Next</li>
@@ -3072,6 +3594,9 @@
           {/if}
           {#if flaggedTimes.length > 0}
             <li><kbd>[</kbd> <kbd>]</kbd> Model flags</li>
+          {/if}
+          {#if reportLoaded}
+            <li data-testid="report-nav-hint"><kbd>,</kbd> <kbd>.</kbd> Report labels</li>
           {/if}
           {#if beatsOfInterest.length > 0}
             <li><kbd>C</kbd> Confirm arrhythmia</li>
@@ -3382,6 +3907,9 @@
         {#if flaggedTimes.length > 0}
           <li><kbd>[</kbd>/<kbd>]</kbd> Model flags</li>
         {/if}
+        {#if reportLoaded}
+          <li><kbd>,</kbd>/<kbd>.</kbd> Report labels</li>
+        {/if}
       </ul>
     </div>
   {/if}
@@ -3559,6 +4087,115 @@
         </button>
       {/each}
     </div>
+
+    <!-- Report labels: the key to the lane under this app's own markers, plus
+         its switches. Hiding the lane also hides the disagreement bands and
+         the report's bad-data hatching, but not the navigator above. -->
+    {#if reportLoaded}
+      <div class="ecg-legend-report" data-testid="legend-report" role="group" aria-label="Report labels">
+        <span class="legend-report-title">
+          <Icon name="file-text" size={12} />
+          Report
+        </span>
+        <button
+          type="button"
+          class="legend-chip legend-chip--toggle"
+          class:legend-chip--inactive={!showReportLane}
+          data-testid="legend-report-toggle"
+          aria-pressed={showReportLane}
+          title={showReportLane ? 'Hide the report lane on the graph' : 'Show the report lane on the graph'}
+          onclick={toggleReportLane}
+        >
+          Show report
+        </button>
+        <button
+          type="button"
+          class="legend-chip legend-chip--toggle"
+          class:legend-chip--inactive={!showReportNormal}
+          data-testid="legend-report-normal-toggle"
+          aria-pressed={showReportNormal}
+          title="Also draw the report's normal beats (label 0). They are nearly every beat, so they are hidden by default."
+          onclick={toggleReportNormal}
+        >
+          Show normal beats
+        </button>
+        {#if showReportNormal && reportNormalSkipped}
+          <span
+            class="legend-report-hint"
+            data-testid="report-normal-hint"
+            title={`Normal beats are only fetched while at most ${REPORT_NORMAL_MAX_SPAN_SECONDS} s are loaded: there are very many of them.`}
+          >
+            zoom in to see normal beats
+          </span>
+        {/if}
+        <div class="legend-report-keys" class:legend-report-keys--off={!showReportLane}>
+          {#each REPORT_LABELS as label (label)}
+            {@const kind = markKindFor(label)}
+            <span
+              class="legend-report-key"
+              class:legend-report-key--dimmed={label === 0 && !showReportNormal}
+              data-testid={`legend-report-${kind}`}
+              title={REPORT_LABEL_TITLE[label as ReportLabel]}
+              style={`--legend-color: var(${REPORT_LABEL_COLOR_VAR[label as ReportLabel]})`}
+            >
+              <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+                {#if kind === 'arr'}
+                  <polygon points="-6,-5 6,-5 0,6" fill="currentColor" />
+                {:else if kind === 'pending'}
+                  <polygon points="-5,-4 5,-4 0,5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+                {:else if kind === 'rejected'}
+                  <path d="M-4.5,-4.5 L4.5,4.5 M4.5,-4.5 L-4.5,4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                {:else}
+                  <circle cx="0" cy="0" r="2.5" fill="currentColor" />
+                {/if}
+              </svg>
+              {REPORT_LABEL_NAME[label as ReportLabel]}
+            </span>
+          {/each}
+          <span
+            class="legend-report-key"
+            data-testid="legend-report-unmatched"
+            title={`Dashed: ${REPORT_AGREEMENT_TEXT.unmatched}. Drawn at the report's own timestamp.`}
+            style="--legend-color: var(--color-report-unmatched)"
+          >
+            <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+              <polygon points="-5,-4 5,-4 0,5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.5 2" stroke-linejoin="round" />
+            </svg>
+            No beat here
+          </span>
+          <span
+            class="legend-report-key"
+            data-testid="legend-report-disagree"
+            title={REPORT_FILTER_TITLE.disagreements}
+            style="--legend-color: var(--color-report-arr)"
+          >
+            <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+              <rect x="-3" y="-7" width="6" height="14" fill="var(--color-report-disagree-soft)" stroke="currentColor" stroke-opacity="0.4" />
+            </svg>
+            Disagreement
+          </span>
+          {#if reportBadData.length > 0}
+            <span
+              class="legend-report-key"
+              data-testid="legend-report-baddata"
+              title="Ranges the report marks as bad data (hatched), separate from the bad data marked in this app (solid red)"
+              style="--legend-color: var(--color-report-normal)"
+            >
+              <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+                <rect x="-8" y="-8" width="16" height="16" fill="currentColor" fill-opacity="0.12" />
+                <path d="M-8,2 L2,-8 M-8,8 L8,-8 M-2,8 L8,-2" fill="none" stroke="currentColor" stroke-width="1.2" />
+              </svg>
+              Report bad data
+            </span>
+          {/if}
+        </div>
+        {#if reportFetchFailed}
+          <span class="legend-report-error" data-testid="report-lane-error" role="status">
+            Report labels could not be loaded for this part of the recording.
+          </span>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -3864,6 +4501,111 @@
   .flag-nav-missing {
     font-weight: 400;
     color: var(--color-text-muted);
+  }
+
+  /* "Report": the imported report's navigator, boxed in the report's own
+     color like "Model flags" is, so the three walks read as three tools. */
+  .report-nav {
+    padding: 2px var(--space-1);
+    border: 1px solid var(--color-report-arr);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-report-disagree-soft);
+  }
+
+  .report-nav-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-1);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    color: var(--color-report-arr);
+  }
+
+  .report-filter-select {
+    max-width: 14rem;
+    padding: 2px var(--space-1);
+    border: 1px solid var(--color-border, #d3dae1);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface, #fff);
+    color: var(--color-text, #1f2933);
+    font-size: var(--font-size-sm);
+  }
+
+  .report-nav-counter {
+    min-width: 7rem;
+    text-align: center;
+    white-space: nowrap;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .report-nav-missing {
+    font-weight: 400;
+    color: var(--color-text-muted);
+  }
+
+  .ecg-legend-report {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    flex-basis: 100%;
+    padding-top: var(--space-1);
+    border-top: 1px solid var(--color-border, #d3dae1);
+  }
+
+  .legend-report-title {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+  }
+
+  .legend-chip--toggle {
+    border-color: var(--color-border, #d3dae1);
+  }
+
+  .legend-report-keys {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+  }
+
+  .legend-report-keys--off {
+    opacity: 0.45;
+  }
+
+  .legend-report-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+  }
+
+  .legend-report-key--dimmed {
+    opacity: 0.45;
+  }
+
+  .legend-report-hint {
+    font-size: 0.7rem;
+    font-style: italic;
+    color: var(--color-text-muted);
+  }
+
+  .legend-report-error {
+    font-size: 0.7rem;
+    color: var(--color-warning, #b45309);
   }
 
   .legend-total {

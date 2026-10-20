@@ -208,6 +208,19 @@ async function startApp() {
       return found
     })
     // The FP/FN list import: one CSV of animal IDs + timestamps.
+    // A beat-label report (xlsx) to show over the open recording. Opens in
+    // the folder the last report came from, when the renderer knows it.
+    ipcMain.handle('pick-report', async (event, defaultDir) => {
+      const result = await showOpenDialog(event, {
+        properties: ['openFile'],
+        defaultPath: typeof defaultDir === 'string' && defaultDir ? defaultDir : undefined,
+        filters: [
+          { name: 'Excel reports', extensions: ['xlsx', 'xlsm', 'xls'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      })
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    })
     ipcMain.handle('pick-flag-list', async (event) => {
       const result = await showOpenDialog(event, {
         properties: ['openFile'],

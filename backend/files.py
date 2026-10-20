@@ -124,11 +124,15 @@ def evict_files(payload: EvictRequest, request: Request) -> EvictResult:
             # run on the file instead of pulling its frame out from under it.
             with path_lock(path):
                 found = False
+                # report_cache goes LAST, after imported_files: a report load
+                # in flight re-checks imported_files after storing, so this
+                # order guarantees its entry is dropped by one side or the other.
                 for cache in (
                     state.signal_cache,
                     state.beat_cache,
                     state.typical_rr_cache,
                     state.imported_files,
+                    state.report_cache,
                 ):
                     if cache.pop(path, None) is not None:
                         found = True

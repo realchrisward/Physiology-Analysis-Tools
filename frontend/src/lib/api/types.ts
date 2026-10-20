@@ -317,3 +317,78 @@ export interface EvictResult {
   evicted?: number
   error?: string | null
 }
+
+// Report labels: an xlsx report whose per-beat labels are shown over the open
+// recording (see backend/reports.py). 2 = confirmed arrhythmia, 1 = detected
+// but not confirmed/rejected, 0 = not detected (normal), -1 = rejected.
+export type ReportLabel = 2 | 1 | 0 | -1
+export type ReportMatch = 'exact' | 'near' | 'none' | 'unknown'
+export type ReportAgreement = 'agree' | 'report_only' | 'ours_only' | 'pending' | 'unmatched' | 'unknown'
+export type ReportFilter = 'arrhythmia' | 'unreviewed' | 'rejected' | 'disagreements' | 'not_detected'
+
+export interface ReportSettingDifference {
+  name: string
+  report_value: string
+  our_value: string
+}
+
+export interface ReportSummary {
+  report_path: string
+  filename: string
+  sheet: string
+  label_column: string
+  category_columns: string[]
+  total_beats: number
+  counts: Record<string, number>
+  ts_start: number | null
+  ts_end: number | null
+  name_matches_recording: boolean
+  settings: Record<string, string>
+  settings_differences: ReportSettingDifference[]
+  bad_data_marks: { start: number; stop: number }[]
+  skipped_rows: number
+  warnings: string[]
+}
+
+export interface ReportLoadResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  summary?: ReportSummary | null
+}
+
+export interface ReportBeat {
+  ts: number
+  label: ReportLabel
+  categories: string[]
+  match: ReportMatch
+  our_ts: number | null
+  agreement: ReportAgreement
+}
+
+export interface ReportWindowResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  beats?: ReportBeat[]
+}
+
+export interface ReportNavigationResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  targets?: Partial<Record<ReportFilter, number[]>>
+  matched?: number
+  total?: number
+  extra_ours?: number
+  has_our_beats?: boolean
+}
+
+export interface ReportBeatResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  beat?: ReportBeat | null
+}
+
+export interface ReportCandidatesResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  paths?: string[]
+}

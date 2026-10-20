@@ -15,6 +15,7 @@ from backend.db_routes import router as db_router
 from backend.files import router as files_router
 from backend.flag_lists import router as flag_lists_router
 from backend.models import FileImportResult
+from backend.reports import router as reports_router
 from backend.settings import router as settings_router
 from backend.windowing import router as windowing_router
 
@@ -81,6 +82,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
     # whole channel (not the visible slice) so the result matches what beat
     # detection saw and has no per-window edge artefacts - worth caching.
     app.state.filtered_signal_cache: dict = {}
+    # recording path -> the parsed report labels attached to it (see
+    # backend/reports.py). Dropped when the recording is evicted; kept across a
+    # re-import of the same file.
+    app.state.report_cache: dict = {}
     app.state.db_path = db_path if db_path is not None else db.default_db_path()
 
     # Starlette puts the most recently added middleware outermost. The token
@@ -111,6 +116,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.include_router(db_router)
     app.include_router(beat_editing_router)
     app.include_router(flag_lists_router)
+    app.include_router(reports_router)
 
     return app
 
