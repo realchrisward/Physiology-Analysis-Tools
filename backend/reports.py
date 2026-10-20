@@ -14,14 +14,22 @@ State: `app.state.report_cache[recording_path]` holds one `_Entry` (the parsed
 report as numpy arrays) per recording. An entry is immutable after it is built,
 except for `_Entry.memo`, which caches the result of matching it against the
 recording's beat frame (see `_matching`).
+
+The workbook is read with openpyxl's read-only mode, never pandas: pandas pads
+every row to the sheet's widest row, so one stray cell far to the right (or a
+bogus `<dimension>`) in an otherwise tiny sheet costs minutes and gigabytes.
+Here only the header's width is read, and only the rows of the sheets needed.
 """
 
+import datetime
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass
 
 import numpy as np
+import openpyxl
 import pandas as pd
 from fastapi import APIRouter, Request
 
@@ -57,6 +65,15 @@ _EPS = 1e-9
 # wrong pick (a multi-GB export) must not be read into memory.
 MAX_REPORT_BYTES = 50 * 1024 * 1024
 REPORT_EXTENSIONS = (".xlsx", ".xlsm")
+# A worksheet has at most 1,048,576 rows, and a report a few hundred thousand
+# at the very most; a sheet reaching this many rows is not a report. The cap
+# also bounds the work a hostile file (rows numbered in the billions) can cost.
+MAX_REPORT_ROWS = 2_000_000
+# Columns read per sheet: the header's width, never more than this.
+MAX_REPORT_COLUMNS = 200
+# The header row is searched for within this many rows from the top (title
+# rows above it are tolerated).
+HEADER_SCAN_ROWS = 10
 
 # Column-name candidates in priority order. Names are compared after
 # lower-casing and dropping whitespace / underscores / hyphens (see _compact).
@@ -85,6 +102,41 @@ NORMAL, FLAGGED, ARRHYTHMIA = 0, 1, 2
 
 _MAX_COLUMNS_IN_ERROR = 20
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_LOCKED_MESSAGE = (
+    "The report is open in another program that blocks reading — close it "
+    "there and try again."
+)
+# Text cells spreadsheet readers (pandas, which this module replaced) take for
+# an empty cell, plus Excel's error values. A row of nothing else is padding.
+_NA_STRINGS = frozenset(
+    {
+        "",
+        "#N/A",
+        "#N/A N/A",
+        "#NA",
+        "-1.#IND",
+        "-1.#QNAN",
+        "-NaN",
+        "-nan",
+        "1.#IND",
+        "1.#QNAN",
+        "<NA>",
+        "N/A",
+        "NA",
+        "NULL",
+        "NaN",
+        "None",
+        "n/a",
+        "nan",
+        "null",
+        "#DIV/0!",
+        "#NAME?",
+        "#NULL!",
+        "#NUM!",
+        "#REF!",
+        "#VALUE!",
+    }
+)
 
 
 class _ReportError(Exception):
@@ -93,6 +145,24 @@ class _ReportError(Exception):
 
 def _compact(name: str) -> str:
     return re.sub(r"[\s_\-]+", "", name.strip().lower())
+
+
+def _io_path(path: str) -> str:
+    """`path` in a form the file APIs accept. Windows refuses paths longer than
+    259 characters unless they carry the `\\\\?\\` prefix (a deep folder tree
+    on a network drive gets there); other systems and short paths are left as
+    given. Only for opening: messages and the summary keep the user's path."""
+    if os.name != "nt" or not path or path.startswith("\\\\?\\"):
+        return path
+    try:
+        absolute = os.path.abspath(path)
+    except (OSError, ValueError):
+        return path
+    if len(absolute) < 260:
+        return path
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +182,10 @@ class _Matching:
     extra_ours: int
     has_our_beats: bool
     targets: dict[str, list[float]]
+    # Whether our beats carry any arrhythmia flags yet. Without them (detection
+    # not run, or a restored recording with empty flags) an unreviewed beat of
+    # ours has no decision, so its agreement with the report is 'unknown'.
+    has_our_flags: bool = False
 
 
 @dataclass(eq=False)
@@ -180,21 +254,67 @@ def _plain(value):
     return value.item() if isinstance(value, np.generic) else value
 
 
-def _as_floats(series: pd.Series) -> np.ndarray:
+def _blank_cell(value) -> bool:
+    """Whether a cell counts as empty: no value, NaN, or text such as "" / "NA"
+    that a spreadsheet reader takes for a missing value."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value in _NA_STRINGS
+    return isinstance(value, float) and value != value
+
+
+# Cell values that are not plain numbers or text. openpyxl returns these for
+# cells with a date/time number format and for TRUE/FALSE cells.
+_SPECIAL_CELLS = (bool, np.bool_, datetime.date, datetime.time, datetime.timedelta)
+
+
+def _special_number(value, *, bools: bool, times: bool) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        return float(value) if bools else math.nan
+    if times:
+        # A time of day or a duration (a ts column formatted h:mm:ss) is a
+        # number of seconds. A full date-time is not a recording time.
+        if isinstance(value, datetime.timedelta):
+            return value.total_seconds()
+        if isinstance(value, datetime.time):
+            return (
+                value.hour * 3600
+                + value.minute * 60
+                + value.second
+                + value.microsecond / 1e6
+            )
+    return math.nan
+
+
+def _as_floats(
+    series: pd.Series, *, bools: bool = False, times: bool = False
+) -> np.ndarray:
     """The column as float64, NaN wherever a cell isn't a number (numeric
-    strings such as "2" or "0.5" count as numbers)."""
-    try:
-        if series.dtype == bool:
-            return series.to_numpy(dtype=float)
-        if pd.api.types.is_datetime64_any_dtype(
-            series.dtype
-        ) or pd.api.types.is_timedelta64_dtype(series.dtype):
-            return np.full(len(series), np.nan)
-        return pd.to_numeric(series, errors="coerce").to_numpy(
-            dtype=float, na_value=np.nan
+    strings such as "2" or "0.5" count as numbers). TRUE/FALSE count as 1/0
+    only with `bools` (flag columns; a label of True is not a label), and
+    time-formatted cells as seconds only with `times` (the ts column); dates
+    are never numbers."""
+    n = len(series)
+    values = series.to_numpy(dtype=object)
+    special = None
+    if any(issubclass(kind, _SPECIAL_CELLS) for kind in set(map(type, values))):
+        special = np.fromiter(
+            (isinstance(v, _SPECIAL_CELLS) for v in values), dtype=bool, count=n
         )
+        values = values.copy()
+        values[special] = None
+    try:
+        numbers = pd.to_numeric(pd.Series(values, dtype=object), errors="coerce")
+        out = numbers.to_numpy(dtype=float, na_value=np.nan)
     except Exception:
-        return np.full(len(series), np.nan)
+        out = np.full(n, np.nan)
+    if special is not None:
+        out = np.array(out, dtype=float)  # writable whatever pandas handed back
+        originals = series.to_numpy(dtype=object)
+        for i in np.flatnonzero(special):
+            out[i] = _special_number(originals[i], bools=bools, times=times)
+    return out
 
 
 def _as_bool(value) -> bool | None:
@@ -294,18 +414,36 @@ def name_matches_recording(report_path: str, recording_path: str) -> bool:
 
 @dataclass
 class _Columns:
-    ts: object
-    label: object
+    # Column positions (0-based) in the sheet's header.
+    ts: int
+    label: int
     # No label column: labels are derived from our own export's review_state
     # (+ any_arrhythmia) columns instead.
     derived: bool
-    by_name: dict[str, object]  # compacted header -> first column with it
+    by_name: dict[str, int]  # compacted header -> first column with it
 
 
-def _find_columns(df: pd.DataFrame) -> _Columns | None:
-    by_name: dict[str, object] = {}
-    for column in df.columns:
-        by_name.setdefault(_compact(str(column)), column)
+def _header_text(value) -> str:
+    """A header cell as text ("" when empty). Strings are kept as written."""
+    if _blank_cell(value):
+        return ""
+    return value if isinstance(value, str) else _stringify(value)
+
+
+def _header_texts(row: tuple) -> list[str]:
+    """The header's cells up to the last non-empty one."""
+    texts = [_header_text(value) for value in row]
+    while texts and not texts[-1].strip():
+        texts.pop()
+    return texts
+
+
+def _find_columns(headers: list[str]) -> _Columns | None:
+    by_name: dict[str, int] = {}
+    for position, text in enumerate(headers):
+        key = _compact(text)
+        if key:
+            by_name.setdefault(key, position)
     ts_col = next(
         (by_name[_compact(c)] for c in TS_COLUMNS if _compact(c) in by_name), None
     )
@@ -320,67 +458,143 @@ def _find_columns(df: pd.DataFrame) -> _Columns | None:
     return None
 
 
-def _pick_sheet(sheets: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame, _Columns]:
-    """The `beats` sheet if it has the columns, else the first sheet that does."""
-    ordered = sorted(sheets, key=lambda name: _compact(str(name)) != "beats")
-    for name in ordered:
-        columns = _find_columns(sheets[name])
-        if columns is not None:
-            return str(name), sheets[name], columns
+def _head_rows(ws, count: int = HEADER_SCAN_ROWS) -> list[tuple]:
+    """The first `count` rows of a sheet (fewer if it is shorter), at most
+    MAX_REPORT_COLUMNS wide. The stored dimension is ignored: generators of
+    odd files get it wrong, and a wrong one must not decide what is read."""
+    ws.reset_dimensions()
+    return list(
+        ws.iter_rows(
+            min_row=1, max_row=count, max_col=MAX_REPORT_COLUMNS, values_only=True
+        )
+    )
+
+
+@dataclass
+class _Table:
+    """The data rows of one sheet below its header, as read."""
+
+    headers: list[str]  # one per column read (up to the last non-empty header)
+    rows: list[tuple]  # each exactly len(headers) wide, none wholly empty
+
+    def column(self, position: int) -> pd.Series:
+        return pd.Series([row[position] for row in self.rows], dtype=object)
+
+
+def _read_table(ws, header_row: int, headers: list[str]) -> _Table:
+    """The rows below `header_row` (1-based), `len(headers)` columns wide. Wholly
+    empty rows (padding) are dropped; a sheet running past MAX_REPORT_ROWS is
+    refused rather than read."""
+    width = len(headers)
+    last_row = header_row + MAX_REPORT_ROWS
+    ws.reset_dimensions()
+    rows: list[tuple] = []
+    for number, row in enumerate(
+        ws.iter_rows(
+            min_row=header_row + 1,
+            max_row=last_row + 1,
+            max_col=width,
+            values_only=True,
+        ),
+        start=header_row + 1,
+    ):
+        if number > last_row:
+            # The reader only gets this far when the sheet has rows past the cap.
+            raise _ReportError(
+                f"Sheet {ws.title!r} has more than {MAX_REPORT_ROWS:,} rows - far "
+                "more than a report. Did you pick the wrong file?"
+            )
+        if row.count(None) == width:
+            continue  # padding: the reader fills the rows the file doesn't have
+        for value in row:
+            if not _blank_cell(value):
+                rows.append(row)
+                break
+    return _Table(headers, rows)
+
+
+@dataclass
+class _Located:
+    sheet: str
+    header_row: int
+    headers: list[str]
+    columns: _Columns
+
+
+def _locate_beats(wb) -> _Located:
+    """The `beats` sheet if it has the columns, else the first sheet that does.
+    Only each sheet's top rows are read, to find its header row."""
+    worksheets = list(wb.worksheets)
+    if not worksheets:
+        raise _ReportError("The workbook has no sheets.")
+    ordered = sorted(worksheets, key=lambda ws: _compact(ws.title) != "beats")
+    heads: dict[str, list[tuple]] = {}
+    for ws in ordered:
+        head = heads[ws.title] = _head_rows(ws)
+        for number, row in enumerate(head, start=1):
+            headers = _header_texts(row)
+            columns = _find_columns(headers)
+            if columns is not None:
+                return _Located(ws.title, number, headers, columns)
 
     shown_sheet = next(
-        (n for n in sheets if _compact(str(n)) == "beats"), next(iter(sheets), None)
+        (ws for ws in worksheets if _compact(ws.title) == "beats"), worksheets[0]
     )
-    found = [str(c) for c in sheets[shown_sheet].columns] if shown_sheet is not None else []
+    first_header = next(
+        (h for h in map(_header_texts, heads[shown_sheet.title]) if h), []
+    )
+    found = [h for h in first_header if h.strip()]
     shown = ", ".join(found[:_MAX_COLUMNS_IN_ERROR])
     if len(found) > _MAX_COLUMNS_IN_ERROR:
         shown += f", ... ({len(found)} columns)"
     raise _ReportError(
         "No sheet has both a timestamp column (ts, time, timestamp or t) and a "
         f"label column ({PRIMARY_LABEL_COLUMN}, label, annotation, ...). "
-        f"Columns found{f' in sheet {shown_sheet!r}' if shown_sheet else ''}: "
-        f"{shown or '(none)'}"
+        f"Columns found in sheet {shown_sheet.title!r}: {shown or '(none)'}"
     )
 
 
-def _category_columns(df: pd.DataFrame, columns: _Columns) -> list[tuple[object, str]]:
-    """(column, category name) for every per-category flag column: each
+def _category_columns(
+    headers: list[str], columns: _Columns
+) -> list[tuple[int, str]]:
+    """(column position, category name) for every per-category flag column: each
     annot_<x> other than the label column (-> <x>), except the any_arrhythmia
-    roll-up. For this app's own export, its category flag columns."""
-    found: list[tuple[object, str]] = []
+    roll-up (also when the header is repeated). For this app's own export, its
+    category flag columns."""
+    found: list[tuple[int, str]] = []
     seen: set[str] = set()
-    for column in df.columns:
-        if column == columns.label:
+    for position, header in enumerate(headers):
+        if position == columns.label:
             continue
         if columns.derived:
-            name = str(column).strip()
+            name = header.strip()
             if name not in categories.REASSIGNABLE_CATEGORIES:
                 continue
         else:
-            match = re.fullmatch(r"annot[\s_\-]+(.+)", str(column).strip(), re.I)
+            match = re.fullmatch(r"annot[\s_\-]+(.+)", header.strip(), re.I)
             if not match:
                 continue
             name = re.sub(r"[\s\-]+", "_", match.group(1).strip().lower())
         if name == "any_arrhythmia" or name in seen:
             continue
         seen.add(name)
-        found.append((column, name))
+        found.append((position, name))
     return found
 
 
-def _label_values(df: pd.DataFrame, columns: _Columns) -> np.ndarray:
+def _label_values(table: _Table, columns: _Columns) -> np.ndarray:
     if not columns.derived:
-        return _as_floats(df[columns.label])
+        return _as_floats(table.column(columns.label))
     # review_state: confirmed -> 2, rejected -> -1, otherwise 1 if the detector
     # flagged the beat (any_arrhythmia) and 0 if not.
-    state = df[columns.label].map(
-        lambda v: "" if _is_blank(v) else str(v).strip().lower()
+    state = table.column(columns.label).map(
+        lambda v: "" if _blank_cell(v) else str(v).strip().lower()
     )
     any_col = columns.by_name.get("anyarrhythmia")
     flagged = (
-        np.nan_to_num(_as_floats(df[any_col])) != 0
+        np.nan_to_num(_as_floats(table.column(any_col), bools=True)) != 0
         if any_col is not None
-        else np.zeros(len(df), dtype=bool)
+        else np.zeros(len(table.rows), dtype=bool)
     )
     state_values = state.to_numpy(dtype=object)
     return np.select(
@@ -390,30 +604,50 @@ def _label_values(df: pd.DataFrame, columns: _Columns) -> np.ndarray:
     )
 
 
-def _read_settings(sheets: dict[str, pd.DataFrame]) -> dict[str, object]:
-    """First row of the `settings` sheet, by column."""
-    for name, df in sheets.items():
-        if _compact(str(name)) == "settings" and len(df) > 0:
-            return {
-                str(column).strip(): _plain(df[column].iloc[0]) for column in df.columns
-            }
+def _read_settings(wb) -> dict[str, object]:
+    """First data row of the `settings` sheet, by column (an empty cell is
+    None; a repeated header keeps its first column)."""
+    for ws in wb.worksheets:
+        if _compact(ws.title) != "settings":
+            continue
+        head = _head_rows(ws, HEADER_SCAN_ROWS + 1)
+        for number, row in enumerate(head):
+            headers = _header_texts(row)
+            if not headers:
+                continue
+            values = head[number + 1] if number + 1 < len(head) else ()
+            if all(_blank_cell(v) for v in values):
+                break  # no data row
+            settings: dict[str, object] = {}
+            for position, header in enumerate(headers):
+                name = header.strip()
+                if name and name not in settings:
+                    value = values[position]
+                    settings[name] = None if _blank_cell(value) else _plain(value)
+            return settings
     return {}
 
 
-def _read_bad_data_marks(sheets: dict[str, pd.DataFrame]) -> list[ReportBadDataRange]:
-    for name, df in sheets.items():
-        if _compact(str(name)) != "baddatamarks":
+def _read_bad_data_marks(wb) -> list[ReportBadDataRange]:
+    for ws in wb.worksheets:
+        if _compact(ws.title) != "baddatamarks":
             continue
-        by_name = {_compact(str(c)): c for c in reversed(list(df.columns))}
-        if "start" not in by_name or "stop" not in by_name:
-            return []
-        start = _as_floats(df[by_name["start"]])
-        stop = _as_floats(df[by_name["stop"]])
-        marks = []
-        for a, b in zip(start.tolist(), stop.tolist()):
-            if math.isfinite(a) and math.isfinite(b):
-                marks.append(ReportBadDataRange(start=min(a, b), stop=max(a, b)))
-        return marks
+        for number, row in enumerate(_head_rows(ws), start=1):
+            headers = _header_texts(row)
+            by_name: dict[str, int] = {}
+            for position, header in enumerate(headers):
+                by_name.setdefault(_compact(header), position)
+            if "start" not in by_name or "stop" not in by_name:
+                continue
+            table = _read_table(ws, number, headers)
+            start = _as_floats(table.column(by_name["start"]))
+            stop = _as_floats(table.column(by_name["stop"]))
+            marks = []
+            for a, b in zip(start.tolist(), stop.tolist()):
+                if math.isfinite(a) and math.isfinite(b):
+                    marks.append(ReportBadDataRange(start=min(a, b), stop=max(a, b)))
+            return marks
+        return []
     return []
 
 
@@ -430,10 +664,22 @@ def _recording_span(cache_entry) -> tuple[float, float] | None:
     return (lo, hi) if math.isfinite(lo) and math.isfinite(hi) else None
 
 
-def _read_workbook(report_path: str) -> dict[str, pd.DataFrame]:
-    if not os.path.exists(report_path):
+@dataclass
+class _Workbook:
+    """What a report file yields: its beats sheet and the two small ones."""
+
+    sheet: str
+    columns: _Columns
+    table: _Table
+    settings_raw: dict[str, object]
+    bad_data_marks: list[ReportBadDataRange]
+
+
+def _read_workbook(report_path: str) -> _Workbook:
+    io_path = _io_path(report_path)
+    if not os.path.exists(io_path):
         raise _ReportError(f"File not found: {report_path}")
-    if not os.path.isfile(report_path):
+    if not os.path.isfile(io_path):
         raise _ReportError(f"Not a file: {report_path}")
     if os.path.splitext(report_path)[1].lower() == ".xls":
         raise _ReportError(
@@ -441,46 +687,63 @@ def _read_workbook(report_path: str) -> dict[str, pd.DataFrame]:
             "it as .xlsx."
         )
 
-    size = os.path.getsize(report_path)
-    if size > MAX_REPORT_BYTES:
-        raise _ReportError(
-            f"The file is {size / (1024 * 1024):,.1f} MB, far larger than a report "
-            f"(limit {MAX_REPORT_BYTES // (1024 * 1024)} MB). Did you pick the "
-            "wrong file?"
-        )
-
     try:
-        with open(report_path, "rb") as f:
-            head = f.read(len(_OLE2_SIGNATURE))
-        if head == _OLE2_SIGNATURE:
+        size = os.path.getsize(io_path)
+        if size > MAX_REPORT_BYTES:
             raise _ReportError(
-                "This is an old .xls spreadsheet or a password-protected workbook. "
-                "Save it as an unprotected .xlsx."
+                f"The file is {size / (1024 * 1024):,.1f} MB, far larger than a "
+                f"report (limit {MAX_REPORT_BYTES // (1024 * 1024)} MB). Did you "
+                "pick the wrong file?"
             )
-        sheets = pd.read_excel(report_path, sheet_name=None, engine="openpyxl")
+        # Opened here and handed to openpyxl as a stream: it then doesn't judge
+        # the file by its extension (the old reader never did), and the handle
+        # is closed below however reading ends.
+        with open(io_path, "rb") as f:
+            if f.read(len(_OLE2_SIGNATURE)) == _OLE2_SIGNATURE:
+                raise _ReportError(
+                    "This is an old .xls spreadsheet or a password-protected "
+                    "workbook. Save it as an unprotected .xlsx."
+                )
+            f.seek(0)
+            workbook = openpyxl.load_workbook(f, read_only=True, data_only=True)
+            try:
+                return _read_sheets(workbook)
+            finally:
+                workbook.close()
     except _ReportError:
         raise
+    except PermissionError:
+        raise _ReportError(_LOCKED_MESSAGE) from None
     except Exception as e:
         raise _ReportError(
             f"Could not read {os.path.basename(report_path)!r} as an Excel workbook "
             f"({type(e).__name__}: {e}). It may be corrupt, password-protected or "
             "not a spreadsheet."
         ) from None
-    if not sheets:
-        raise _ReportError("The workbook has no sheets.")
-    return sheets
+
+
+def _read_sheets(wb) -> _Workbook:
+    located = _locate_beats(wb)
+    table = _read_table(wb[located.sheet], located.header_row, located.headers)
+    return _Workbook(
+        sheet=located.sheet,
+        columns=located.columns,
+        table=table,
+        settings_raw=_read_settings(wb),
+        bad_data_marks=_read_bad_data_marks(wb),
+    )
 
 
 def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
-    sheets = _read_workbook(report_path)
-    sheet_name, df, columns = _pick_sheet(sheets)
+    parsed = _read_workbook(report_path)
+    sheet_name, columns, table = parsed.sheet, parsed.columns, parsed.table
 
-    ts = _as_floats(df[columns.ts])
-    label = _label_values(df, columns)
-    # Wholly empty rows (spreadsheet padding) are not data rows.
-    nonblank = ~df.isna().all(axis=1).to_numpy()
+    ts = _as_floats(table.column(columns.ts), times=True)
+    label = _label_values(table, columns)
+    # Every row of the table has something in it (padding rows are dropped when
+    # reading), so a row without a usable ts and label is a skipped one.
     usable = np.isfinite(ts) & np.isin(label, VALID_LABELS)
-    skipped_rows = int(np.count_nonzero(nonblank & ~usable))
+    skipped_rows = int(np.count_nonzero(~usable))
 
     usable_rows = np.flatnonzero(usable)
     if usable_rows.size == 0:
@@ -500,15 +763,19 @@ def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
         [labels == 2, labels == 1], [ARRHYTHMIA, FLAGGED], default=NORMAL
     ).astype(np.int8)
 
-    category_cols = _category_columns(df, columns)
+    category_cols = _category_columns(table.headers, columns)
     if category_cols:
         category_flags = np.column_stack(
-            [np.nan_to_num(_as_floats(df[c]))[rows] != 0 for c, _ in category_cols]
+            [
+                np.nan_to_num(_as_floats(table.column(c), bools=True))[rows] != 0
+                for c, _ in category_cols
+            ]
         )
     else:
         category_flags = np.zeros((rows.size, 0), dtype=bool)
 
-    settings_raw = _read_settings(sheets)
+    settings_raw = parsed.settings_raw
+    label_header = table.headers[columns.label]
     filename = os.path.basename(report_path)
     name_ok = name_matches_recording(report_path, recording_path)
     counts = {str(v): int(np.count_nonzero(labels == v)) for v in VALID_LABELS}
@@ -545,9 +812,9 @@ def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
             "The report has no annotation column; labels were derived from its "
             "review_state and any_arrhythmia columns (an export from this app)."
         )
-    elif _compact(str(columns.label)) != _compact(PRIMARY_LABEL_COLUMN):
+    elif _compact(label_header) != _compact(PRIMARY_LABEL_COLUMN):
         warnings_after.append(
-            f"No {PRIMARY_LABEL_COLUMN} column; using {str(columns.label)!r} for the "
+            f"No {PRIMARY_LABEL_COLUMN} column; using {label_header!r} for the "
             "labels."
         )
 
@@ -555,15 +822,15 @@ def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
         report_path=report_path,
         filename=filename,
         sheet=sheet_name,
-        label_column=str(columns.label),
-        category_columns=[str(c) for c, _ in category_cols],
+        label_column=label_header,
+        category_columns=[table.headers[c] for c, _ in category_cols],
         total_beats=int(sorted_ts.size),
         counts=counts,
         ts_start=float(sorted_ts[0]),
         ts_end=float(sorted_ts[-1]),
         name_matches_recording=name_ok,
         settings={k: _stringify(v) for k, v in settings_raw.items()},
-        bad_data_marks=_read_bad_data_marks(sheets),
+        bad_data_marks=parsed.bad_data_marks,
         skipped_rows=skipped_rows,
     )
     entry = _Entry(
@@ -649,22 +916,36 @@ def _truthy(column: pd.Series) -> np.ndarray:
     return column.fillna(False).astype(bool).to_numpy()
 
 
-def _our_decisions(frame: pd.DataFrame) -> np.ndarray:
-    """Our decision per row of the beat frame: a confirmed beat is an
-    arrhythmia, a rejected one normal; otherwise a beat the detectors flagged
-    is 'flagged' (detected, not reviewed) and any other normal. `review_state`
-    is absent until a review action / restore adds it, and NaN where a sync had
-    no value: both mean unreviewed."""
+def _our_decisions(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, bool]:
+    """(decision per row of the beat frame, whether that decision is known,
+    whether the frame has arrhythmia flags at all).
+
+    A confirmed beat is an arrhythmia, a rejected one normal; otherwise a beat
+    the detectors flagged is 'flagged' (detected, not reviewed) and any other
+    normal. `review_state` is absent until a review action / restore adds it,
+    and NaN where a sync had no value: both mean unreviewed.
+
+    The flag columns are absent right after beat detection (arrhythmia
+    detection adds them) and all NULL in a frame restored from the database.
+    Then "not flagged" means "not evaluated", so an unreviewed beat's decision
+    is unknown; only a review (confirm/reject) is a decision without flags."""
     flagged = np.zeros(len(frame), dtype=bool)
+    has_flags = False
     for column in categories.ALL_OPTIONAL_COLUMNS:
         if column in frame.columns:
-            flagged |= _truthy(frame[column])
+            series = frame[column]
+            has_flags = has_flags or bool(series.notna().any())
+            flagged |= _truthy(series)
     decisions = np.where(flagged, FLAGGED, NORMAL).astype(np.int8)
+    reviewed = np.zeros(len(frame), dtype=bool)
     if "review_state" in frame.columns:
         state = frame["review_state"]
-        decisions[state.eq("confirmed").to_numpy()] = ARRHYTHMIA
-        decisions[state.eq("rejected").to_numpy()] = NORMAL
-    return decisions
+        confirmed = state.eq("confirmed").to_numpy()
+        rejected = state.eq("rejected").to_numpy()
+        decisions[confirmed] = ARRHYTHMIA
+        decisions[rejected] = NORMAL
+        reviewed = confirmed | rejected
+    return decisions, reviewed | has_flags, has_flags
 
 
 def _compute_matching(entry: _Entry, frame: pd.DataFrame) -> _Matching:
@@ -696,17 +977,20 @@ def _compute_matching(entry: _Entry, frame: pd.DataFrame) -> _Matching:
     matched_mask = match != NONE
     our_ts = np.where(matched_mask, our_ts_sorted[idx], np.nan)
 
-    ours = _our_decisions(frame)[positions[idx]]
+    our_decisions, our_known, has_our_flags = _our_decisions(frame)
+    ours = our_decisions[positions[idx]]
+    known = our_known[positions[idx]]
     theirs = entry.decisions
     agreement = np.select(
         [
             ~matched_mask,
+            ~known,
             (theirs == FLAGGED) | (ours == FLAGGED),
             theirs == ours,
             (theirs == ARRHYTHMIA) & (ours == NORMAL),
             (theirs == NORMAL) & (ours == ARRHYTHMIA),
         ],
-        [UNMATCHED, PENDING, AGREE, REPORT_ONLY, OURS_ONLY],
+        [UNMATCHED, AGREEMENT_UNKNOWN, PENDING, AGREE, REPORT_ONLY, OURS_ONLY],
         default=UNMATCHED,
     ).astype(np.int8)
 
@@ -720,10 +1004,13 @@ def _compute_matching(entry: _Entry, frame: pd.DataFrame) -> _Matching:
         extra_ours=extra_ours,
         has_our_beats=True,
         targets=_targets(entry, match, agreement),
+        has_our_flags=has_our_flags,
     )
 
 
-def _matching(entry: _Entry, frame: pd.DataFrame | None) -> _Matching:
+def _matching(
+    entry: _Entry, frame: pd.DataFrame | None, state=None, path: str | None = None
+) -> _Matching:
     """The report matched against `frame` (the recording's beat_cache entry,
     read once by the caller).
 
@@ -733,6 +1020,11 @@ def _matching(entry: _Entry, frame: pd.DataFrame | None) -> _Matching:
     exactly "nothing changed". Threads may race to compute it twice (harmless);
     the memo is one attribute assigned in one store, so it can never be seen
     half-updated, and a reader holding a different frame just recomputes.
+
+    A reader that was handed a frame and then lost the race to a re-detection
+    would overwrite the newer frame's memo with its own, so a result is stored
+    only while `frame` is still the recording's current one (given `state` and
+    `path`); otherwise it is just returned.
     """
     if frame is None or "ts" not in frame.columns:
         entry.memo = None  # don't keep a replaced/dropped frame alive
@@ -741,7 +1033,8 @@ def _matching(entry: _Entry, frame: pd.DataFrame | None) -> _Matching:
     if memo is not None and memo[0] is frame:
         return memo[1]
     result = _compute_matching(entry, frame)
-    entry.memo = (frame, result)
+    if state is None or state.beat_cache.get(path) is frame:
+        entry.memo = (frame, result)
     return result
 
 
@@ -778,6 +1071,58 @@ def _beats_at(entry: _Entry, matching: _Matching, idx: np.ndarray) -> list[Repor
 # ---------------------------------------------------------------------------
 
 
+class _Generations:
+    """Which load/unload request for a recording is the latest.
+
+    Parsing runs without any lock and takes as long as the file is big, so
+    requests for one recording can finish out of order: a slow load requested
+    first must not overwrite a faster one requested later, and a report must
+    not reappear because an unload came in while it was still being read.
+    Every load and every unload takes the recording's next number when it
+    starts; a load may publish its report only while its number is still the
+    latest, and an unload publishes "nothing" the same way. The check and the
+    store happen under one lock, so the two cannot interleave."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest: dict[str, int] = {}
+
+    def start(self, path: str) -> int:
+        with self._lock:
+            number = self._latest.get(path, 0) + 1
+            self._latest[path] = number
+            return number
+
+    def publish(self, cache: dict, path: str, number: int, entry: _Entry) -> bool:
+        """Store `entry` for `path` if `number` is still the latest request."""
+        with self._lock:
+            if self._latest.get(path, 0) != number:
+                return False
+            cache[path] = entry
+            return True
+
+    def remove(self, cache: dict, path: str) -> None:
+        """Drop the recording's report and supersede any load in flight."""
+        with self._lock:
+            self._latest[path] = self._latest.get(path, 0) + 1
+            cache.pop(path, None)
+
+
+_generations_init = threading.Lock()
+
+
+def _generations(state) -> _Generations:
+    """The app's _Generations (made on first use: app.state is built before
+    this module is, and requests run on a thread pool)."""
+    generations = getattr(state, "report_generations", None)
+    if generations is None:
+        with _generations_init:
+            generations = getattr(state, "report_generations", None)
+            if generations is None:
+                generations = state.report_generations = _Generations()
+    return generations
+
+
 @router.post("/load", response_model=ReportLoadResult)
 def load_report(payload: ReportLoadRequest, request: Request) -> ReportLoadResult:
     state = request.app.state
@@ -786,6 +1131,8 @@ def load_report(payload: ReportLoadRequest, request: Request) -> ReportLoadResul
     if imported is None or imported.status != "ok":
         return ReportLoadResult(status="error", error=f"File not imported: {path}")
 
+    generations = _generations(state)
+    number = generations.start(path)
     try:
         entry = _build_entry(payload.report_path, path, state)
         summary = _summary_for(entry, state)
@@ -794,12 +1141,22 @@ def load_report(payload: ReportLoadRequest, request: Request) -> ReportLoadResul
     except Exception as e:
         return ReportLoadResult(status="error", error=f"Could not read the report: {e}")
 
-    # A previous report is replaced only by a successfully parsed one. Parsing
-    # runs without any lock, so the recording may have been evicted meanwhile:
-    # store first, then re-check, and take the entry back out if so. (Evict
-    # pops imported_files BEFORE report_cache, so either this check sees the
+    # A previous report is replaced only by a successfully parsed one, and only
+    # if no later load or unload for this recording has started meanwhile.
+    # Reported as an error, so a client that was replacing a report re-reads
+    # the state (GET /reports/state) and keeps what is really loaded.
+    if not generations.publish(state.report_cache, path, number, entry):
+        return ReportLoadResult(
+            status="error",
+            error=(
+                "This report was not loaded: a newer load or unload for this "
+                "recording was requested while it was being read."
+            ),
+        )
+    # The recording may have been evicted while the report was parsed: stored
+    # first, then re-checked, and taken back out if so. (Evict pops
+    # imported_files BEFORE report_cache, so either this check sees the
     # eviction, or evict's own pop removes what was just stored.)
-    state.report_cache[path] = entry
     if path not in state.imported_files:
         if state.report_cache.get(path) is entry:
             state.report_cache.pop(path, None)
@@ -811,7 +1168,8 @@ def load_report(payload: ReportLoadRequest, request: Request) -> ReportLoadResul
 def unload_report(
     payload: ReportUnloadRequest, request: Request
 ) -> ReportUnloadResult:
-    request.app.state.report_cache.pop(payload.recording_path, None)
+    state = request.app.state
+    _generations(state).remove(state.report_cache, payload.recording_path)
     return ReportUnloadResult(status="ok")
 
 
@@ -841,7 +1199,7 @@ def get_report_window(
     if hi <= lo:
         return ReportWindowResult(status="ok", beats=[])
     try:
-        matching = _matching(entry, frame)
+        matching = _matching(entry, frame, request.app.state, path)
     except Exception as e:
         return ReportWindowResult(status="error", error=_match_error(e))
     idx = np.arange(lo, hi)
@@ -876,7 +1234,7 @@ def get_report_navigation(path: str, request: Request) -> ReportNavigationResult
             has_our_beats=frame is not None and "ts" in frame.columns,
         )
     try:
-        matching = _matching(entry, frame)
+        matching = _matching(entry, frame, request.app.state, path)
     except Exception as e:
         return ReportNavigationResult(status="error", error=_match_error(e))
     return ReportNavigationResult(
@@ -886,6 +1244,7 @@ def get_report_navigation(path: str, request: Request) -> ReportNavigationResult
         total=int(entry.ts.size),
         extra_ours=matching.extra_ours,
         has_our_beats=matching.has_our_beats,
+        has_our_flags=matching.has_our_flags,
     )
 
 
@@ -900,7 +1259,7 @@ def get_report_beat(path: str, ts: float, request: Request) -> ReportBeatResult:
     if distance[0] > MATCH_TOLERANCE_S + _EPS:
         return ReportBeatResult(status="ok", beat=None)
     try:
-        matching = _matching(entry, frame)
+        matching = _matching(entry, frame, request.app.state, path)
     except Exception as e:
         return ReportBeatResult(status="error", error=_match_error(e))
     return ReportBeatResult(
@@ -919,6 +1278,19 @@ def _find_candidates(recording_path: str, folders: list[str]) -> list[str]:
             seen_folders.add(key)
             ordered.append(folder)
 
+    recording_stem = os.path.splitext(os.path.basename(recording_path))[0].lower()
+
+    def order(e: os.DirEntry):
+        # The report named exactly like the recording first (.xlsx before
+        # .xlsm), then the rest ("<stem> (1)", "<stem>-report", ...) by name.
+        stem, extension = os.path.splitext(e.name.lower())
+        return (
+            stem != recording_stem,
+            stem,
+            REPORT_EXTENSIONS.index(extension),
+            e.name,
+        )
+
     paths: list[str] = []
     seen_files: set[str] = set()
     for folder in ordered:
@@ -926,7 +1298,7 @@ def _find_candidates(recording_path: str, folders: list[str]) -> list[str]:
             with os.scandir(folder) as entries:
                 names = sorted(
                     (e for e in entries if _is_candidate(e, recording_path)),
-                    key=lambda e: e.name.lower(),
+                    key=order,
                 )
         except OSError:
             continue  # missing or unreadable folder: skipped silently

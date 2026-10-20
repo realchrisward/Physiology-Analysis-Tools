@@ -3,12 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ReviewWorkspace from './ReviewWorkspace.svelte'
 import { resetForTesting as resetArrhythmiaRuns } from '../../lib/stores/arrhythmiaRuns.svelte'
 import { fileRegistry, resetForTesting as resetFileRegistry } from '../../lib/stores/fileRegistry.svelte'
+import { resetForTesting as resetReports } from '../../lib/stores/reports.svelte'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   delete (window as any).api
   resetFileRegistry()
   resetArrhythmiaRuns()
+  // A recording is only searched for a suggested report once per session; the
+  // tests reuse one path and each expects that first search.
+  resetReports()
 })
 
 // jsdom performs no layout, so every element's real `clientWidth` is 0

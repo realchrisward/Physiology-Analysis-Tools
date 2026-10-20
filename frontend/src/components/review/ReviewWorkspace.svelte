@@ -241,11 +241,14 @@
   // acknowledgement back from EcgGraph.
   let beatsRefreshToken = $state(0)
 
-  function refreshGraphBeats() {
+  // `syncReport` is false only for the refresh a freshly opened recording does
+  // for beats that were already detected: nothing about our beats changed since
+  // the report was matched against them, so re-reading it would be redundant.
+  function refreshGraphBeats(syncReport: boolean = true) {
     beatsRefreshToken += 1
     // Every change to OUR beats or review also changes how they compare with
     // the report loaded for this recording (matches, disagreements).
-    scheduleReportSync()
+    if (syncReport) scheduleReportSync()
   }
 
   // ---- Report labels ------------------------------------------------------
@@ -278,8 +281,14 @@
       : null,
   )
   // A report beat the graph navigated to that we have no beat for (so there is
-  // no selection to describe it): the beat panel shows it instead.
+  // no selection to describe it): the beat panel shows it instead. The graph
+  // reports `null` when no report beat is the focus any more (its navigation
+  // was reset, or a flag / beat jump took over); it can't stay set without a
+  // report to describe it either.
   let reportFocusTs: number | null = $state(null)
+  $effect(() => {
+    if (!reportLoaded) reportFocusTs = null
+  })
 
   function fileNameOf(filePath: string): string {
     return filePath.split(/[\\/]/).pop() ?? filePath
@@ -326,10 +335,6 @@
       queueMicrotask(scheduleReportSync)
     }
   })
-
-  // Beats added by hand have no event of their own (the graph adds them and
-  // then selects the new beat), so the first selection of one is the cue.
-  const syncedManualBeats = new Set<number>()
 
   // Opening a recording: the report this recording had (still on the backend,
   // or re-loaded from its saved link), and otherwise a suggestion for one.
@@ -396,7 +401,12 @@
       showDropMessage(`${file.name} is not an .xlsx report, so it was ignored.`)
       return
     }
-    const filePath = window.api?.getPathForFile?.(file) ?? ''
+    let filePath = ''
+    try {
+      filePath = window.api?.getPathForFile?.(file) ?? ''
+    } catch {
+      // The bridge refused (a file that isn't on disk): same answer as no path.
+    }
     if (!filePath) {
       showDropMessage(`Could not find ${file.name} on disk. Use "Load report…" to choose it instead.`)
       return
@@ -557,8 +567,17 @@
   // a later manual channel switch or Re-run detection click updates
   // `detection` through their own paths without touching `fileRow.status`
   // at all, so this never clobbers either of those afterward.
+  //
+  // The run when this workspace mounts is told apart from the later ones: a
+  // recording opened with its beats already detected has nothing new for the
+  // report to be re-matched against (the report is loaded after this point, so
+  // it sees these very beats), while detection finishing under an open
+  // workspace does.
+  let fileStatusSeen = false
   $effect(() => {
     const status = fileRow?.status
+    const mounting = !fileStatusSeen
+    fileStatusSeen = true
     if (status === 'queued' || status === 'detecting') {
       detection = { status: 'pending', count: null, meanHr: null, duration: null, error: null }
     } else if (status === 'detected' && fileRow) {
@@ -582,7 +601,7 @@
       // but Svelte's depth guard still counted the whole synchronous chain
       // against this effect's own budget. A microtask breaks the chain into
       // two independent flushes with no user-visible delay.
-      queueMicrotask(() => refreshGraphBeats())
+      queueMicrotask(() => refreshGraphBeats(!mounting))
     } else if (status === 'detection-error' && fileRow) {
       detection = { status: 'error', count: null, meanHr: null, duration: null, error: fileRow.error }
     }
@@ -759,10 +778,6 @@
   function handleBeatSelect(beat: WindowBeat) {
     selectedBeat = beat
     reportFocusTs = null
-    if (beat.manual_added_at && !syncedManualBeats.has(beat.ts)) {
-      syncedManualBeats.add(beat.ts)
-      scheduleReportSync()
-    }
     if (lastPersistedChannel !== activeChannel) {
       void ensureChannelPersisted(activeChannel)
     }
@@ -1101,7 +1116,14 @@
   {/if}
 
   {#if dropMessage}
-    <div class="banner report-strip report-strip-warn" data-testid="report-drop-message" role="status">
+    <!-- In focus mode the graph covers the whole window (and this strip with
+         it), so the message floats above it instead. -->
+    <div
+      class="banner report-strip report-strip-warn"
+      class:report-strip-floating={focusMode}
+      data-testid="report-drop-message"
+      role="status"
+    >
       <Icon name="alert-circle" size={14} />
       <span>{dropMessage}</span>
       <button
@@ -1188,7 +1210,8 @@
             {reportRefreshToken}
             {reportTargets}
             {reportBadData}
-            onReportNavigate={(ts) => (reportFocusTs = ts)}
+            onReportNavigate={(ts: number | null) => (reportFocusTs = ts)}
+            onBeatAdded={() => scheduleReportSync()}
           />
         {/key}
       {/if}
@@ -1305,7 +1328,7 @@
   </div>
 
   {#if dragging}
-    <div class="drop-overlay" data-testid="report-drop-overlay">
+    <div class="drop-overlay" class:drop-overlay-fixed={focusMode} data-testid="report-drop-overlay">
       <Icon name="upload" size={28} />
       <span>Drop to load as report labels</span>
     </div>
@@ -1348,6 +1371,19 @@
     background: var(--color-accent-soft);
   }
 
+  /* The graph's focus mode is fixed, full-window and z-index 60: anything of
+     ours that has to be seen while it is on goes above that. */
+  .report-strip-floating {
+    position: fixed;
+    top: var(--space-4);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 70;
+    width: min(560px, calc(100vw - 2 * var(--space-4)));
+    box-sizing: border-box;
+    box-shadow: var(--shadow-md);
+  }
+
   .report-focus {
     margin-top: var(--space-3);
   }
@@ -1357,7 +1393,7 @@
   .drop-overlay {
     position: absolute;
     inset: var(--space-2);
-    z-index: 50;
+    z-index: 70;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1370,6 +1406,12 @@
     font-size: var(--font-size-lg);
     font-weight: 600;
     pointer-events: none;
+  }
+
+  /* In focus mode the graph is fixed over the whole window, so the overlay
+     covers the window too (still without taking pointer events). */
+  .drop-overlay-fixed {
+    position: fixed;
   }
 
   .placeholder-hint {

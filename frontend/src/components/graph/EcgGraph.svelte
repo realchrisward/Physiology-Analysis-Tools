@@ -242,14 +242,16 @@
     REPORT_NORMAL_STORAGE_KEY,
     REPORT_TARGET_TOLERANCE_SECONDS,
     allowsNormalBeats,
-    defaultReportFilter,
+    allowsNormalFetch,
     findReportBeat,
+    hasReportTargets,
     indexOfTarget,
     loadStoredBool,
     loadStoredString,
     markKindFor,
     parseStoredReportFilter,
     reportLanePlugin,
+    resolveReportFilter,
     stepTarget,
     storeString,
     type ReportLaneState,
@@ -283,6 +285,7 @@
     reportTargets = {},
     reportBadData = [],
     onReportNavigate,
+    onBeatAdded,
   }: {
     path: string
     channel: string
@@ -376,8 +379,13 @@
     // differently from this app's red marks.
     reportBadData?: { start: number; stop: number }[]
     // The graph's own report navigation (the buttons, `,` / `.`) landed on the
-    // report beat at `ts`.
-    onReportNavigate?: (ts: number) => void
+    // report beat at `ts`; `null` says no report beat is the focus any more —
+    // the filter changed, the report was removed or replaced, or a flag jump, a
+    // beat of interest jump or a beat the technician chose took over.
+    onReportNavigate?: (ts: number | null) => void
+    // A beat was added by hand (add-beat mode, confirmed), at `ts`. Our beats
+    // changed, so the parent can bring the report's matching up to date.
+    onBeatAdded?: (ts: number) => void
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -456,6 +464,18 @@
   function cssVar(name: string, fallback: string): string {
     const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
     return value || fallback
+  }
+  // Changes whenever what `cssVar` resolves to would: the chosen theme, and —
+  // for "system" — the OS's own light/dark setting. The report lane resolves its
+  // colors once per value of this rather than at every draw.
+  function themeKey(): string {
+    let osDark = ''
+    try {
+      osDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    } catch {
+      // no media queries: the chosen theme alone is the key
+    }
+    return `${themeState.mode}:${osDark}`
   }
   // Converts a `#rgb`/`#rrggbb` hex color to an `rgba(...)` string so an
   // alpha channel can be applied to it — canvas fillStyle needs a literal
@@ -908,12 +928,23 @@
   // True while a report is attached and its lane is switched on: what decides
   // whether the y scale makes room for the second lane.
   let reportLaneActive: boolean = $derived(reportLoaded && showReportLane)
-  // The technician's own filter choice (remembered), else a default taken from
-  // what the report has to show: disagreements when there are any.
+  // The technician's remembered filter choice (the last one they made).
   let reportFilterChoice: ReportFilter | null = $state(
     parseStoredReportFilter(loadStoredString(REPORT_FILTER_STORAGE_KEY), REPORT_FILTERS),
   )
-  let reportFilter: ReportFilter = $derived(reportFilterChoice ?? defaultReportFilter(reportTargets))
+  // The filter in use, once decided — once per attached report, when its
+  // navigation targets first arrive (see the effect below): the remembered
+  // choice if it has anything to step through in THIS report, else disagreements
+  // when there are any, else arrhythmia. From then on it stays what it is until
+  // the technician changes it or the report goes away: resolving the last
+  // disagreement must not switch the list underneath them, and a filter that
+  // happens to run empty stays selected (the counter says "None") rather than
+  // being swapped for another.
+  let reportFilterResolved: ReportFilter | null = $state(null)
+  // Before that decision (no targets yet) the same rule, live.
+  let reportFilter: ReportFilter = $derived(
+    reportFilterResolved ?? resolveReportFilter(reportFilterChoice, reportTargets),
+  )
   let reportFilterTargets: number[] = $derived(reportTargets?.[reportFilter] ?? [])
   // The report beat (`ts`) the navigator was last on, or null before any. A
   // `ts` rather than an index so it stays right when the targets change
@@ -926,22 +957,36 @@
   // A failed report fetch is never an error of the trace: the lane just stays
   // empty, and this says why.
   let reportFetchFailed: boolean = $state(false)
-  // True while "show normal beats" is on but the window on screen is too wide
-  // to have them fetched (the legend then says to zoom in).
+  // True while "show normal beats" is on but the VIEW on screen is too wide to
+  // have them (the legend then says to zoom in). Follows the view, not the
+  // loaded buffer around it.
   let reportNormalSkipped: boolean = $state(false)
   // The report beats of the window on screen (the plugin's data). Plain, like
   // `lastBeats`: only drawing and event handlers read it.
   let lastReportBeats: ReportBeat[] = []
-  // Bumped whenever something a report fetch depends on changes (report
-  // loaded/removed/replaced, our beats changed, normal beats shown or hidden):
-  // a fetch that began under an older value is stale when it lands and is
-  // followed by a fresh report-only fetch.
-  let reportEpoch = 0
+  // Whether `lastReportBeats` include the normal beats, and whether the latest
+  // report request asked for them (see `reconcileReportNormal`).
+  let reportHasNormal = false
+  let reportRequestedNormal = false
+  // The loaded range the latest report request was made for: the report is
+  // fetched on its own after a refetch has committed (see `ensureReportCurrent`),
+  // never as part of it — a slow or unanswered report request must not hold up
+  // the trace, the markers or drag buffering.
+  let reportRequestedRange: { start: number; end: number } | undefined
   // Ordering guard for report-only refreshes, like `beatsRefreshId`.
   let reportRefreshId = 0
+  // Bumped when the report navigation is reset, so a report jump still waiting
+  // on its fetch knows it was superseded. Deliberately separate from
+  // `selectionEpoch`: that one also guards beat-of-interest and flag jumps, which
+  // a filter change or a removed report has no business cancelling.
+  let reportJumpId = 0
   // The report beat whose matched beat of ours the graph still has to select —
   // `pendingFlagSelectTs`'s counterpart for the report navigator.
   let pendingReportSelectTs: number | null = null
+  // True from a pointer press on the report filter until its change has been
+  // handled: only a mouse-driven pick takes focus off the select afterwards.
+  let reportSelectPointer = false
+  let reportSelectEl: HTMLSelectElement | undefined = $state()
   // The values the inputs of a report refresh had last time the effect ran.
   let previousReportInputs: { loaded: boolean; token: number; normal: boolean } | undefined
   let previousReportLaneActive: boolean | undefined
@@ -1096,6 +1141,11 @@
   // cancel a channel refetch (they are not interchangeable — only the
   // refetch carries waveform data for the new range).
   let beatsRefreshId = 0
+  // Set when a beats-only refresh had to stand aside (a refetch in flight, or
+  // the chart not built yet). That refetch may have asked for its beats BEFORE
+  // whatever changed them, so it cannot be trusted to deliver the fresh ones:
+  // one refresh is replayed once it has committed (`replayBeatsRefresh`).
+  let beatsRefreshWanted = false
 
   // The requested resolution is a PIXEL count: the backend downsamples to
   // roughly 2 points per unit of it. A container that has not been laid out
@@ -1147,27 +1197,31 @@
   // (an ordinary recording makes no report request at all), and it can never
   // fail the caller: like a beats failure it only means nothing is drawn for
   // that range — but unlike one it is reported (`failed`) so the legend can
-  // say why the lane is empty. `epoch` is what `reportEpoch` was when the
-  // request was made (see there). Normal beats are asked for only while the
-  // window is narrow enough (see REPORT_NORMAL_MAX_SPAN_SECONDS);
-  // `normalSkipped` says they were wanted but the window was too wide.
-  type ReportFetch = { beats: ReportBeat[]; failed: boolean; epoch: number; normalSkipped: boolean }
+  // say why the lane is empty. Normal beats (`includeNormal`) are asked for
+  // only while the VIEW is narrow enough (see `allowsNormalFetch`).
+  //
+  // Never part of `fetchMergedWindow`: the report is fetched on its own, after
+  // the trace and the markers have been committed (see `refreshReportOnly`).
+  type ReportFetch = { beats: ReportBeat[]; failed: boolean; includeNormal: boolean }
 
-  async function loadReportBeats(start: number, end: number): Promise<ReportFetch> {
-    const epoch = reportEpoch
-    if (!reportLoaded) return { beats: [], failed: false, epoch, normalSkipped: false }
-    const wantNormal = showReportNormal
-    const includeNormal = wantNormal && allowsNormalBeats(start, end)
-    const normalSkipped = wantNormal && !includeNormal
+  async function loadReportBeats(start: number, end: number, includeNormal: boolean): Promise<ReportFetch> {
     try {
       const result = await getReportWindow(path, start, end, includeNormal)
       if (result && result.status === 'ok' && !result.error && Array.isArray(result.beats)) {
-        return { beats: result.beats, failed: false, epoch, normalSkipped }
+        return { beats: result.beats, failed: false, includeNormal }
       }
     } catch {
       // fall through: no report lane for this range
     }
-    return { beats: [], failed: true, epoch, normalSkipped }
+    return { beats: [], failed: true, includeNormal }
+  }
+
+  // Whether a report fetch of [start, end] should include the normal beats:
+  // wanted, and the view on screen (not the buffer loaded around it) is narrow.
+  function wantsNormalFor(start: number, end: number): boolean {
+    if (!showReportNormal) return false
+    const { min, max } = chart?.scales.x ?? {}
+    return allowsNormalFetch(min ?? start, max ?? end, start, end)
   }
 
   // Makes a fetched report window the one on screen. Called only by a caller
@@ -1176,23 +1230,47 @@
     // The report was removed while this request was in flight.
     if (!reportLoaded) {
       lastReportBeats = []
+      reportHasNormal = false
       reportFetchFailed = false
       reportNormalSkipped = false
       return
     }
     lastReportBeats = report.beats
+    reportHasNormal = report.includeNormal
     reportFetchFailed = report.failed
-    reportNormalSkipped = report.normalSkipped
+    const { min, max } = chart?.scales.x ?? {}
+    reconcileReportNormal(min, max)
   }
 
-  // Whether a report fetch that just landed has to be followed by a fresh one
-  // for the window now loaded: something it depends on changed while it was in
-  // flight, or the normal beats were left out of a window (the whole-file first
-  // fetch is always "too wide") that turns out narrow enough to have them.
-  function reportNeedsRefetch(report: ReportFetch): boolean {
-    if (!reportLoaded) return false
-    if (report.epoch !== reportEpoch) return true
-    return report.normalSkipped && loadedRange !== undefined && allowsNormalBeats(loadedRange.start, loadedRange.end)
+  // Keeps the "zoom in to see normal beats" hint, and whether the loaded
+  // report has the normal beats, in step with the VIEW: the hint shows while
+  // they are wanted, the loaded report lacks them and the view is too wide;
+  // and a view that has narrowed since the report was fetched (a zoom within
+  // the loaded buffer fetches nothing by itself) asks for them now.
+  function reconcileReportNormal(min: number | null | undefined, max: number | null | undefined) {
+    const wanted = reportLoaded && showReportNormal
+    const narrow = min == null || max == null || allowsNormalBeats(min, max)
+    const skipped = wanted && !narrow && !reportHasNormal
+    if (skipped !== reportNormalSkipped) reportNormalSkipped = skipped
+    if (
+      wanted &&
+      !reportRequestedNormal &&
+      min != null &&
+      max != null &&
+      loadedRange &&
+      allowsNormalFetch(min, max, loadedRange.start, loadedRange.end)
+    ) {
+      void refreshReportOnly()
+    }
+  }
+
+  // Asks for the report of the range now loaded, unless that is already done or
+  // on its way: called when a refetch has finished, which changes the range.
+  function ensureReportCurrent() {
+    if (!reportLoaded || !chart || !loadedRange || mountCancelled) return
+    const requested = reportRequestedRange
+    if (requested && requested.start === loadedRange.start && requested.end === loadedRange.end) return
+    void refreshReportOnly()
   }
 
   async function fetchMergedWindow(
@@ -1203,43 +1281,45 @@
     channel: { x: number[]; y: number[] }
     beats: WindowBeat[]
     merged: BeatSeriesData
-    report: ReportFetch
   } | null> {
     const channelData = await loadWindow(start, end, width)
     if (!channelData) return null
     const beats = await loadBeats(start, end)
-    // After the beats, so the backend matches the report against beats at
-    // least as fresh as the ones about to be drawn next to it.
-    const report = await loadReportBeats(start, end)
-    // `lastChannelWindow`/`lastBeats`/`lastReportBeats` are assigned by the
-    // caller, after its staleness check — committing them here would let a
-    // superseded fetch leave the retained state describing a window that is no
-    // longer shown.
+    // `lastChannelWindow`/`lastBeats` are assigned by the caller, after its
+    // staleness check — committing them here would let a superseded fetch
+    // leave the retained state describing a window that is no longer shown.
     return {
       channel: channelData,
       beats,
       merged: buildBeatAlignedData(channelData.x, channelData.y, beats, selectedBeatTs, hideRejected),
-      report,
     }
   }
 
-  // Re-fetches ONLY `/reports/window` for the range the chart currently has
-  // loaded and redraws — no trace or beats request, no viewport change.
-  // Triggered by `reportRefreshToken`, the report being attached or removed,
-  // and the "show normal beats" switch (see the `$effect` below). Unlike
-  // `refreshBeatsOnly` it does not stand aside for a refetch in flight: that
-  // refetch may have asked for the report before whatever changed, and
-  // answers it again afterwards if so (see `refetch`).
+  // Fetches ONLY `/reports/window` for the range the chart currently has
+  // loaded and redraws — no trace or beats request, no viewport change. The
+  // one way the report is ever fetched: after a refetch has committed the
+  // trace and the markers (`ensureReportCurrent`) and when something the report
+  // depends on changes — `reportRefreshToken`, the report being attached or
+  // removed, the "show normal beats" switch (see the `$effect` below). It has
+  // its own request id and never holds anything else up, however slow it is.
+  // Unlike `refreshBeatsOnly` it does not stand aside for a refetch in flight:
+  // a refetch that commits meanwhile changes the loaded range, which the
+  // check below turns into "the refetch carries its own report".
   async function refreshReportOnly() {
     if (!chart || !loadedRange || mountCancelled) return
     const requestId = ++reportRefreshId
     if (!reportLoaded) {
-      commitReportFetch({ beats: [], failed: false, epoch: reportEpoch, normalSkipped: false })
+      reportRequestedRange = undefined
+      reportRequestedNormal = false
+      commitReportFetch({ beats: [], failed: false, includeNormal: false })
       chart.redraw()
       return
     }
     const range = { start: loadedRange.start, end: loadedRange.end }
-    const report = await loadReportBeats(range.start, range.end)
+    const includeNormal = wantsNormalFor(range.start, range.end)
+    reportRequestedRange = range
+    reportRequestedNormal = includeNormal
+    const report = await loadReportBeats(range.start, range.end, includeNormal)
     // Superseded by a newer refresh, or the graph is gone (unmounted, or
     // remounted for another channel — that instance has its own state).
     if (requestId !== reportRefreshId || mountCancelled || !chart) return
@@ -1259,17 +1339,31 @@
   // flags have changed, not the waveform or the technician's current
   // pan/zoom position.
   async function refreshBeatsOnly() {
-    if (!chart || !lastChannelWindow) return
+    // The first load has not built the chart yet: its beats may predate this
+    // request, so ask again once it has (`buildChart`).
+    if (!chart || !lastChannelWindow) {
+      beatsRefreshWanted = true
+      return
+    }
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
 
-    // A refetch already on its way will deliver fresh beats along with the
-    // waveform for the range actually being shown, so stand aside.
-    if (channelFetchInFlight > 0) return
+    // A refetch already on its way will deliver beats along with the waveform
+    // for the range actually being shown, so stand aside — but it may have
+    // asked for them before whatever changed them, so one refresh is replayed
+    // once it has committed.
+    if (channelFetchInFlight > 0) {
+      beatsRefreshWanted = true
+      return
+    }
 
     const requestId = ++beatsRefreshId
     const beats = await loadBeats(min, max)
-    if (requestId !== beatsRefreshId || channelFetchInFlight > 0) return
+    if (requestId !== beatsRefreshId) return
+    if (channelFetchInFlight > 0) {
+      beatsRefreshWanted = true
+      return
+    }
     if (!chart || !lastChannelWindow) return
 
     lastBeats = beats
@@ -1366,6 +1460,31 @@
     max: number,
     options: { pad?: boolean; reRange?: boolean } = {},
   ) {
+    try {
+      await refetchWindow(min, max, options)
+    } finally {
+      // Whatever the outcome (committed, superseded, failed): a beats refresh
+      // that stood aside for this refetch is replayed, and the report is
+      // fetched for the range now loaded — after the trace and markers, on its
+      // own, so a slow report request holds none of them up.
+      replayBeatsRefresh()
+      ensureReportCurrent()
+    }
+  }
+
+  // Runs the replay `refreshBeatsOnly` asked for (see `beatsRefreshWanted`) once
+  // no refetch is in flight any more.
+  function replayBeatsRefresh() {
+    if (!beatsRefreshWanted || channelFetchInFlight > 0 || !chart || !lastChannelWindow || mountCancelled) return
+    beatsRefreshWanted = false
+    void refreshBeatsOnly()
+  }
+
+  async function refetchWindow(
+    min: number,
+    max: number,
+    options: { pad?: boolean; reRange?: boolean },
+  ) {
     const requestId = ++dataRequestId
     channelFetchInFlight += 1
     const usePad = options.pad ?? true
@@ -1389,7 +1508,7 @@
     if (requestId !== dataRequestId) return
 
     if (result && chart) {
-      const { channel: channelData, beats, merged, report } = result
+      const { channel: channelData, beats, merged } = result
       // Commit the retained window/beats only now that this response is
       // confirmed current — these drive click hit-testing and every later
       // local re-merge, so stale values here cause silently wrong behaviour
@@ -1397,7 +1516,6 @@
       lastChannelWindow = channelData
       lastBeats = beats
       lastBeatsRange = { start: fetchStart, end: fetchEnd }
-      commitReportFetch(report)
       // uPlot derives the y range from the data it holds AT THE MOMENT the
       // x scale changes. Every jump/zoom sets x first and only then fetches
       // that window's data, so y ends up ranged against the PREVIOUS
@@ -1422,9 +1540,6 @@
       applyFilters() // setData resets series visibility; re-apply the active category/review filters
       settleFlagBeat()
       settleReportBeat()
-      // Whatever the report depends on changed while this was in flight, so
-      // its report beats are out of date: ask again for the window now shown.
-      if (reportNeedsRefetch(report)) void refreshReportOnly()
     }
   }
 
@@ -1597,6 +1712,8 @@
       showBadDataToast(
         `Beat added at ${added.ts.toFixed(3)}s — re-run arrhythmia detection to include it in the flags`,
       )
+      // Our beats changed: the report's matching against them has to follow.
+      onBeatAdded?.(added.ts)
       await refreshBeatsOnly()
       const loaded = lastBeats.find((b) => b.ts === added.ts)
       if (loaded) onBeatSelect?.(loaded)
@@ -2054,6 +2171,7 @@
       // imperceptible-but-real pan that the click branch's "don't refetch"
       // path would otherwise leave desynced from the displayed data.
       if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) return
+      expirePendingReportSelect()
       const dx = unitsPerPx * (moveEvent.clientX - startX)
       const newMin = scaleMin0 - dx
       const newMax = scaleMax0 - dx
@@ -2132,6 +2250,7 @@
     // debounce already coalesces a rapid burst into one request, which is
     // imperceptible for a single zoom gesture.
     viewChanged = true
+    expirePendingReportSelect()
     u.setScale('x', { min: newMin, max: newMax })
     scheduleRefetch(newMin, newMax)
   }
@@ -2152,6 +2271,7 @@
     const newMax = mid + newRange / 2
 
     viewChanged = true
+    expirePendingReportSelect()
     chart.setScale('x', { min: newMin, max: newMax })
     scheduleRefetch(newMin, newMax)
   }
@@ -2215,6 +2335,7 @@
     const newMin = center - sliderHalfWidth
     const newMax = center + sliderHalfWidth
     viewChanged = true
+    expirePendingReportSelect()
     chart.setScale('x', { min: newMin, max: newMax })
     maybeBufferAhead(newMin, newMax)
   }
@@ -2343,6 +2464,8 @@
     selectionEpoch += 1
     pendingFlagSelectTs = null
     pendingReportSelectTs = null
+    // The report beat is no longer what the technician is on.
+    onReportNavigate?.(null)
   }
 
   // Reconciles the current flag with the beats the graph holds right now, and
@@ -2398,6 +2521,7 @@
     pendingFlagSelectTs = ts
     // A flag jump replaces a report jump still waiting for its beat.
     pendingReportSelectTs = null
+    onReportNavigate?.(null)
     flagBeatMissing = false
 
     // Select immediately when the beat is already loaded, so the detail
@@ -2543,6 +2667,7 @@
   async function focusOnReportBeat(ts: number): Promise<void> {
     if (!chart) return
     const epoch = ++selectionEpoch
+    const jump = ++reportJumpId
     // A report jump replaces a flag jump still waiting for its beat.
     pendingFlagSelectTs = null
     currentReportTs = ts
@@ -2562,15 +2687,26 @@
     if (settled) return
 
     // Outside the loaded buffer the beats only arrive with this fetch. Gone (the
-    // graph was unmounted), or superseded by a newer jump or a beat the
-    // technician chose while it was in flight?
+    // graph was unmounted), or superseded by a newer jump, a beat the
+    // technician chose, or the navigation being reset while it was in flight?
+    const superseded = () => mountCancelled || !chart || epoch !== selectionEpoch || jump !== reportJumpId
     await pending
-    if (mountCancelled || !chart || epoch !== selectionEpoch) return
+    if (superseded()) return
     if (settleReportBeat() || reportBeatUnmatched) return
     if (findReportBeat(lastReportBeats, ts)) return // known, but our beat is not detected/loaded yet
+    // The report of the new window is on its way (it is fetched after the
+    // trace); the entry for this one beat does not have to wait for it.
     const entry = await lookupReportBeat(ts)
-    if (mountCancelled || !chart || epoch !== selectionEpoch) return
+    if (superseded()) return
     selectMatchedBeat(entry, true)
+  }
+
+  // The technician moved the view themselves (a drag, the wheel, the zoom
+  // buttons, the slider, the page and jump buttons): a report beat whose
+  // selection is still owed — waiting for detection, or for a fetch — must not
+  // appear later, when they are looking somewhere else.
+  function expirePendingReportSelect() {
+    pendingReportSelectTs = null
   }
 
   function goToReportTarget(index: number) {
@@ -2590,12 +2726,15 @@
   }
 
   // Dropping the navigator's place: another filter was chosen, or the report
-  // went away. Supersedes a jump still waiting on its fetch.
+  // went away. Supersedes a REPORT jump still waiting on its fetch — and only
+  // that: a beat-of-interest or flag jump in flight keeps its selection.
   function resetReportNavigation() {
-    selectionEpoch += 1
+    reportJumpId += 1
     pendingReportSelectTs = null
     currentReportTs = null
     reportBeatUnmatched = false
+    // The parent's report panel must not keep describing a beat we left.
+    onReportNavigate?.(null)
   }
 
   function handleReportFilterChange(event: Event) {
@@ -2603,10 +2742,23 @@
     const value = select.value as ReportFilter
     if (!REPORT_FILTERS.includes(value)) return
     reportFilterChoice = value
+    reportFilterResolved = value
     storeString(REPORT_FILTER_STORAGE_KEY, value)
     resetReportNavigation()
-    // A focused <select> would swallow `,` / `.` (see `shouldIgnoreShortcut`).
-    select.blur()
+    // A mouse-driven pick would leave the select focused, which swallows the
+    // review keys (see `shouldIgnoreShortcut`): hand focus back. A keyboard
+    // pick (arrow keys fire `change` at once in Chromium) keeps it, so the
+    // technician can go on arrowing; `,` / `.` work from the select itself.
+    if (reportSelectPointer) select.blur()
+    reportSelectPointer = false
+  }
+
+  function handleReportSelectPointerDown() {
+    reportSelectPointer = true
+  }
+
+  function handleReportSelectKeydown() {
+    reportSelectPointer = false
   }
 
   function toggleReportLane() {
@@ -2642,6 +2794,7 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     const width = max - min
+    expirePendingReportSelect()
     setVisibleRange(fullExtent.start, fullExtent.start + width)
   }
 
@@ -2650,6 +2803,7 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     const width = max - min
+    expirePendingReportSelect()
     setVisibleRange(fullExtent.end - width, fullExtent.end)
   }
 
@@ -2658,6 +2812,7 @@
     const { min, max } = chart.scales.x
     if (min == null || max == null) return
     const step = (max - min) * PAGE_OVERLAP_RATIO * direction
+    expirePendingReportSelect()
     setVisibleRange(min + step, max + step)
   }
 
@@ -2701,6 +2856,8 @@
           if (min == null || max == null) return
           sliderCenter = (min + max) / 2
           sliderHalfWidth = (max - min) / 2
+          // The hint (and the normal beats themselves) follow the view.
+          reconcileReportNormal(min, max)
         },
       },
     }
@@ -2854,16 +3011,14 @@
     channel: { x: number[]; y: number[] }
     beats: WindowBeat[]
     merged: BeatSeriesData
-    report: ReportFetch
   }): void {
       const width = measuredWidth()
-      const { channel: data, beats, merged, report } = result
+      const { channel: data, beats, merged } = result
       // `fetchMergedWindow` deliberately leaves these to its caller (see its
       // own comment), so the mount path has to commit them too — they are
       // what click hit-testing and every later local re-merge read from.
       lastChannelWindow = data
       lastBeats = beats
-      commitReportFetch(report)
       // The mount fetch asks for the whole file (see `initialLoad`).
       lastBeatsRange = { start: -Infinity, end: Infinity }
 
@@ -2949,6 +3104,7 @@
               laneScale: MARKER_LANE_SCALE,
               ourLaneY: MARKER_LANE_Y,
               markerScale: visibleMarkerScale,
+              themeKey,
             }),
             overlayAnchorPlugin(),
             pendingBeatPlugin(),
@@ -2965,12 +3121,13 @@
       applyFilters()
       chartReady = true
 
-      // The report changed (loaded, removed, replaced, our beats edited) while
-      // the first load was in flight, so the report beats it brought are out
-      // of date: ask again for what is now shown. The same when the first
-      // (whole-file) window had to leave the normal beats out but the file is
-      // short enough to have them.
-      if (reportNeedsRefetch(report)) void refreshReportOnly()
+      // Both of the following are done by the refetch that opens the view on
+      // the technician's window (it ends in `replayBeatsRefresh` and
+      // `ensureReportCurrent`), so the whole-file window this chart starts on
+      // never asks for a report it is about to replace:
+      //  - a beats refresh that arrived while this first load was in flight
+      //    (it had no chart to stand on yet), and
+      //  - the report, which is never part of the load itself.
 
       // FP/FN review: a recording opened for a flag (the sidebar, or the
       // Home screen) opens zoomed on it rather than on the start of the file.
@@ -2989,7 +3146,14 @@
       const openWidth = graphPrefs.initialWindowSeconds
       if (fullExtent.end - fullExtent.start > openWidth) {
         void setVisibleRange(fullExtent.start, fullExtent.start + openWidth)
+        return
       }
+
+      // The file is short enough to be shown whole: no refetch follows, so the
+      // report (and any beats refresh that had to wait for the chart) is asked
+      // for now.
+      replayBeatsRefresh()
+      ensureReportCurrent()
   }
 
   // Reacts to `bind:clientWidth` changes on the container (window resizes,
@@ -3059,8 +3223,9 @@
   // itself, or the "show normal beats" switch (which changes what the
   // backend is asked for). One effect for all three, so changes arriving
   // together cost one request. The first run only records the starting values:
-  // the initial fetch in `onMount` already asked for the report. The work is
-  // `untrack`ed, so nothing it reads or writes can retrigger this effect.
+  // the first report fetch happens when the chart's opening view has loaded
+  // (`ensureReportCurrent`). The work is `untrack`ed, so nothing it reads or
+  // writes can retrigger this effect.
   $effect(() => {
     const inputs = { loaded: reportLoaded, token: reportRefreshToken, normal: showReportNormal }
     const previous = previousReportInputs
@@ -3068,9 +3233,23 @@
     if (!previous) return
     if (previous.loaded === inputs.loaded && previous.token === inputs.token && previous.normal === inputs.normal) return
     untrack(() => {
-      reportEpoch += 1
       if (!inputs.loaded) resetReportNavigation()
       void refreshReportOnly()
+    })
+  })
+
+  // Decides the navigator's filter once per attached report, when its targets
+  // first arrive (see `reportFilterResolved`), and forgets the decision when the
+  // report goes away so the next one decides afresh. Reads of what it writes
+  // are `untrack`ed: it runs again only for a new `reportLoaded` / `reportTargets`.
+  $effect(() => {
+    if (!reportLoaded) {
+      if (untrack(() => reportFilterResolved) !== null) reportFilterResolved = null
+      return
+    }
+    if (!hasReportTargets(reportTargets)) return
+    untrack(() => {
+      if (reportFilterResolved === null) reportFilterResolved = resolveReportFilter(reportFilterChoice, reportTargets)
     })
   })
 
@@ -3156,15 +3335,34 @@
       // text field or an open dialog). Ctrl+[ and Cmd+[ stay ignored.
       const isBracket = event.key === '[' || event.key === ']'
       const typedWithAlt = isBracket && event.altKey && !event.metaKey
+      // The report filter is a <select>, which the shared guard treats as a
+      // text field. `,` and `.` mean nothing to it (it types ahead on letters
+      // and digits), so they work from it: the technician who picked a filter
+      // with the arrow keys can carry on stepping without reaching for the
+      // mouse. Asked about without the select as the target — modifiers and an
+      // open dialog still count.
+      const onReportSelect =
+        (event.key === ',' || event.key === '.') && reportSelectEl !== undefined && event.target === reportSelectEl
       if (
         shouldIgnoreShortcut(
           typedWithAlt
             ? ({ metaKey: false, ctrlKey: false, altKey: false, target: event.target } as unknown as KeyboardEvent)
-            : event,
+            : onReportSelect
+              ? ({
+                  metaKey: event.metaKey,
+                  ctrlKey: event.ctrlKey,
+                  altKey: event.altKey,
+                  target: null,
+                } as unknown as KeyboardEvent)
+              : event,
         )
       ) {
         return
       }
+
+      // Holding a stepping key down repeats it dozens of times a second, and
+      // every step is a jump with its own fetches: one press, one step.
+      if (event.repeat && (event.key === ',' || event.key === '.' || isBracket)) return
 
       // Walking hundreds of flagged beats is the core review loop, so it
       // shouldn't require moving the mouse between the graph and the panel
@@ -3293,6 +3491,7 @@
       debounceTimer = undefined
     }
     viewChanged = false
+    expirePendingReportSelect()
     chart.setScale('x', { min: fullExtent.start, max: fullExtent.end })
     // Reset View also hands Y back to auto-ranging, undoing any manual
     // Y-zoom — see `refetch`'s own comment on how.
@@ -3497,6 +3696,9 @@
           aria-label="Report beats to step through"
           title={REPORT_FILTER_TITLE[reportFilter]}
           value={reportFilter}
+          bind:this={reportSelectEl}
+          onpointerdown={handleReportSelectPointerDown}
+          onkeydown={handleReportSelectKeydown}
           onchange={handleReportFilterChange}
         >
           {#each REPORT_FILTERS as filter (filter)}

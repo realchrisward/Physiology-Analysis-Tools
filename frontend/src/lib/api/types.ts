@@ -379,6 +379,7 @@ export interface ReportNavigationResult {
   total?: number
   extra_ours?: number
   has_our_beats?: boolean
+  has_our_flags?: boolean
 }
 
 export interface ReportBeatResult {

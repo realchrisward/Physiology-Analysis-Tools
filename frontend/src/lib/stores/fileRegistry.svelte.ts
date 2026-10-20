@@ -7,6 +7,7 @@
 // these rows is keyed by path, and Svelte throws on a duplicate key.
 
 import { evictFiles } from '../api/files'
+import { forgetReportSessions } from './reports.svelte'
 
 export interface FileRow {
   path: string
@@ -62,8 +63,14 @@ export const reviewNavigation: { seq: number } = $state({ seq: 0 })
 // dozens of multi-hour recordings, keeps every one of them in RAM. Saved
 // review work in SQLite is untouched. Fire-and-forget: a failure only costs
 // memory, and `apiPost` never throws.
+//
+// The report-labels session for these recordings goes with them (a stale error
+// chip must not greet a re-imported file, and every recording's navigation
+// targets would otherwise stay in memory); its link to a report file stays.
 function releaseBackendCopies(paths: string[]): void {
-  if (paths.length > 0) void evictFiles(paths)
+  if (paths.length === 0) return
+  forgetReportSessions(paths)
+  void evictFiles(paths)
 }
 
 /**

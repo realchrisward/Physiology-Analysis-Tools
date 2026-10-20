@@ -473,7 +473,9 @@ class ReportBeat(BaseModel):
     our_ts: float | None = None
     # 'agree' | 'report_only' (report: arrhythmia, ours: normal/rejected)
     # | 'ours_only' (ours: confirmed, report: normal/rejected)
-    # | 'pending' (either side detected-but-unreviewed) | 'unmatched' | 'unknown'.
+    # | 'pending' (either side detected-but-unreviewed) | 'unmatched'
+    # | 'unknown' (we have no decision yet: our beats aren't detected, or carry
+    # no arrhythmia flags and this beat isn't confirmed/rejected).
     agreement: str
 
 
@@ -497,6 +499,10 @@ class ReportNavigationResult(BaseModel):
     extra_ours: int = 0
     # False until our beats exist (detection not run yet).
     has_our_beats: bool = False
+    # False while our beats carry no arrhythmia flags (arrhythmia detection
+    # not run, or a restored recording whose flags are empty): a beat we
+    # haven't reviewed then has no decision, so its agreement is 'unknown'.
+    has_our_flags: bool = False
 
 
 class ReportBeatResult(BaseModel):

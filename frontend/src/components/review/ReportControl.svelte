@@ -2,10 +2,13 @@
   import Icon from '../shared/Icon.svelte'
   import {
     attachReport,
+    cancelReportLoad,
     detachReport,
     dismissReportError,
+    dismissReportUnloadError,
     getReportLink,
     getReportSession,
+    getReportUnloadError,
     refreshReportSummary,
     reportFolders,
   } from '../../lib/stores/reports.svelte'
@@ -24,10 +27,19 @@
   let link = $derived(getReportLink(path))
   let summary = $derived(session.summary)
   let navigation = $derived(session.navigation)
+  // Set when the backend would not let go of a report the technician removed.
+  let unloadError = $derived(getReportUnloadError(path))
 
   let open = $state(false)
   // Opening is only meaningful while a report is attached.
   let popoverOpen = $derived(open && session.status === 'ready' && summary !== null)
+  // The popover belongs to one attached report: once the session leaves `ready`
+  // (a replacement is loading, the report was removed) it is closed for good,
+  // not just hidden, or it would pop open again by itself when the next report
+  // lands.
+  $effect(() => {
+    if (session.status !== 'ready') open = false
+  })
   let alignRight = $state(false)
   let picking = false
   let note: string | null = $state(null)
@@ -112,6 +124,10 @@
     void detachReport(path)
   }
 
+  function cancel() {
+    void cancelReportLoad(path)
+  }
+
   function toggle() {
     if (open) {
       open = false
@@ -124,14 +140,32 @@
     void refreshReportSummary(path)
   }
 
+  // Keys that don't count as "the technician moved on": Escape has its own
+  // meaning below, Tab walks through the popover, and a modifier on its own
+  // is the start of a shortcut that the next key will complete.
+  const PASSIVE_KEYS = new Set(['Escape', 'Tab', 'Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock'])
+
   function onKeydown(event: KeyboardEvent) {
-    if (!popoverOpen || event.key !== 'Escape') return
-    // Closing the popover is all this Escape means: the graph must not also
-    // act on it (leave add-beat mode, clear the selection...).
-    event.stopPropagation()
-    event.preventDefault()
+    if (!popoverOpen) return
+    if (event.key === 'Escape') {
+      // Closing the popover is all this Escape means: the graph must not also
+      // act on it (leave add-beat mode, clear the selection...).
+      event.stopPropagation()
+      event.preventDefault()
+      open = false
+      chipButton?.focus()
+      return
+    }
+    if (PASSIVE_KEYS.has(event.key)) return
+    // Enter / Space on one of the popover's own buttons is the button being
+    // pressed, not the technician moving on.
+    if ((event.key === 'Enter' || event.key === ' ') && event.target instanceof Node && root?.contains(event.target)) {
+      return
+    }
+    // Any other key is for something else (a graph shortcut such as F can even
+    // cover this toolbar): the popover must not stay open behind it, invisible
+    // and swallowing the next Escape.
     open = false
-    chipButton?.focus()
   }
 
   function onOutside(event: Event) {
@@ -139,15 +173,29 @@
     if (event.target instanceof Node && root.contains(event.target)) return
     open = false
   }
+
+  function onWindowBlur() {
+    open = false
+  }
 </script>
 
-<svelte:window onkeydowncapture={onKeydown} onpointerdowncapture={onOutside} onclickcapture={onOutside} />
+<svelte:window
+  onkeydowncapture={onKeydown}
+  onpointerdowncapture={onOutside}
+  onclickcapture={onOutside}
+  onblur={onWindowBlur}
+/>
 
 <div class="report-control" data-testid="report-control" bind:this={root}>
   {#if session.status === 'loading'}
-    <span class="report-loading text-muted" data-testid="report-loading" role="status">
-      <span class="spinner" aria-hidden="true"></span>
-      Reading report…
+    <!-- A report on a share that went offline can take minutes to fail: the
+         technician is never stuck waiting for it. -->
+    <span class="report-loading text-muted" data-testid="report-loading">
+      <span class="loading-text" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        Reading report…
+      </span>
+      <button type="button" class="btn btn-sm" data-testid="report-cancel-button" onclick={cancel}>Cancel</button>
     </span>
   {:else if session.status === 'ready' && summary}
     <div class="chip-wrap">
@@ -157,7 +205,7 @@
         class:open={popoverOpen}
         data-testid="report-chip"
         aria-expanded={popoverOpen}
-        aria-controls={`${uid}-details`}
+        aria-controls={popoverOpen ? `${uid}-details` : undefined}
         aria-label={`Report ${summary.filename}, show details`}
         bind:this={chipButton}
         onclick={toggle}
@@ -298,7 +346,7 @@
       </span>
     {/if}
   {:else if session.status === 'error' || session.status === 'missing'}
-    <div class="report-chip report-chip-error" data-testid="report-error" data-status={session.status}>
+    <div class="report-chip report-chip-error" data-testid="report-load-error" data-status={session.status}>
       <Icon name="alert-circle" size={14} />
       <span class="error-text" title={session.error ?? undefined}>
         {session.status === 'missing' ? 'Linked report unavailable' : 'Report not loaded'}:
@@ -322,6 +370,22 @@
     >
       Load report…
     </button>
+  {/if}
+
+  {#if unloadError}
+    <span class="replace-error text-danger" data-testid="report-unload-error" title={unloadError}>
+      <Icon name="alert-circle" size={14} />
+      <span class="replace-error-text">{unloadError}</span>
+      <button
+        type="button"
+        class="icon-btn dismiss"
+        data-testid="report-unload-error-dismiss"
+        aria-label="Dismiss"
+        onclick={() => dismissReportUnloadError(path)}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </span>
   {/if}
 
   {#if note}
@@ -353,7 +417,8 @@
     min-width: 0;
   }
 
-  .report-loading {
+  .report-loading,
+  .loading-text {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
