@@ -70,6 +70,8 @@ def apply_manual_edits(df: pd.DataFrame, edits, min_gap: float) -> pd.DataFrame:
             row["beats"] = 1
         if "review_state" in row:
             row["review_state"] = "unreviewed"
+        if "uncertain" in row:
+            row["uncertain"] = False
         new_rows.append(row)
     if new_rows:
         df = (
@@ -296,6 +298,8 @@ def _add_beat_locked(payload: BeatAddRequest, request: Request) -> BeatAddResult
             row["beats"] = 1
         if "review_state" in row:
             row["review_state"] = "unreviewed"
+        if "uncertain" in row:
+            row["uncertain"] = False
         new_df = (
             pd.concat([beat_df, pd.DataFrame([row])], ignore_index=True)
             .sort_values("ts")

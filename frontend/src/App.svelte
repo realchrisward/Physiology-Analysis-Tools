@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import ImportScreen from './components/import/ImportScreen.svelte'
   import ReviewWorkspace from './components/review/ReviewWorkspace.svelte'
+  import UncertainLeaveDialog from './components/review/UncertainLeaveDialog.svelte'
   import SettingsDialog from './components/settings/SettingsDialog.svelte'
   import Sidebar from './components/shell/Sidebar.svelte'
   import AboutDialog from './components/shell/AboutDialog.svelte'
@@ -10,6 +12,13 @@
   import { autoOpenRequest, fileRegistry, reviewNavigation, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
   import { recordRecentFile } from './lib/stores/recentFiles.svelte'
   import { closeFlagImportDialog, flagImportDialog, flagSession, getFlagProject } from './lib/stores/flagProjects.svelte'
+  import {
+    answerLeave,
+    clearPendingUncertain,
+    confirmLeave,
+    hasPendingUncertain,
+    reviewGuard,
+  } from './lib/stores/reviewGuard.svelte'
 
   const SIDEBAR_WIDTH_KEY = 'pat.sidebarWidth'
   const MIN_SIDEBAR_WIDTH = 180
@@ -39,7 +48,20 @@
   let sidebarCollapsed: boolean = $state(false)
   let sidebarWidth: number = $state(loadSidebarWidth())
 
+  // Opening a different file leaves the open beat, so a beat marked "uncertain"
+  // but not yet decided has to be dealt with first (see reviewGuard.svelte.ts).
+  // Opened at once when nothing is pending, so ordinary opening keeps its timing.
   function handleReview(row: ReviewSelection) {
+    if (hasPendingUncertain() && row.path !== selectedFile?.path) {
+      void confirmLeave().then((leave) => {
+        if (leave) openReview(row)
+      })
+      return
+    }
+    openReview(row)
+  }
+
+  function openReview(row: ReviewSelection) {
     selectedFile = row
     shownFile = row
     reviewNavigation.seq += 1
@@ -65,13 +87,21 @@
   }
 
   function handleBack() {
+    if (hasPendingUncertain()) {
+      void confirmLeave().then((leave) => {
+        if (leave) view = 'import'
+      })
+      return
+    }
     view = 'import'
   }
 
   // Clearing the file list while a file is open would leave the review
   // workspace showing a file that is no longer listed anywhere, so fall back
-  // to the welcome screen.
+  // to the welcome screen. Removing files is an explicit act, so it is not
+  // questioned: an unsaved "uncertain" mark simply goes with the file.
   function handleFilesCleared() {
+    clearPendingUncertain()
     selectedFile = null
     view = 'import'
   }
@@ -122,7 +152,9 @@
   $effect(() => {
     const pending = autoOpenRequest.value
     if (pending) {
-      handleReview(pending)
+      // Untracked: opening reads (and, once answered, writes) state this effect
+      // has no business re-running for.
+      untrack(() => handleReview(pending))
       autoOpenRequest.value = null
     }
   })
@@ -220,5 +252,9 @@
         onClose={closeFlagImportDialog}
       />
     {/key}
+  {/if}
+
+  {#if reviewGuard.promptOpen}
+    <UncertainLeaveDialog onStay={() => answerLeave(false)} onLeave={() => answerLeave(true)} />
   {/if}
 </div>

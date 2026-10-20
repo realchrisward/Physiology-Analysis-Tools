@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS beats (
     review_state TEXT NOT NULL DEFAULT 'unreviewed',
     reassigned_category TEXT,
     manual_added_at TEXT,
+    -- The reviewer was unsure. Only ever 1 on a confirmed/rejected beat: the
+    -- mark is saved with a decision, it does not replace one.
+    uncertain INTEGER NOT NULL DEFAULT 0,
     UNIQUE(file_id, ts)
 );
 
@@ -76,7 +79,7 @@ def default_db_path() -> str:
 # Stored in the database file itself (PRAGMA user_version), so a file that is
 # deleted and recreated (Settings > reset database) is correctly seen as
 # un-initialised again, which a per-path in-process flag would not notice.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _schema_lock = threading.Lock()
 
 # How long a connection waits on another writer before "database is locked".
@@ -111,14 +114,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
             return
         conn.executescript(SCHEMA_SQL)
-        # Databases created before manual beat editing lack this column;
-        # CREATE TABLE IF NOT EXISTS above will not add it to an existing table.
+        # Databases created before manual beat editing / the uncertain mark
+        # lack these columns; CREATE TABLE IF NOT EXISTS above will not add
+        # them to an existing table.
         beat_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(beats)")
         }
-        if "manual_added_at" not in beat_columns:
+        for column, definition in (
+            ("manual_added_at", "TEXT"),
+            ("uncertain", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column in beat_columns:
+                continue
             try:
-                conn.execute("ALTER TABLE beats ADD COLUMN manual_added_at TEXT")
+                conn.execute(f"ALTER TABLE beats ADD COLUMN {column} {definition}")
             except sqlite3.OperationalError as e:
                 # Another process upgraded the file between the check and here.
                 if "duplicate column" not in str(e).lower():
@@ -194,6 +203,14 @@ def upsert_file(
 
 CATEGORY_COLUMNS = categories.REASSIGNABLE_CATEGORIES
 
+UNCERTAIN_NEEDS_DECISION = (
+    "Confirm or reject this beat first — the uncertain mark is saved with a decision."
+)
+
+
+class UncertainNeedsDecisionError(Exception):
+    """`set_uncertain` on a beat that is not confirmed or rejected."""
+
 
 def update_beat_category(
     conn: sqlite3.Connection,
@@ -201,9 +218,16 @@ def update_beat_category(
     ts: float,
     action: str,
     category: str | None = None,
+    uncertain: bool | None = None,
 ) -> sqlite3.Row | None:
     """Apply a review `action` to the beat at (file_id, ts) and return the
     updated row, or None if no beat exists at that timestamp.
+
+    `uncertain` is the reviewer's "not sure" mark. `"confirm"`, `"reject"` and
+    `"reassign"` store it in the same statement as the decision (None keeps
+    the beat's current value); `"set_uncertain"` changes only the mark, and is
+    refused (UncertainNeedsDecisionError) unless the beat is already confirmed
+    or rejected, so the mark never exists on a beat without a decision.
 
     `"reject"` clears every category column (not just the top-level
     `any_arrhythmia` flag) so a rejected beat's per-category data doesn't
@@ -214,7 +238,7 @@ def update_beat_category(
     caller against `REASSIGNABLE_CATEGORIES` before it reaches here — never
     interpolate an unvalidated value into the column-name SQL below) and
     recomputes `any_arrhythmia` from whatever flags remain, WITHOUT
-    touching `review_state`/`reassigned_category` — this corrects the
+    touching `review_state`/`reassigned_category`/`uncertain` — this corrects the
     detector's raw output, it isn't a confirm/reject/reassign review
     decision the way the other three actions are.
     """
@@ -225,17 +249,25 @@ def update_beat_category(
         return None
     beat_id = row["id"]
 
+    # Appended to the three decision updates below so the mark and the decision
+    # land in one statement; left out entirely when the caller sent no value,
+    # which keeps whatever the beat already has.
+    uncertain_set, uncertain_args = (
+        ("", ()) if uncertain is None else (", uncertain=?", (int(uncertain),))
+    )
+
     if action == "confirm":
         conn.execute(
-            "UPDATE beats SET review_state='confirmed' WHERE id=?", (beat_id,)
+            "UPDATE beats SET review_state='confirmed'" + uncertain_set + " WHERE id=?",
+            (*uncertain_args, beat_id),
         )
     elif action == "reject":
         conn.execute(
             "UPDATE beats SET "
             + ", ".join(f"{col}=0" for col in CATEGORY_COLUMNS)
             + ", any_arrhythmia=0, review_state='rejected', "
-            "reassigned_category=NULL WHERE id=?",
-            (beat_id,),
+            "reassigned_category=NULL" + uncertain_set + " WHERE id=?",
+            (*uncertain_args, beat_id),
         )
     elif action == "reassign":
         set_clauses = [
@@ -246,9 +278,19 @@ def update_beat_category(
             "UPDATE beats SET "
             + ", ".join(set_clauses)
             + ", any_arrhythmia=1, review_state='confirmed', "
-            "reassigned_category=? WHERE id=?",
-            (category, beat_id),
+            "reassigned_category=?" + uncertain_set + " WHERE id=?",
+            (category, *uncertain_args, beat_id),
         )
+    elif action == "set_uncertain":
+        # The state check is part of the UPDATE, not a separate read, so the
+        # mark can never land on a beat that has no decision.
+        cursor = conn.execute(
+            "UPDATE beats SET uncertain=? WHERE id=? "
+            "AND review_state IN ('confirmed', 'rejected')",
+            (int(bool(uncertain)), beat_id),
+        )
+        if cursor.rowcount == 0:
+            raise UncertainNeedsDecisionError(UNCERTAIN_NEEDS_DECISION)
     elif action == "remove_flag":
         conn.execute(f"UPDATE beats SET {category}=0 WHERE id=?", (beat_id,))
         remaining = conn.execute(
@@ -261,6 +303,12 @@ def update_beat_category(
             (1 if any_flagged else 0, beat_id),
         )
 
+    # Every review action counts as the file's latest saved work (the report's
+    # `review_last_saved_at` reads this), not only persists and channel saves.
+    conn.execute(
+        "UPDATE files SET updated_at=? WHERE id=?",
+        (datetime.now(timezone.utc).isoformat(), file_id),
+    )
     conn.commit()
     return conn.execute("SELECT * FROM beats WHERE id=?", (beat_id,)).fetchone()
 
@@ -413,13 +461,19 @@ def delete_bad_data_mark(conn: sqlite3.Connection, file_id: int, mark_id: int) -
 
 def load_review_state(
     conn: sqlite3.Connection, file_id: int
-) -> dict[float, tuple[str, str | None]]:
-    """`ts -> (review_state, reassigned_category)` for every beat of the file
-    that has been confirmed/rejected/reassigned. Unreviewed beats are absent."""
+) -> dict[float, tuple[str, str | None, bool]]:
+    """`ts -> (review_state, reassigned_category, uncertain)` for every beat of
+    the file that has been confirmed/rejected/reassigned. Unreviewed beats are
+    absent, so they fall back to the unreviewed default with `uncertain`
+    cleared: the mark only means something next to a decision."""
     return {
-        row["ts"]: (row["review_state"], row["reassigned_category"])
+        row["ts"]: (
+            row["review_state"],
+            row["reassigned_category"],
+            bool(row["uncertain"]),
+        )
         for row in conn.execute(
-            "SELECT ts, review_state, reassigned_category FROM beats "
+            "SELECT ts, review_state, reassigned_category, uncertain FROM beats "
             "WHERE file_id=? AND review_state != 'unreviewed'",
             (file_id,),
         ).fetchall()
@@ -427,19 +481,22 @@ def load_review_state(
 
 
 def with_review_state(
-    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None]]
+    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None, bool]]
 ) -> pd.DataFrame:
-    """A NEW frame with `review_state`/`reassigned_category` filled in from
-    `review_state` by exact `ts` (default unreviewed/None), same matching rule
-    as `replace_beats`. Never touches `beat_df`: it may be the frame other
-    requests are reading from `beat_cache` right now.
+    """A NEW frame with `review_state`/`reassigned_category`/`uncertain` filled
+    in from `review_state` by exact `ts` (default unreviewed/None/False), same
+    matching rule as `replace_beats`. Never touches `beat_df`: it may be the
+    frame other requests are reading from `beat_cache` right now.
     """
-    default = ("unreviewed", None)
+    default = ("unreviewed", None, False)
     return beat_df.assign(
         review_state=beat_df["ts"].map(lambda ts: review_state.get(ts, default)[0]),
         reassigned_category=beat_df["ts"].map(
             lambda ts: review_state.get(ts, default)[1]
         ),
+        uncertain=beat_df["ts"].map(
+            lambda ts: review_state.get(ts, default)[2]
+        ).astype(bool),
     )
 
 
@@ -455,7 +512,7 @@ def _nullable_bools(beat_df: pd.DataFrame, column: str) -> list:
 
 def replace_beats(
     conn: sqlite3.Connection, file_id: int, beat_df, *, commit: bool = True
-) -> dict[float, tuple[str, str | None]]:
+) -> dict[float, tuple[str, str | None, bool]]:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 
     Wholesale-replacing (rather than merging) keeps repeated persists
@@ -464,30 +521,31 @@ def replace_beats(
 
     Prior review state is preserved across a re-persist: any beat that had
     already been confirmed/rejected/reassigned (i.e. `review_state !=
-    'unreviewed'`) keeps its `review_state`/`reassigned_category` if a beat
-    with the same `ts` is still present in `beat_df`. This makes it safe to
-    call this again after new detection output arrives (e.g. an arrhythmia
-    re-run) without silently discarding a technician's prior review work.
+    'unreviewed'`) keeps its `review_state`/`reassigned_category`/`uncertain`
+    if a beat with the same `ts` is still present in `beat_df`. This makes it
+    safe to call this again after new detection output arrives (e.g. an
+    arrhythmia re-run) without silently discarding a technician's prior review
+    work.
     Matching is by exact float equality on `ts`, mirroring the precedent
     already set by `update_beat_category`'s `WHERE ts=?` lookup — `ts`
     always round-trips through the same detection pipeline rather than
     being user-typed, so exact equality is safe here. A beat with no prior
     review, or whose `ts` no longer appears in `beat_df`, still gets the
-    default `'unreviewed'`/`NULL`.
+    default `'unreviewed'`/`NULL`/not uncertain.
 
     `commit` defaults to True (standalone-call behavior). Pass
     `commit=False` when this call is one half of a larger transaction the
     caller will commit (or roll back) itself.
 
     Returns the SAME `preserved_state` mapping (`ts -> (review_state,
-    reassigned_category)`) this function computed to do its own preserving
-    — the caller (`persist_beats` in db_routes.py) uses it to sync
-    `review_state`/`reassigned_category` back onto `beat_cache[path]` (the
-    live, in-memory `beat_df` this function was handed), which never gets
-    that write otherwise: only `update_beat_category` (a single-beat
-    action) syncs the cache today, so without this, a beat reviewed before
-    a redetect+re-persist would keep showing as "unreviewed" in the graph
-    even though SQLite correctly preserved it.
+    reassigned_category, uncertain)`) this function computed to do its own
+    preserving — the caller (`persist_beats` in db_routes.py) uses it to sync
+    those three columns back onto `beat_cache[path]` (the live, in-memory
+    `beat_df` this function was handed), which never gets that write
+    otherwise: only `update_beat_category` (a single-beat action) syncs the
+    cache today, so without this, a beat reviewed before a redetect+re-persist
+    would keep showing as "unreviewed" in the graph even though SQLite
+    correctly preserved it.
     """
     preserved_state = load_review_state(conn, file_id)
 
@@ -498,7 +556,7 @@ def replace_beats(
     # which is what made every concurrent request time out.
     ts_values = beat_df["ts"].tolist()
     optional_columns = [_nullable_bools(beat_df, col) for col in OPTIONAL_BEAT_COLUMNS]
-    default_review = ("unreviewed", None)
+    default_review = ("unreviewed", None, False)
     review_values = [preserved_state.get(ts, default_review) for ts in ts_values]
     if "manual_added_at" in beat_df.columns:
         added = beat_df["manual_added_at"]
@@ -514,8 +572,8 @@ def replace_beats(
         "file_id, ts, rr, r_amplitude, hr, "
         "bradycardia_absolute, tachycardia_absolute, skipped_beat, "
         "prem_beat, abn_cluster, other_arrhythmia, any_arrhythmia, "
-        "review_state, reassigned_category, manual_added_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "review_state, reassigned_category, manual_added_at, uncertain"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         zip(
             itertools.repeat(file_id),
             ts_values,
@@ -523,9 +581,10 @@ def replace_beats(
             beat_df["R_amplitude"].tolist(),
             beat_df["HR"].tolist(),
             *optional_columns,
-            (state for state, _ in review_values),
-            (category for _, category in review_values),
+            (state for state, _, _ in review_values),
+            (category for _, category, _ in review_values),
             manual_added_at,
+            (int(uncertain) for _, _, uncertain in review_values),
         ),
     )
 

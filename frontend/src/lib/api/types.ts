@@ -146,6 +146,9 @@ export interface WindowBeat {
   reassigned_category: string | null
   // ISO time the technician added this beat by hand; absent for detected beats.
   manual_added_at?: string | null
+  // The reviewer ticked "uncertain / not sure" together with their decision;
+  // absent (or false) when they didn't.
+  uncertain?: boolean
 }
 
 export interface BeatWindowResult {
@@ -190,6 +193,7 @@ export interface PersistedBeat {
   other_arrhythmia: boolean | null
   review_state: string
   reassigned_category: string | null
+  uncertain?: boolean
 }
 
 export interface BadDataMark {
@@ -255,6 +259,8 @@ export interface CategoryUpdateResult {
   ts: number | null
   review_state: string | null
   reassigned_category: string | null
+  // The beat's "uncertain" mark after this call; null when the call failed.
+  uncertain: boolean | null
   error: string | null
 }
 

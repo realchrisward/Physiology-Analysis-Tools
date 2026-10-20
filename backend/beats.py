@@ -51,8 +51,8 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
 
         # A re-detect must not throw away what the technician did by hand: put
         # their added beats back and keep their removed beats removed, and keep
-        # the review decisions (confirmed/rejected/reassigned) saved for beats
-        # that are still there.
+        # the review decisions (confirmed/rejected/reassigned, with their
+        # uncertain mark) saved for beats that are still there.
         imported = request.app.state.imported_files.get(payload.path)
         if imported is not None:
             try:

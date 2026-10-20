@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { deleteBeat, updateBeatCategory } from '../../lib/api/persistence'
+  import { clearPendingUncertain, isPendingUncertain, setPendingUncertain } from '../../lib/stores/reviewGuard.svelte'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
   import Icon from '../shared/Icon.svelte'
@@ -20,6 +21,9 @@
   ] as const
 
   type ReassignableCategory = (typeof REASSIGNABLE_CATEGORIES)[number]
+
+  const UNCERTAIN_TITLE =
+    'Tick this if you are not sure of your call. It helps grade the quality of the training data. The beat still needs Confirm or Reject — the mark is saved together with that decision. (U)'
 
   const CATEGORY_LABELS: Record<ReassignableCategory, string> = {
     bradycardia_absolute: 'Bradycardia (absolute)',
@@ -87,6 +91,17 @@
   let isReassigned = $derived(!!reassignedCategory && reviewState !== 'rejected')
   let hasStatus = $derived(reviewState === 'confirmed' || reviewState === 'rejected')
 
+  // "Uncertain / not sure" is only ever saved together with a decision. Once the
+  // beat has one, `savedUncertain` is the saved mark and the box saves a change
+  // at once; before that, ticking it only leaves a PENDING mark in the review
+  // guard (a store, since this panel is remounted per beat and moves between
+  // the side panel and the focus overlay), sent with the next Confirm / Reject /
+  // Reassign. The box shows whichever applies.
+  type CategoryAction = 'confirm' | 'reject' | 'reassign' | 'remove_flag' | 'set_uncertain'
+  let savedUncertain: boolean = $state(beat.uncertain === true)
+  let pendingUncertain = $derived(!hasStatus && isPendingUncertain(path, beat.ts))
+  let uncertain = $derived(hasStatus ? savedUncertain : pendingUncertain)
+
   let reassignCategory: string = $state('')
   let submitting: boolean = $state(false)
 
@@ -94,8 +109,7 @@
   // produced it (so "Retry" can replay the exact same call rather than
   // requiring the technician to re-pick a category first).
   let errorMessage: string | null = $state(null)
-  let lastAttempt: { action: 'confirm' | 'reject' | 'reassign' | 'remove_flag'; category?: string } | null =
-    $state(null)
+  let lastAttempt: { action: CategoryAction; category?: string; uncertain?: boolean } | null = $state(null)
 
   // The backend's specific "category isn't persisted yet" error (see
   // BACKEND_OVERVIEW.md / `backend/db_routes.py`) gets a distinct, retryable
@@ -105,17 +119,28 @@
   // would just fail again the same way.
   let isPersistRequiredError = $derived((errorMessage ?? '').includes('No persisted data for this file'))
 
-  async function submit(action: 'confirm' | 'reject' | 'reassign' | 'remove_flag', category?: string) {
+  async function submit(action: CategoryAction, category?: string, newMark?: boolean) {
+    const decides = action === 'confirm' || action === 'reject' || action === 'reassign'
+    // A mark ticked before deciding goes with the decision; with none pending
+    // the beat's current mark is left as it is. `newMark` is the value a
+    // `set_uncertain` call saves.
+    const sentUncertain = action === 'set_uncertain' ? newMark : decides && pendingUncertain ? true : undefined
+
     submitting = true
     errorMessage = null
-    lastAttempt = { action, category }
+    lastAttempt = { action, category, uncertain: newMark }
 
-    const result = await updateBeatCategory(path, beat.ts, action, category)
+    const result = await updateBeatCategory(path, beat.ts, action, category, sentUncertain)
     submitting = false
 
     if (result.status === 'ok' && !result.error) {
-      reviewState = result.review_state
-      reassignedCategory = result.reassigned_category
+      // Changing only the mark leaves the decision as it is.
+      if (action !== 'set_uncertain') {
+        reviewState = result.review_state
+        reassignedCategory = result.reassigned_category
+      }
+      savedUncertain = result.uncertain ?? sentUncertain ?? savedUncertain
+      if (decides) clearPendingUncertain(path, beat.ts)
 
       // Mirrors exactly what `backend/db.py`'s `update_beat_category` just
       // did server-side, so the chip list updates immediately without a
@@ -148,15 +173,41 @@
     confirmingDelete = false
 
     if (result.status === 'ok' && !result.error) {
+      // The beat is gone, and so is anything pending on it.
+      clearPendingUncertain(path, beat.ts)
       onDeleted?.()
     } else {
       errorMessage = result.error ?? 'Could not delete this beat'
     }
   }
 
-  // Confirm/reject from the keyboard, so the common case (walk to a flagged
-  // beat, judge it, move on) never needs the mouse. Mounted per selected
-  // beat, so the shortcut always acts on the beat currently shown.
+  // Ticks or unticks "Uncertain". On a beat that already has a decision that
+  // saves at once; otherwise it only (un)sets the pending mark.
+  async function setUncertain(next: boolean) {
+    if (submitting || next === uncertain) return
+    if (hasStatus) await submit('set_uncertain', undefined, next)
+    else if (next) setPendingUncertain(path, beat.ts)
+    else clearPendingUncertain(path, beat.ts)
+  }
+
+  // A mouse click leaves the checkbox focused, and a focused <input> makes the
+  // shared shortcut guard drop C / R / U (see `shouldIgnoreShortcut`): hand
+  // focus back, as EcgGraph does for its report filter. A keyboard toggle
+  // (Space) keeps it.
+  let boxPointer = false
+
+  async function handleUncertainChange(event: Event) {
+    const box = event.currentTarget as HTMLInputElement
+    if (boxPointer) box.blur()
+    boxPointer = false
+    await setUncertain(box.checked)
+    // A failed save leaves the saved mark as it was: show that, not the click.
+    box.checked = uncertain
+  }
+
+  // Confirm/reject/uncertain from the keyboard, so the common case (walk to a
+  // flagged beat, judge it, move on) never needs the mouse. Mounted per
+  // selected beat, so the shortcut always acts on the beat currently shown.
   onMount(() => {
     function handleKeydown(event: KeyboardEvent) {
       if (shouldIgnoreShortcut(event) || submitting) return
@@ -166,6 +217,9 @@
       } else if (event.key === 'r' || event.key === 'R') {
         event.preventDefault()
         void submit('reject')
+      } else if (event.key === 'u' || event.key === 'U') {
+        event.preventDefault()
+        void setUncertain(!uncertain)
       }
     }
     document.addEventListener('keydown', handleKeydown)
@@ -174,7 +228,7 @@
 
   function retry() {
     if (lastAttempt === null) return
-    void submit(lastAttempt.action, lastAttempt.category)
+    void submit(lastAttempt.action, lastAttempt.category, lastAttempt.uncertain)
   }
 
   function removeFlag(cat: ReassignableCategory) {
@@ -230,6 +284,9 @@
         {:else}
           Review state: {reviewState}
         {/if}
+        {#if hasStatus && savedUncertain}
+          <span data-testid="uncertain-state"> · uncertain</span>
+        {/if}
       </p>
       {#if hasStatus}
         {#if reviewState === 'confirmed'}
@@ -271,6 +328,26 @@
       <p class="text-danger" data-testid="validation-error">{errorMessage}</p>
     {/if}
   {/if}
+
+  <div class="uncertain-row">
+    <label class="uncertain-toggle" title={UNCERTAIN_TITLE} onpointerdown={() => (boxPointer = true)}>
+      <input
+        type="checkbox"
+        data-testid="uncertain-checkbox"
+        title={UNCERTAIN_TITLE}
+        checked={uncertain}
+        disabled={submitting}
+        onchange={handleUncertainChange}
+        onkeydown={() => (boxPointer = false)}
+      />
+      Uncertain / not sure <kbd>U</kbd>
+    </label>
+    {#if pendingUncertain}
+      <p class="uncertain-hint" data-testid="uncertain-pending-hint">
+        Now confirm or reject — the mark is saved with your decision.
+      </p>
+    {/if}
+  </div>
 
   <div class="actions">
     {#if !hasStatus}
@@ -445,6 +522,31 @@
     color: var(--color-danger, #b91c1c);
   }
   .review-state--reassigned {
+    color: var(--color-warning, #b45309);
+  }
+
+  .uncertain-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .uncertain-toggle {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: var(--space-2);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+  }
+
+  .uncertain-toggle input {
+    accent-color: var(--color-accent);
+  }
+
+  .uncertain-hint {
+    margin: 0;
+    font-size: 0.75rem;
     color: var(--color-warning, #b45309);
   }
 

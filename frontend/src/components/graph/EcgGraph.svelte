@@ -286,6 +286,7 @@
     reportBadData = [],
     onReportNavigate,
     onBeatAdded,
+    beforeBeatChange = () => true,
   }: {
     path: string
     channel: string
@@ -386,6 +387,15 @@
     // A beat was added by hand (add-beat mode, confirmed), at `ts`. Our beats
     // changed, so the parent can bring the report's matching up to date.
     onBeatAdded?: (ts: number) => void
+    // Asked before the technician's own move to a DIFFERENT beat (a marker
+    // click, a beat-of-interest / flag / report jump, an added beat) changes
+    // anything. `false` — or a promise that resolves to it — leaves the view and
+    // the selection exactly as they are: the parent may need an answer first
+    // (a beat marked "uncertain" that still has no decision). `true` — the
+    // default, and what a parent with nothing to ask returns — goes ahead at
+    // once, so ordinary navigation keeps its timing. Plain view moves (pan,
+    // zoom, paging) never ask: the selection stays where it is.
+    beforeBeatChange?: () => boolean | Promise<boolean>
   } = $props()
 
   const DEBOUNCE_MS = 150
@@ -1699,7 +1709,13 @@
     await snapPendingTo(xVal)
   }
 
-  async function confirmAddBeat() {
+  // Adding a beat selects it, which leaves the beat on screen.
+  function confirmAddBeat() {
+    if (!pendingBeat || addBeatBusy) return
+    whenBeatChangeAllowed(() => void addPendingBeat())
+  }
+
+  async function addPendingBeat() {
     if (!pendingBeat || addBeatBusy) return
     addBeatBusy = true
     addBeatError = null
@@ -2122,10 +2138,14 @@
     const unitsPerPx = u.posToVal(1, 'x') - u.posToVal(0, 'x')
     const toleranceVal = Math.abs(unitsPerPx) * BEAT_HIT_TOLERANCE_PX
     const beat = findNearestBeat(xVal, toleranceVal)
-    if (beat) {
+    if (!beat) return
+    const select = () => {
       noteManualSelection()
-      onBeatSelect(beat)
+      onBeatSelect?.(beat)
     }
+    // Clicking the beat that is already selected leaves nothing behind.
+    if (beat.ts === selectedBeatTs) select()
+    else whenBeatChangeAllowed(select)
   }
 
   // Left-drag (no modifier) pans: mutates the x-scale directly on every
@@ -2358,11 +2378,53 @@
     return setVisibleRange(start, end)
   }
 
+  // Runs `go` once the parent lets the technician leave the beat they are on
+  // (`beforeBeatChange`): at once when nothing stands in the way, otherwise
+  // after the parent's question is answered — and never if the answer is no or
+  // the graph is gone by then (`refused` runs instead on a no). Every
+  // user-initiated move to another beat goes through here (or asks
+  // `beforeBeatChange` itself, where it is already async).
+  function whenBeatChangeAllowed(go: () => void, refused?: () => void): void {
+    const verdict = beforeBeatChange()
+    if (verdict === true) {
+      go()
+      return
+    }
+    void Promise.resolve(verdict).then((allowed) => {
+      if (mountCancelled) return
+      if (allowed) {
+        go()
+      } else {
+        refused?.()
+        stayOnBeat()
+      }
+    })
+  }
+
+  // The technician was asked to stay on the beat they are on, probably to
+  // decide it: make sure its controls can be reached again — the focus-mode
+  // popover may have been dismissed, or the beat panned off screen. Nothing
+  // changes when it is all still there.
+  function stayOnBeat() {
+    overlayDismissedFor = null
+    if (selectedBeatTs !== null && !isInView(selectedBeatTs)) void focusOnTime(selectedBeatTs)
+  }
+
   // Jumping to a beat of interest also SELECTS it, so the detail panel shows
   // that beat's categories and the confirm/reject controls act on it — the
   // review loop the old app's next/prev-arrhythmia buttons drove.
   async function goToBeatOfInterest(index: number) {
     if (beatsOfInterest.length === 0) return
+    const verdict = beforeBeatChange()
+    if (verdict !== true) {
+      const allowed = await verdict
+      if (mountCancelled) return
+      if (!allowed) {
+        stayOnBeat()
+        return
+      }
+      if (beatsOfInterest.length === 0) return
+    }
     const clamped = Math.max(0, Math.min(beatsOfInterest.length - 1, index))
     beatOfInterestIndex = clamped
     const ts = beatsOfInterest[clamped]
@@ -2552,18 +2614,20 @@
     if (!chart || flaggedTimes.length === 0) return
     const clamped = Math.max(0, Math.min(flaggedTimes.length - 1, index))
     const ts = flaggedTimes[clamped].ts
-    // Reported straight away (not after the fetch) so the sidebar's
-    // highlight follows the click.
-    onFlagNavigate?.(ts)
-    // The report makes the parent's `focusRequest` carry this flag with a
-    // `seq` this graph has not seen (it was mounted without one). Reading the
-    // prop recomputes it, so that `seq` can be recorded as handled now —
-    // otherwise the effect below would take it for a new request and focus
-    // the flag a second time. A later request (a sidebar click: new `seq`)
-    // still moves the graph.
-    const echoed = focusRequest
-    if (echoed) handledFocusSeq = echoed.seq
-    void focusOnFlag(ts, true)
+    whenBeatChangeAllowed(() => {
+      // Reported straight away (not after the fetch) so the sidebar's
+      // highlight follows the click.
+      onFlagNavigate?.(ts)
+      // The report makes the parent's `focusRequest` carry this flag with a
+      // `seq` this graph has not seen (it was mounted without one). Reading the
+      // prop recomputes it, so that `seq` can be recorded as handled now —
+      // otherwise the effect below would take it for a new request and focus
+      // the flag a second time. A later request (a sidebar click: new `seq`)
+      // still moves the graph.
+      const echoed = focusRequest
+      if (echoed) handledFocusSeq = echoed.seq
+      void focusOnFlag(ts, true)
+    })
   }
 
   function handlePrevFlag() {
@@ -2586,7 +2650,17 @@
     if (request.seq === handledFocusSeq) return
     handledFocusSeq = request.seq
     const ts = request.ts
-    untrack(() => void focusOnFlag(ts, true))
+    // Handled either way: a refused request must not fire again on the next
+    // run of this effect. The sidebar's flag highlight (already moved by the
+    // click) goes back to the flag the graph is really on.
+    untrack(() =>
+      whenBeatChangeAllowed(
+        () => void focusOnFlag(ts, true),
+        () => {
+          if (currentFlagTs !== null) onFlagNavigate?.(currentFlagTs)
+        },
+      ),
+    )
   })
 
   // ---- Report navigator ------------------------------------------------------
@@ -2712,9 +2786,11 @@
   function goToReportTarget(index: number) {
     if (!chart || index < 0 || index >= reportFilterTargets.length) return
     const ts = reportFilterTargets[index]
-    // Reported straight away (not after the fetch), like a flag jump.
-    onReportNavigate?.(ts)
-    void focusOnReportBeat(ts)
+    whenBeatChangeAllowed(() => {
+      // Reported straight away (not after the fetch), like a flag jump.
+      onReportNavigate?.(ts)
+      void focusOnReportBeat(ts)
+    })
   }
 
   function handlePrevReport() {
@@ -3428,7 +3504,7 @@
         case 'Enter':
           if (pendingBeat) {
             event.preventDefault()
-            void confirmAddBeat()
+            confirmAddBeat()
           }
           break
         default:

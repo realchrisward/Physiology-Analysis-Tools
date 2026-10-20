@@ -54,6 +54,10 @@ def get_beat_window(
         if "reassigned_category" in columns:
             value = row.reassigned_category
             kwargs["reassigned_category"] = None if pd.isna(value) else value
+        # Same rule for the "not sure" mark: absent or NaN means not marked.
+        if "uncertain" in columns:
+            value = row.uncertain
+            kwargs["uncertain"] = False if pd.isna(value) else bool(value)
         beats.append(WindowBeat(**kwargs))
 
     return BeatWindowResult(status="ok", beats=beats, count=len(beats))

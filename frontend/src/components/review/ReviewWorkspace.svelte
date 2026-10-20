@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
   import { detectArrhythmias, type ArrhythmiaMethod } from '../../lib/api/arrhythmia'
   import { formatDuration, formatHeartRate } from '../../lib/format'
@@ -20,6 +20,12 @@
   import { clearArrhythmiaRuns, getArrhythmiaRuns, markArrhythmiaRan } from '../../lib/stores/arrhythmiaRuns.svelte'
   import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import { flagFocus, flagsForPath, reportFlagFocus } from '../../lib/stores/flagProjects.svelte'
+  import {
+    clearPendingUncertain,
+    confirmLeave,
+    hasPendingUncertain,
+    isPendingUncertain,
+  } from '../../lib/stores/reviewGuard.svelte'
   import {
     attachReport,
     detachReport,
@@ -134,6 +140,30 @@
       beatPanelCollapsed = false
     }
     previousSelectedBeatTs = ts
+  })
+
+  // A beat marked "uncertain" but not yet confirmed or rejected holds the
+  // technician on it (see lib/stores/reviewGuard.svelte.ts): the graph and the
+  // toolbar below ask this before moving anywhere else. Answers `true` at once
+  // when nothing is pending, so ordinary navigation keeps its timing.
+  function guardBeatChange(): boolean | Promise<boolean> {
+    if (!hasPendingUncertain()) return true
+    return confirmLeave().then((leave) => {
+      // Going back means going back to the beat's controls: bring the panel
+      // back if it was collapsed, since C / R only work while it is mounted.
+      if (!leave) beatPanelCollapsed = false
+      return leave
+    })
+  }
+
+  // The pending mark belongs to the beat on screen. Should the selection ever
+  // move on by a route that is not guarded, the mark goes with it instead of
+  // blocking later navigation over a beat nobody can see any more.
+  $effect(() => {
+    const ts = selectedBeat?.ts ?? null
+    untrack(() => {
+      if (ts === null || !isPendingUncertain(path, ts)) clearPendingUncertain(path)
+    })
   })
 
   // F5 reopen hydration: the prior session's bad-data marks, if any, fetched
@@ -463,6 +493,8 @@
   let destroyed = false
   onMount(() => () => {
     destroyed = true
+    // An unsaved "uncertain" mark has nowhere left to go.
+    clearPendingUncertain(path)
     // Report work is the store's (it lands in this recording's slot whenever
     // it finishes); what must stop here is this screen reacting to it.
     if (reportSyncTimer !== null) clearTimeout(reportSyncTimer)
@@ -615,6 +647,8 @@
   // Throws away the restored session and re-detects from scratch — the
   // escape hatch for "this saved review is wrong, start over".
   async function handleStartFresh() {
+    // It drops the open beat along with the rest of the saved review.
+    if (hasPendingUncertain() && !(await guardBeatChange())) return
     discarding = true
     try {
       const result = await discardFileState(path)
@@ -787,6 +821,7 @@
   // selection it backed is stale and the graph/navigation both need to
   // re-read rather than patch around it.
   function handleBeatDeleted() {
+    clearPendingUncertain(path)
     selectedBeat = null
     refreshGraphBeats()
     void refreshBeatsOfInterest()
@@ -814,6 +849,18 @@
     // makes it *safe* to call again, not *useful* to call again on this
     // path.
     if (result.status === 'ok' && !result.error) {
+      // The beat panel is mounted afresh when it moves between the side panel
+      // and the focus overlay, and starts from the beat it is handed — which is
+      // the one fetched when it was selected. Keep that current with what was
+      // just saved (decision and uncertain mark).
+      if (selectedBeat && result.ts === selectedBeat.ts) {
+        selectedBeat = {
+          ...selectedBeat,
+          review_state: result.review_state ?? selectedBeat.review_state,
+          reassigned_category: result.reassigned_category,
+          uncertain: result.uncertain ?? selectedBeat.uncertain,
+        }
+      }
       refreshGraphBeats()
       // Rejecting a beat clears its flags, so it drops out of the
       // beat-of-interest navigation; confirming or reassigning can change
@@ -849,6 +896,17 @@
     refreshGraphBeats()
     await refreshBeatsOfInterest()
     await persistChannelData(activeChannel)
+  }
+
+  // The <select>'s own change. Switching channel drops the open beat, so a
+  // pending "uncertain" mark has to be dealt with first; if the technician
+  // stays, the select goes back to the channel still on screen.
+  async function handleChannelSelectChange() {
+    if (hasPendingUncertain() && !(await guardBeatChange())) {
+      selectedChannel = activeChannel
+      return
+    }
+    await handleChannelChange()
   }
 
   async function handleChannelChange() {
@@ -912,6 +970,8 @@
   // selected against the OLD detection result may not even exist in the
   // new one.
   async function handleRerunDetection() {
+    // The open beat may not survive the new detection.
+    if (hasPendingUncertain() && !(await guardBeatChange())) return
     const channel = activeChannel
     const requestId = ++detectionRequestId
 
@@ -970,7 +1030,7 @@
         class="channel-select"
         data-testid="channel-select"
         bind:value={selectedChannel}
-        onchange={handleChannelChange}
+        onchange={handleChannelSelectChange}
         disabled={!hydrationChecked}
       >
         {#each channels as channel}
@@ -1212,6 +1272,7 @@
             {reportBadData}
             onReportNavigate={(ts: number | null) => (reportFocusTs = ts)}
             onBeatAdded={() => scheduleReportSync()}
+            beforeBeatChange={guardBeatChange}
           />
         {/key}
       {/if}

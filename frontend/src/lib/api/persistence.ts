@@ -26,13 +26,17 @@ export function persistBeats(path: string, channel: string): Promise<PersistBeat
   return apiPost('/files/beats', 'POST', { path, channel })
 }
 
+// `uncertain` rides along with confirm / reject / reassign (saved together with
+// the decision; omitted keeps the beat's current mark). `set_uncertain` changes
+// only that mark, and only on a beat already confirmed or rejected.
 export function updateBeatCategory(
   path: string,
   ts: number,
-  action: 'confirm' | 'reject' | 'reassign' | 'remove_flag',
+  action: 'confirm' | 'reject' | 'reassign' | 'remove_flag' | 'set_uncertain',
   category?: string,
+  uncertain?: boolean | null,
 ): Promise<CategoryUpdateResult> {
-  return apiPost('/files/beats/category', 'PATCH', { path, ts, action, category })
+  return apiPost('/files/beats/category', 'PATCH', { path, ts, action, category, uncertain })
 }
 
 export function addBadData(path: string, start: number, stop: number): Promise<BadDataAddResult> {

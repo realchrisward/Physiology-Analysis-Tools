@@ -1,6 +1,9 @@
+import importlib.metadata
 import json
 import os
+from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Request
 from physiology_analysis_tools.modules import (
@@ -102,6 +105,9 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                         cache_df["reassigned_category"] = [
                             beat_row["reassigned_category"] for beat_row in beat_rows
                         ]
+                        cache_df["uncertain"] = [
+                            bool(beat_row["uncertain"]) for beat_row in beat_rows
+                        ]
                         request.app.state.beat_cache[path] = cache_df
                 except Exception:
                     pass
@@ -125,6 +131,7 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                 other_arrhythmia=_to_bool(beat_row["other_arrhythmia"]),
                 review_state=beat_row["review_state"],
                 reassigned_category=beat_row["reassigned_category"],
+                uncertain=bool(beat_row["uncertain"]),
             )
             for beat_row in beat_rows
         ]
@@ -238,15 +245,16 @@ def _persist_beats_locked(
         preserved_state = db.replace_beats(conn, file_id, beat_df, commit=False)
         conn.commit()
 
-        # Sync review_state/reassigned_category onto the beat_cache[path]
-        # DataFrame `/beats/window` reads from — replace_beats above only
-        # preserved them in SQLite; without this, a beat reviewed before this
-        # redetect+persist would show as "unreviewed" on the graph until
-        # individually touched again. Every row gets a value (defaulting to
-        # unreviewed/None), matched by `ts`. This builds a NEW frame and swaps
-        # it in rather than adding the columns to the cached one: window
-        # requests iterate that frame while this runs, and columns appearing
-        # under them mid-iteration made them fail.
+        # Sync review_state/reassigned_category/uncertain onto the
+        # beat_cache[path] DataFrame `/beats/window` reads from —
+        # replace_beats above only preserved them in SQLite; without this, a
+        # beat reviewed before this redetect+persist would show as
+        # "unreviewed" on the graph until individually touched again. Every
+        # row gets a value (defaulting to unreviewed/None/not uncertain),
+        # matched by `ts`. This builds a NEW frame and swaps it in rather than
+        # adding the columns to the cached one: window requests iterate that
+        # frame while this runs, and columns appearing under them
+        # mid-iteration made them fail.
         request.app.state.beat_cache[payload.path] = db.with_review_state(
             beat_df, preserved_state
         )
@@ -273,10 +281,22 @@ def update_beat_category(
 def _update_beat_category_locked(
     payload: CategoryUpdateRequest, request: Request
 ) -> CategoryUpdateResult:
-    if payload.action not in {"confirm", "reject", "reassign", "remove_flag"}:
+    if payload.action not in {
+        "confirm",
+        "reject",
+        "reassign",
+        "remove_flag",
+        "set_uncertain",
+    }:
         return CategoryUpdateResult(
             status="error",
             error=f"Unknown action: {payload.action!r}",
+        )
+
+    if payload.action == "set_uncertain" and payload.uncertain is None:
+        return CategoryUpdateResult(
+            status="error",
+            error="uncertain is required for a set_uncertain action",
         )
 
     if payload.action in {"reassign", "remove_flag"}:
@@ -308,9 +328,17 @@ def _update_beat_category_locked(
                 error="No persisted data for this file — run POST /files/beats first",
             )
 
-        updated = db.update_beat_category(
-            conn, file_row["id"], payload.ts, payload.action, payload.category
-        )
+        try:
+            updated = db.update_beat_category(
+                conn,
+                file_row["id"],
+                payload.ts,
+                payload.action,
+                payload.category,
+                payload.uncertain,
+            )
+        except db.UncertainNeedsDecisionError as e:
+            return CategoryUpdateResult(status="error", error=str(e))
         if updated is None:
             return CategoryUpdateResult(
                 status="error", error="No beat found at this timestamp"
@@ -342,6 +370,11 @@ def _update_beat_category_locked(
                     new_df.loc[mask, col] = value
                 new_df.loc[mask, "review_state"] = updated["review_state"]
                 new_df.loc[mask, "reassigned_category"] = updated["reassigned_category"]
+                # A frame that has never been reviewed has no such column yet;
+                # start it all-False so it stays a plain bool column.
+                if "uncertain" not in new_df.columns:
+                    new_df["uncertain"] = False
+                new_df.loc[mask, "uncertain"] = bool(updated["uncertain"])
                 request.app.state.beat_cache[payload.path] = new_df
 
         return CategoryUpdateResult(
@@ -349,6 +382,7 @@ def _update_beat_category_locked(
             ts=updated["ts"],
             review_state=updated["review_state"],
             reassigned_category=updated["reassigned_category"],
+            uncertain=bool(updated["uncertain"]),
         )
     except Exception as e:
         return CategoryUpdateResult(status="error", error=str(e))
@@ -554,6 +588,156 @@ def delete_bad_data(
         conn.close()
 
 
+def _annot_labels(beats_df: pd.DataFrame) -> np.ndarray:
+    """The per-beat training label: 2 confirmed arrhythmia, -1 rejected, 1
+    detected (any_arrhythmia) but not reviewed, 0 not detected and not
+    reviewed. This is the scheme the report loader (backend/reports.py) reads
+    back from an `annot_any_arrhythmia` column."""
+    state = beats_df["review_state"]
+    # NULL (arrhythmia detection never ran) reads as not detected.
+    detected = pd.to_numeric(beats_df["any_arrhythmia"], errors="coerce").fillna(0) != 0
+    return np.select(
+        [state == "confirmed", state == "rejected", detected], [2, -1, 1], default=0
+    )
+
+
+def _review_columns_together(beats_df: pd.DataFrame) -> pd.DataFrame:
+    """Move `uncertain` and `annot_any_arrhythmia` to sit right after
+    `reassigned_category`, so the review outcome reads as one block (the table
+    itself keeps `manual_added_at` and `uncertain` at its end)."""
+    moved = ["uncertain", "annot_any_arrhythmia"]
+    others = [col for col in beats_df.columns if col not in moved]
+    at = others.index("reassigned_category") + 1
+    return beats_df[others[:at] + moved + others[at:]]
+
+
+# The sample rate is estimated from this many samples at the start of the
+# recording: a median needs no more, and diffing a multi-hour recording's whole
+# time column would copy hundreds of MB for the same answer.
+_RATE_SAMPLES = 1_000_000
+
+
+def _or_blank(compute):
+    """`compute()`, or None (an empty cell) when it fails: a metadata value
+    that cannot be worked out must never fail the report."""
+    try:
+        return compute()
+    except Exception:
+        return None
+
+
+def _finite(value, digits: int):
+    """`value` rounded to `digits`, or None when it is not a finite number."""
+    value = float(value)
+    return round(value, digits) if np.isfinite(value) else None
+
+
+def _local_iso(moment: datetime) -> str:
+    """ISO 8601 in the machine's local time, with its UTC offset."""
+    return moment.astimezone().isoformat(timespec="seconds")
+
+
+def _marked_seconds(bad_data_df: pd.DataFrame) -> float:
+    """Total time covered by the bad-data marks; overlapping marks count once."""
+    total, covered_to = 0.0, -np.inf
+    for start, stop in sorted(zip(bad_data_df["start"], bad_data_df["stop"])):
+        total += max(0.0, stop - max(start, covered_to))
+        covered_to = max(covered_to, stop)
+    return total
+
+
+def _analysis_library_version() -> str:
+    """The physiology_analysis_tools version (what main.py declares). Reading
+    it from the installed package's metadata avoids importing main.py, which
+    pulls in the whole Qt UI; with no metadata (a frozen build) fall back to
+    the module versions the settings sheet already records."""
+    try:
+        return importlib.metadata.version("physiology_analysis_tools")
+    except importlib.metadata.PackageNotFoundError:
+        return (
+            f"heartbeat_detection {heartbeat_detection.__version__}, "
+            f"arrhythmia_detection {arrhythmia_detection.__version__}, "
+            f"ml_tools {ml_tools.__version__}"
+        )
+
+
+def _report_metadata(
+    request: Request,
+    path: str,
+    imported,
+    file_row,
+    beats_df: pd.DataFrame,
+    bad_data_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """The report's `metadata` sheet: one row per fact about the recording and
+    the review, as `field` / `value`. A value that cannot be worked out is
+    left blank rather than failing the export."""
+    cache_entry = request.app.state.signal_cache.get(path)
+    time_values = _or_blank(
+        lambda: cache_entry["df"][cache_entry["time_column"]].to_numpy(dtype=float)
+    )
+
+    def sample_rate_hz():
+        steps = np.diff(time_values[:_RATE_SAMPLES])
+        steps = steps[np.isfinite(steps) & (steps > 0)]
+        return _finite(1.0 / np.median(steps), 3)
+
+    state = beats_df["review_state"]
+    labels = beats_df["annot_any_arrhythmia"]
+    rows = [
+        ("report_generated_at", _local_iso(datetime.now())),
+        ("recording_file", imported.filename),
+        ("recording_path", path),
+        ("file_size_bytes", imported.size),
+        (
+            "file_modified_at",
+            _or_blank(
+                lambda: _local_iso(
+                    datetime.fromtimestamp(imported.modified_time, tz=timezone.utc)
+                )
+            ),
+        ),
+        ("channel", file_row["channel"]),
+        ("channels_available", ", ".join(imported.channels)),
+        ("time_column", imported.time_column),
+        ("sample_rate_hz", _or_blank(sample_rate_hz)),
+        (
+            "recording_duration_s",
+            _or_blank(lambda: _finite(time_values[-1] - time_values[0], 3)),
+        ),
+        ("beats_total", len(beats_df)),
+        ("beats_confirmed", int((state == "confirmed").sum())),
+        ("beats_rejected", int((state == "rejected").sum())),
+        ("beats_unreviewed", int((state == "unreviewed").sum())),
+        ("beats_detected_unreviewed", int((labels == 1).sum())),
+        ("beats_uncertain", int(beats_df["uncertain"].sum())),
+        ("beats_added_manually", int(beats_df["manual_added_at"].notna().sum())),
+        ("mean_hr_bpm", _or_blank(lambda: _finite(beats_df["hr"].mean(), 2))),
+        ("bad_data_marks", len(bad_data_df)),
+        (
+            "bad_data_seconds",
+            _or_blank(lambda: _finite(_marked_seconds(bad_data_df), 3)),
+        ),
+        (
+            "review_last_saved_at",
+            _or_blank(
+                lambda: _local_iso(datetime.fromisoformat(file_row["updated_at"]))
+            ),
+        ),
+        ("analysis_library_version", _or_blank(_analysis_library_version)),
+        (
+            "annot_any_arrhythmia_legend",
+            "2 confirmed arrhythmia, 1 detected not reviewed, 0 not detected, "
+            "-1 rejected",
+        ),
+        (
+            "uncertain_legend",
+            "1 = reviewer marked unsure; the beat is still confirmed or rejected",
+        ),
+    ]
+    return pd.DataFrame(rows, columns=["field", "value"])
+
+
 @router.post("/report", response_model=ReportResult)
 def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
     imported = request.app.state.imported_files.get(payload.path)
@@ -583,6 +767,8 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             conn,
             params=(file_row["id"],),
         ).drop(columns=["id", "file_id"])
+        beats_df["annot_any_arrhythmia"] = _annot_labels(beats_df)
+        beats_df = _review_columns_together(beats_df)
 
         mark_rows = conn.execute(
             "SELECT start, stop FROM bad_data_marks WHERE file_id=? ORDER BY id",
@@ -604,6 +790,10 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             index=[0],
         )
 
+        metadata_df = _report_metadata(
+            request, payload.path, imported, file_row, beats_df, bad_data_df
+        )
+
         # The technician's chosen filename wins as-is; only defensively
         # append .xlsx if they (or a non-Electron caller) omitted it — the
         # Save As dialog's own file-type filter normally prevents this.
@@ -616,6 +806,7 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             beats_df.to_excel(writer, sheet_name="beats", index=False)
             bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
             settings_df.to_excel(writer, sheet_name="settings", index=False)
+            metadata_df.to_excel(writer, sheet_name="metadata", index=False)
             writer.close()
         except Exception as e:
             return ReportResult(status="error", error=str(e))

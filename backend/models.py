@@ -127,6 +127,8 @@ class WindowBeat(BaseModel):
     other_arrhythmia: bool | None = None
     review_state: str = "unreviewed"
     reassigned_category: str | None = None
+    # The reviewer was unsure. Only ever True on a confirmed or rejected beat.
+    uncertain: bool = False
 
 
 class BeatWindowResult(BaseModel):
@@ -176,6 +178,7 @@ class PersistedBeat(BaseModel):
     other_arrhythmia: bool | None = None
     review_state: str = "unreviewed"
     reassigned_category: str | None = None
+    uncertain: bool = False
 
 
 class BadDataMark(BaseModel):
@@ -313,8 +316,13 @@ class DatabaseInfoResult(BaseModel):
 class CategoryUpdateRequest(BaseModel):
     path: str
     ts: float
+    # confirm | reject | reassign | remove_flag | set_uncertain
     action: str
     category: str | None = None
+    # The "not sure" mark. With confirm/reject/reassign it is saved together
+    # with the decision (None keeps the beat's current value); set_uncertain
+    # requires it and only works on an already confirmed/rejected beat.
+    uncertain: bool | None = None
 
 
 class CategoryUpdateResult(BaseModel):
@@ -322,6 +330,8 @@ class CategoryUpdateResult(BaseModel):
     ts: float | None = None
     review_state: str | None = None
     reassigned_category: str | None = None
+    # The beat's mark after the action.
+    uncertain: bool | None = None
     error: str | None = None
 
 
