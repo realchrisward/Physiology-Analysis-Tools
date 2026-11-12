@@ -20,6 +20,9 @@ export interface FileRow {
   status: 'ready' | 'error' | 'queued' | 'detecting' | 'detected' | 'detection-error'
   channels: string[]
   defaultChannel: string | null
+  // { channel: display name } for channels the technician renamed (saved in
+  // the backend). The channel's own name stays its key everywhere.
+  channelLabels?: Record<string, string>
   size: number | null
   error: string | null
   beatCount: number | null
@@ -31,6 +34,18 @@ export interface FileRow {
 }
 
 export const fileRegistry: FileRow[] = $state([])
+
+/** The name to show for `channel` of a file: its custom name, else its own. */
+export function channelLabel(row: Pick<FileRow, 'channelLabels'> | undefined, channel: string): string {
+  return row?.channelLabels?.[channel] ?? channel
+}
+
+/** Applies a rename the backend confirmed ({ path: { channel: name } }) to the listed files. */
+export function applyChannelLabels(labels: Record<string, Record<string, string>>): void {
+  for (const row of fileRegistry) {
+    if (row.path in labels) row.channelLabels = { ...labels[row.path] }
+  }
+}
 
 // The identity ReviewWorkspace needs to open a file — shared between
 // importQueue.svelte.ts (which produces it: the first file of an import, or

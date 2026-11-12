@@ -26,8 +26,11 @@ from backend.models import (
     BeatDeleteRequest,
     BeatDeleteResult,
     BeatSettingsModel,
+    CHANNEL_LABEL_MAX_LENGTH,
     CategoryUpdateRequest,
     CategoryUpdateResult,
+    ChannelLabelRequest,
+    ChannelLabelResult,
     ChannelPersistRequest,
     ChannelPersistResult,
     DiscardStateRequest,
@@ -175,6 +178,77 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
 
 def _to_bool(value: int | None) -> bool | None:
     return None if value is None else bool(value)
+
+
+def _channel_display(imported, channel: str | None) -> str | None:
+    """A channel as the report shows it: "custom name (original name)" when
+    the technician renamed it, else just its own name."""
+    label = imported.channel_labels.get(channel) if channel else None
+    return f"{label} ({channel})" if label else channel
+
+
+@router.put("/channel-label", response_model=ChannelLabelResult)
+def put_channel_label(payload: ChannelLabelRequest, request: Request) -> ChannelLabelResult:
+    """Give `channel` a display name in each of `paths` (one file or several),
+    or reset it. Only the name shown changes: the channel keeps its own name
+    as its key for detection, saved beats and every other route."""
+    label = " ".join((payload.label or "").split())
+    if len(label) > CHANNEL_LABEL_MAX_LENGTH:
+        return ChannelLabelResult(
+            status="error",
+            error=f"Keep the name to {CHANNEL_LABEL_MAX_LENGTH} characters or fewer",
+        )
+    # A blank name, or the channel's own name, means "no custom name".
+    stored = label if label and label != payload.channel else None
+
+    registry = request.app.state.imported_files
+    targets, skipped = [], []
+    for path in dict.fromkeys(payload.paths):
+        imported = registry.get(path)
+        if imported is not None and imported.status == "ok" and payload.channel in imported.channels:
+            targets.append(path)
+        else:
+            skipped.append(path)
+    if not targets:
+        return ChannelLabelResult(
+            status="error",
+            skipped=skipped,
+            error=f"None of these files has a channel named {payload.channel}",
+        )
+    # Two channels shown under one name would make the channel list ambiguous.
+    if stored is not None:
+        for path in targets:
+            imported = registry[path]
+            taken = {
+                imported.channel_labels.get(other, other).casefold()
+                for other in imported.channels
+                if other != payload.channel
+            } | {other.casefold() for other in imported.channels if other != payload.channel}
+            if stored.casefold() in taken:
+                return ChannelLabelResult(
+                    status="error",
+                    error=f"{imported.filename} already has a channel called {stored}",
+                )
+
+    conn = db.connect(request.app.state.db_path)
+    try:
+        db.set_channel_label(conn, targets, payload.channel, stored)
+    except Exception as e:
+        return ChannelLabelResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+    # Keep the in-memory import results in step, so GET /files and the report
+    # see the new name without a re-import.
+    labels = {}
+    for path in targets:
+        imported = registry[path]
+        names = {k: v for k, v in imported.channel_labels.items() if k != payload.channel}
+        if stored is not None:
+            names[payload.channel] = stored
+        imported.channel_labels = names
+        labels[path] = names
+    return ChannelLabelResult(status="ok", labels=labels, skipped=skipped)
 
 
 @router.put("/channel", response_model=ChannelPersistResult)
@@ -697,8 +771,11 @@ def _report_metadata(
                 )
             ),
         ),
-        ("channel", file_row["channel"]),
-        ("channels_available", ", ".join(imported.channels)),
+        ("channel", _channel_display(imported, file_row["channel"])),
+        (
+            "channels_available",
+            ", ".join(_channel_display(imported, c) for c in imported.channels),
+        ),
         ("time_column", imported.time_column),
         ("sample_rate_hz", _or_blank(sample_rate_hz)),
         (

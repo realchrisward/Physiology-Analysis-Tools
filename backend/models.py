@@ -17,11 +17,33 @@ class FileImportResult(BaseModel):
     modified_time: float | None = None
     default_channel: str | None = None
     default_channel_matched_rule: bool = False
+    # {channel: display name} for channels the technician renamed.
+    channel_labels: dict[str, str] = {}
     error: str | None = None
 
 
 class ImportResponse(BaseModel):
     results: list[FileImportResult]
+
+
+CHANNEL_LABEL_MAX_LENGTH = 40
+
+
+class ChannelLabelRequest(BaseModel):
+    paths: list[str] = Field(min_length=1)
+    channel: str
+    # The new display name; null, blank or the channel's own name resets it.
+    label: str | None = None
+
+
+class ChannelLabelResult(BaseModel):
+    status: str
+    # {path: {channel: display name}} after the change, for every path it
+    # applied to (an empty dict for a path whose names are all original).
+    labels: dict[str, dict[str, str]] = {}
+    # Paths it did not apply to: not imported, or without that channel.
+    skipped: list[str] = []
+    error: str | None = None
 
 
 class BeatDetectRequest(BaseModel):

@@ -110,6 +110,7 @@ async function importPaths(
           status: fileResult.status === 'ok' ? 'ready' : 'error',
           channels: fileResult.channels,
           defaultChannel: fileResult.default_channel,
+          channelLabels: { ...(fileResult.channel_labels ?? {}) },
           size: fileResult.size,
           error: fileResult.error,
           beatCount: null,

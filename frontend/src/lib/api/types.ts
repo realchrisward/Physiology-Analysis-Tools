@@ -22,6 +22,8 @@ export interface FileImportResult {
   modified_time: number | null
   default_channel: string | null
   default_channel_matched_rule: boolean
+  // { channel: display name } for channels the technician renamed.
+  channel_labels: Record<string, string>
   error: string | null
 }
 
@@ -216,6 +218,15 @@ export interface FileStateResult {
 export interface ChannelPersistResult {
   status: string
   channel: string | null
+  error: string | null
+}
+
+export interface ChannelLabelResult {
+  status: string
+  // { path: { channel: display name } } after the change, per path it applied to.
+  labels: Record<string, Record<string, string>>
+  // Paths it did not apply to (not imported, or without that channel).
+  skipped: string[]
   error: string | null
 }
 

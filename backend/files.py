@@ -2,6 +2,7 @@ import os
 
 from fastapi import APIRouter, Request
 
+from backend import db
 from backend.channel_selection import NON_SIGNAL_CHANNELS, select_default_channel
 from backend.extractors import extract_dataframe
 from backend.locks import path_lock
@@ -98,7 +99,30 @@ def import_files(payload: ImportRequest, request: Request) -> ImportResponse:
                     registry[path] = result
         results.append(result)
 
+    _attach_channel_labels(request, results)
     return ImportResponse(results=results)
+
+
+def _attach_channel_labels(request: Request, results: list[FileImportResult]) -> None:
+    """Fill in the saved channel names. A database problem only costs the
+    names (channels show their original ones), never the import."""
+    ok = [result for result in results if result.status == "ok"]
+    if not ok:
+        return
+    try:
+        conn = db.connect(request.app.state.db_path)
+        try:
+            labels = db.get_channel_labels(conn, [result.path for result in ok])
+        finally:
+            conn.close()
+    except Exception:
+        return
+    for result in ok:
+        result.channel_labels = {
+            channel: label
+            for channel, label in labels.get(result.path, {}).items()
+            if channel in result.channels
+        }
 
 
 @router.get("", response_model=list[FileImportResult])

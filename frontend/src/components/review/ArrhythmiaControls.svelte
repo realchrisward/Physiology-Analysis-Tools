@@ -82,26 +82,29 @@
 
 <div class="arrhythmia-controls" data-testid="arrhythmia-controls">
   <span class="arrhythmia-label text-muted">Arrhythmia detection</span>
-  {#each METHODS as method (method.id)}
-    {@const isDone = done.includes(method.id)}
-    <button
-      type="button"
-      class="btn btn-sm"
-      class:btn-done={isDone}
-      data-testid={`run-${method.id}-button`}
-      disabled={runState === 'running' || disabled}
-      title={isDone ? 'Done — click to run again' : undefined}
-      aria-label={isDone ? `${method.label}, done` : undefined}
-      onclick={() => run(method.id)}
-    >
-      {#if runningMethod === method.id}
-        <span class="spinner" aria-hidden="true"></span>
-      {:else if isDone}
-        <Icon name="check-circle" size={14} />
-      {/if}
-      {method.label}
-    </button>
-  {/each}
+  <!-- The method buttons always share one row under the heading. -->
+  <div class="arrhythmia-buttons">
+    {#each METHODS as method (method.id)}
+      {@const isDone = done.includes(method.id)}
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-done={isDone}
+        data-testid={`run-${method.id}-button`}
+        disabled={runState === 'running' || disabled}
+        title={isDone ? 'Done — click to run again' : undefined}
+        aria-label={isDone ? `${method.label}, done` : undefined}
+        onclick={() => run(method.id)}
+      >
+        {#if runningMethod === method.id}
+          <span class="spinner" aria-hidden="true"></span>
+        {:else if isDone}
+          <Icon name="check-circle" size={14} />
+        {/if}
+        {method.label}
+      </button>
+    {/each}
+  </div>
 
   {#if runState === 'running'}
     <span class="text-muted" data-testid="arrhythmia-running">
@@ -116,11 +119,12 @@
 </div>
 
 <style>
+  /* Heading on top, the method buttons on one row below, status after. */
   .arrhythmia-controls {
     display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--space-2);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
   }
 
   .arrhythmia-label {
@@ -128,7 +132,28 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-right: var(--space-1);
+  }
+
+  .arrhythmia-buttons {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: var(--space-2);
+  }
+
+  .arrhythmia-buttons .btn {
+    white-space: nowrap;
+  }
+
+  /* When the review toolbar (a named size container in ReviewWorkspace) gets
+     narrower but still fits one row, the buttons stack into one column of
+     equal width. Below that the toolbar becomes a grid with room for them
+     side by side again. */
+  @container review-toolbar (min-width: 1001px) and (max-width: 1320px) {
+    .arrhythmia-buttons {
+      flex-direction: column;
+      align-items: stretch;
+      gap: var(--space-1);
+    }
   }
 
   /* Done state: green border/text/tint plus the check icon (the icon is what

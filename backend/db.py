@@ -66,6 +66,18 @@ CREATE TABLE IF NOT EXISTS bad_data_marks (
     start REAL NOT NULL,
     stop REAL NOT NULL
 );
+
+-- Display names the technician gave a file's channels. Keyed by path, not by
+-- the files row (path, size, mtime), so a name survives the recording being
+-- re-saved; `channel` is the extractor's own name, which stays the key
+-- everywhere else.
+CREATE TABLE IF NOT EXISTS channel_labels (
+    path TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    label TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (path, channel)
+);
 """
 
 
@@ -79,7 +91,7 @@ def default_db_path() -> str:
 # Stored in the database file itself (PRAGMA user_version), so a file that is
 # deleted and recreated (Settings > reset database) is correctly seen as
 # un-initialised again, which a per-path in-process flag would not notice.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _schema_lock = threading.Lock()
 
 # How long a connection waits on another writer before "database is locked".
@@ -134,6 +146,46 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                     raise
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
+
+
+def get_channel_labels(
+    conn: sqlite3.Connection, paths: list[str]
+) -> dict[str, dict[str, str]]:
+    """{path: {channel: label}} for the given paths (paths with none are left out)."""
+    labels: dict[str, dict[str, str]] = {}
+    # Chunked: SQLite caps the number of bound parameters per statement.
+    unique = list(dict.fromkeys(paths))
+    for start in range(0, len(unique), 500):
+        chunk = unique[start : start + 500]
+        rows = conn.execute(
+            "SELECT path, channel, label FROM channel_labels "
+            f"WHERE path IN ({', '.join('?' for _ in chunk)})",
+            chunk,
+        )
+        for row in rows:
+            labels.setdefault(row["path"], {})[row["channel"]] = row["label"]
+    return labels
+
+
+def set_channel_label(
+    conn: sqlite3.Connection, paths: list[str], channel: str, label: str | None
+) -> None:
+    """Name `channel` `label` in every one of `paths`, in one transaction;
+    `None` goes back to the original name."""
+    with conn:
+        if label is None:
+            conn.executemany(
+                "DELETE FROM channel_labels WHERE path=? AND channel=?",
+                [(path, channel) for path in paths],
+            )
+        else:
+            updated_at = datetime.now(timezone.utc).isoformat()
+            conn.executemany(
+                "INSERT INTO channel_labels (path, channel, label, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(path, channel) DO UPDATE SET "
+                "label=excluded.label, updated_at=excluded.updated_at",
+                [(path, channel, label, updated_at) for path in paths],
+            )
 
 
 def get_file_row(

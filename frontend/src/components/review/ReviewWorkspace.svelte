@@ -18,7 +18,8 @@
   import ReportControl from './ReportControl.svelte'
   import Icon from '../shared/Icon.svelte'
   import { clearArrhythmiaRuns, getArrhythmiaRuns, markArrhythmiaRan } from '../../lib/stores/arrhythmiaRuns.svelte'
-  import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
+  import { channelLabel, fileRegistry } from '../../lib/stores/fileRegistry.svelte'
+  import ChannelRenameDialog from './ChannelRenameDialog.svelte'
   import { flagFocus, flagsForPath, reportFlagFocus } from '../../lib/stores/flagProjects.svelte'
   import {
     clearPendingUncertain,
@@ -586,6 +587,11 @@
   // markers until the technician happened to change channels or click
   // Re-run detection.
   let fileRow = $derived(fileRegistry.find((row) => row.path === path))
+  // The channel (its own name) whose rename dialog is open, or null.
+  let renamingChannel: string | null = $state(null)
+  // The selected channel's display name, and whether it differs from its own.
+  let selectedLabel = $derived(channelLabel(fileRow, selectedChannel))
+  let renamed = $derived(selectedLabel !== selectedChannel)
 
   // Reflects the shared registry row's own queued/detecting/detected/error
   // status into the toolbar's detection summary — but ONLY into `detection`
@@ -1019,71 +1025,102 @@
   ondrop={handleDrop}
 >
   <!-- One merged bar: channel choice, beat detection, arrhythmia detection
-       and report labels used to be two separate stacked toolbar rows — now
-       four labeled groups (divided by a thin rule) in a single wrapping row,
-       so the vertical space the second row used to take is freed up for the
-       graph below instead. -->
+       and report labels as four labeled groups (divided by a thin rule) in a
+       single row. The wrapper is a size container: as the bar narrows it
+       compacts in steps (see the @container rules) instead of wrapping. -->
+  <div class="review-toolbar-wrap">
   <div class="review-toolbar">
     <div class="toolbar-group">
       <span class="toolbar-group-label">Channel</span>
-      <select
-        class="channel-select"
-        data-testid="channel-select"
-        bind:value={selectedChannel}
-        onchange={handleChannelSelectChange}
-        disabled={!hydrationChecked}
-      >
-        {#each channels as channel}
-          <option value={channel}>{channel}</option>
-        {/each}
-      </select>
+      <!-- The select and its rename button are one joined control. A native
+           <select> shows one plain line, so for a renamed channel its own text
+           is hidden and a two-line face (name over the grey original) is laid
+           over it; the real select underneath still takes every click and key. -->
+      <div class="channel-control">
+        <div class="channel-select-wrap">
+          <select
+            class="channel-select"
+            class:has-face={renamed}
+            data-testid="channel-select"
+            bind:value={selectedChannel}
+            onchange={handleChannelSelectChange}
+            disabled={!hydrationChecked}
+          >
+            {#each channels as channel}
+              {@const label = channelLabel(fileRow, channel)}
+              <option value={channel}>{label === channel ? channel : `${label} (${channel})`}</option>
+            {/each}
+          </select>
+          {#if renamed}
+            <span class="channel-select-face" aria-hidden="true" data-testid="channel-select-face">
+              <span class="channel-face-name">{selectedLabel}</span>
+              <span class="channel-face-original">({selectedChannel})</span>
+            </span>
+          {/if}
+        </div>
+        <button
+          type="button"
+          class="channel-rename"
+          data-testid="channel-rename-button"
+          title="Rename channel"
+          aria-label="Rename channel"
+          onclick={() => (renamingChannel = selectedChannel)}
+        >
+          <Icon name="pencil" size={14} />
+        </button>
+      </div>
     </div>
+    {#if renamingChannel}
+      <ChannelRenameDialog {path} channel={renamingChannel} onClose={() => (renamingChannel = null)} />
+    {/if}
 
     <span class="toolbar-divider" aria-hidden="true"></span>
 
     <div class="toolbar-group">
       <span class="toolbar-group-label">Beat detection</span>
-      <button
-        type="button"
-        class="btn btn-sm"
-        data-testid="rerun-detection-button"
-        disabled={!hydrationChecked || detection.status === 'pending'}
-        onclick={handleRerunDetection}
-      >
-        Re-run detection
-      </button>
-
-      {#if detection.status === 'pending'}
-        <div class="detection-summary text-muted" data-testid="detection-summary">
-          <span class="spinner" aria-hidden="true"></span>
-          {#if fileRow?.status === 'queued'}
-            beat detection is queued…
-          {:else}
-            detecting beats for {selectedChannel}…
-          {/if}
-        </div>
-      {:else if detection.status === 'ok'}
-        <!-- Two stacked rows (count over the details) rather than one long
-             inline sentence; ~33px tall, within the toolbar's own height. -->
-        {@const detail = [
-          detection.meanHr !== null ? `mean HR ${formatHeartRate(detection.meanHr)} bpm` : null,
-          detection.duration !== null ? `duration ${formatDuration(detection.duration)}` : null,
-        ]
-          .filter(Boolean)
-          .join(' · ')}
-        <div
-          class="detection-summary detection-stats"
-          data-testid="detection-summary"
-          title="Mean HR is the average of each beat's rate (60 ÷ its RR interval in seconds). Duration is the time from the first to the last detected beat."
+      <div class="toolbar-group-row">
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="rerun-detection-button"
+          disabled={!hydrationChecked || detection.status === 'pending'}
+          onclick={handleRerunDetection}
         >
-          <span class="detection-stat-primary">{detection.count} beats detected</span>
-          {#if detail}<span class="detection-stat-detail text-muted">{detail}</span>{/if}
-        </div>
-      {:else if detection.status === 'error'}
-        <div class="detection-summary text-danger" data-testid="detection-summary">
-          detection failed: {detection.error}
-        </div>
-      {/if}
+          Re-run detection
+        </button>
+
+        {#if detection.status === 'pending'}
+          <div class="detection-summary text-muted" data-testid="detection-summary">
+            <span class="spinner" aria-hidden="true"></span>
+            {#if fileRow?.status === 'queued'}
+              beat detection is queued…
+            {:else}
+              detecting beats for {channelLabel(fileRow, selectedChannel)}…
+            {/if}
+          </div>
+        {:else if detection.status === 'ok'}
+          <!-- Two stacked rows (count over the details) rather than one long
+               inline sentence; ~33px tall, within the toolbar's own height. -->
+          {@const detail = [
+            detection.meanHr !== null ? `mean HR ${formatHeartRate(detection.meanHr)} bpm` : null,
+            detection.duration !== null ? `duration ${formatDuration(detection.duration)}` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          <div
+            class="detection-summary detection-stats"
+            data-testid="detection-summary"
+            title="Mean HR is the average of each beat's rate (60 ÷ its RR interval in seconds). Duration is the time from the first to the last detected beat."
+          >
+            <span class="detection-stat-primary">{detection.count} beats detected</span>
+            {#if detail}<span class="detection-stat-detail text-muted">{detail}</span>{/if}
+          </div>
+        {:else if detection.status === 'error'}
+          <div class="detection-summary text-danger" data-testid="detection-summary">
+            detection failed: {detection.error}
+          </div>
+        {/if}
+      </div>
     </div>
 
     <span class="toolbar-divider" aria-hidden="true"></span>
@@ -1101,7 +1138,7 @@
          unmount/remount that briefly hides these controls entirely. No
          separate group label here — ArrhythmiaControls already renders its
          own "Arrhythmia detection" label inline with its buttons. -->
-    <div class="toolbar-group toolbar-group-grow">
+    <div class="toolbar-group">
       <ArrhythmiaControls
         path={path}
         channel={activeChannel}
@@ -1124,6 +1161,7 @@
       <span class="toolbar-group-label">Report labels</span>
       <ReportControl {path} />
     </div>
+  </div>
   </div>
 
   {#if nameMismatch}
@@ -1333,7 +1371,7 @@
             </div>
           {/if}
         {:else if persistPending}
-          <p class="text-muted" data-testid="persist-pending">Preparing review data for {activeChannel}…</p>
+          <p class="text-muted" data-testid="persist-pending">Preparing review data for {channelLabel(fileRow, activeChannel)}…</p>
         {:else if persistError && lastPersistedChannel !== activeChannel}
           <div class="banner banner-error" data-testid="persist-error">
             <p>Could not prepare review data: {persistError}</p>
@@ -1504,30 +1542,74 @@
     flex: 1;
   }
 
+  /* Named size container: the toolbar (and ArrhythmiaControls inside it)
+     adapts to the bar's own width, not the window's, so it also responds to
+     the sidebar and the beat panel taking space. */
+  .review-toolbar-wrap {
+    container: review-toolbar / inline-size;
+  }
+
   .review-toolbar {
     display: flex;
-    align-items: center;
+    /* Top-aligned so every group's heading sits on one line. */
+    align-items: flex-start;
+    /* Spare width is shared out evenly between groups and dividers, so the
+       groups spread across the bar with each rule midway between two. */
+    justify-content: space-between;
     gap: var(--space-4);
-    flex-wrap: wrap;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-3) var(--space-5);
+  }
+
+  /* Narrower: the beat detection summary moves under its button (the
+     arrhythmia buttons stack too, see ArrhythmiaControls), keeping one row. */
+  @container review-toolbar (min-width: 1001px) and (max-width: 1160px) {
+    .toolbar-group-row {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }
+
+  /* Too narrow for one row: an even 2 x 2 grid, no rules. */
+  @container review-toolbar (max-width: 1000px) {
+    .review-toolbar {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3) var(--space-5);
+      padding: var(--space-3) var(--space-4);
+    }
+
+    .toolbar-divider {
+      display: none;
+    }
+  }
+
+  @container review-toolbar (max-width: 640px) {
+    .review-toolbar {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   /* One labeled group per concern (Channel / Beat detection / Arrhythmia
      detection) within the single merged toolbar above — a thin
      `.toolbar-divider` between groups does the job the old two-separate-rows
      layout used borders/background for, without the extra row of height. */
+  /* Every group: its heading on top, its controls on a row underneath. */
   .toolbar-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .toolbar-group-row {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: var(--space-2);
-  }
-
-  .toolbar-group-grow {
-    flex: 1;
   }
 
   .toolbar-group-label {
@@ -1546,8 +1628,97 @@
     background: var(--color-border);
   }
 
+  .channel-select-wrap {
+    position: relative;
+    display: flex;
+  }
+
+  .channel-control {
+    display: inline-flex;
+    align-items: stretch;
+  }
+
   .channel-select {
     min-width: 160px;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .channel-rename {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-border);
+    border-left: none;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .channel-rename:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  /* Lift the focused half above its neighbour so its focus ring is not
+     clipped by the shared border. */
+  .channel-select:focus-visible,
+  .channel-rename:focus-visible {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* The face must stay above the select even when the focus rule above lifts
+     the select (its white background would otherwise hide the face while the
+     list is open or the select keeps focus). Clicks pass through to it. */
+  .channel-select-face {
+    z-index: 2;
+  }
+
+  /* Renamed channel: room for two lines, and the select's own (single-line)
+     text hidden behind the face. The open list keeps normal text colour. */
+  .channel-select.has-face {
+    height: 44px;
+    color: transparent;
+  }
+
+  .channel-select.has-face option {
+    color: var(--color-text);
+  }
+
+  .channel-select-face {
+    position: absolute;
+    /* Inset past the border and padding on the left, clear of the arrow on the right. */
+    inset: 1px 28px 1px calc(var(--space-3) + 1px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    line-height: 1.2;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .channel-select:disabled + .channel-select-face {
+    opacity: 0.6;
+  }
+
+  .channel-face-name,
+  .channel-face-original {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .channel-face-name {
+    font-size: var(--font-size-sm);
+    color: var(--color-text);
+  }
+
+  .channel-face-original {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
   }
 
   .detection-summary {

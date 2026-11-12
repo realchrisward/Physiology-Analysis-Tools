@@ -7,6 +7,7 @@ import type {
   BeatSnapResult,
   BeatDeleteResult,
   CategoryUpdateResult,
+  ChannelLabelResult,
   ChannelPersistResult,
   DiscardStateResult,
   FileStateResult,
@@ -20,6 +21,13 @@ export function getFileState(path: string): Promise<FileStateResult> {
 
 export function putChannel(path: string, channel: string): Promise<ChannelPersistResult> {
   return apiPost('/files/channel', 'PUT', { path, channel })
+}
+
+// Gives `channel` a display name in each of `paths`; `null` (or a blank name)
+// goes back to the original. Only the shown name changes — the channel keeps
+// its own name as its key everywhere else.
+export function putChannelLabel(paths: string[], channel: string, label: string | null): Promise<ChannelLabelResult> {
+  return apiPost('/files/channel-label', 'PUT', { paths, channel, label })
 }
 
 export function persistBeats(path: string, channel: string): Promise<PersistBeatsResult> {
