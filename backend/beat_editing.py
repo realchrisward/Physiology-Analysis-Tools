@@ -1,9 +1,9 @@
 """Manual beat editing: adding a beat the detector missed.
 
 Adding is a two-step flow so the technician can check the result before it
-is saved: `/files/beats/snap` suggests the peak nearest a rough click (no
-side effects), and `/files/beats/one` (POST) inserts a beat at an exact
-time. Deleting lives in db_routes.py; the RR/HR fix-up both need is here.
+is saved: `/files/beats/snap` suggests the R peak a rough click was aiming at
+(no side effects), and `/files/beats/one` (POST) inserts a beat at an exact
+time. Both treat beats within SAME_BEAT_S as the same beat. Deleting lives in db_routes.py; the RR/HR fix-up both need is here.
 """
 
 import numpy as np
@@ -24,20 +24,31 @@ from backend.windowing import get_filtered_channel
 
 router = APIRouter(prefix="/files", tags=["beat-editing"])
 
-# How far either side of a rough click the snap looks for a peak: the
-# detector's minimum beat spacing, and never less than 50 ms. Kept tight so a
-# fast heart rate (beats ~130 ms apart) cannot pull the snap onto the wrong
-# beat; the technician can zoom in and place the beat exactly if it misses.
-_MIN_HALF_WINDOW_S = 0.05
+# Two beats closer than this are the same R peak. Deliberately NOT the
+# detector's min_RR: a beat the detector skipped because of min_RR (e.g. a
+# premature beat 50 ms after the last one) is always within min_RR of a
+# detected beat, and is exactly what the technician needs to add by hand.
+SAME_BEAT_S = 0.01
+
+# How far off the click may plausibly be. The frontend sends the time a few
+# screen pixels span at the current zoom; this is the fallback, and the
+# bounds keep a deep zoom-in or a whole-recording view sensible.
+_DEFAULT_SLACK_S = 0.02
+_MIN_SLACK_S = 0.01
+_MAX_SLACK_S = 0.25
+# The snap looks this many slacks either side of the click (never less than
+# _MIN_REACH_S); beyond that the distance falloff rules a peak out anyway.
+_REACH_SLACKS = 4
+_MIN_REACH_S = 0.05
 
 
-def apply_manual_edits(df: pd.DataFrame, edits, min_gap: float) -> pd.DataFrame:
+def apply_manual_edits(df: pd.DataFrame, edits, min_gap: float = SAME_BEAT_S) -> pd.DataFrame:
     """Re-apply a file's hand-made beat edits to a fresh detection result.
 
     Removals drop any detected beat within `min_gap` seconds of the removed
     one (detection can land a sample or two off if settings changed).
     Additions are put back with their original timestamp and time of entry,
-    unless detection now found a beat there itself. RR/HR are then redone
+    unless detection now found that same beat itself. RR/HR are then redone
     for every beat but the first, whose predecessor is not in the table.
     """
     if not edits:
@@ -135,29 +146,54 @@ def _polarity(time, values, beat_ts, settings) -> float:
     return -1.0 if settings.ecg_invert else 1.0
 
 
-def _snap_index(
-    time, values, sign: float, ts: float, half_window: float, beat_ts, min_gap: float
-) -> int | None:
-    """Index of the peak nearest `ts`, ignoring samples that sit on an
-    existing beat (snapping onto a beat that is already there is never the
-    intent). None if the window holds no candidate."""
-    lo = int(np.searchsorted(time, ts - half_window, side="left"))
-    hi = int(np.searchsorted(time, ts + half_window, side="right"))
+def _beat_near(beat_ts, ts: float) -> float | None:
+    """The existing beat that is the same beat as `ts`, if any."""
+    if len(beat_ts) == 0:
+        return None
+    gaps = np.abs(beat_ts - ts)
+    nearest = int(np.argmin(gaps))
+    return float(beat_ts[nearest]) if gaps[nearest] < SAME_BEAT_S else None
+
+
+def _snap_target(
+    time, values, sign: float, ts: float, slack: float, beat_ts
+) -> tuple[int | None, float | None]:
+    """Where a click at `ts` was aiming: the peak with the best prominence
+    after a falloff for its distance from the click, 1 / (1 + (d/slack)^2).
+    Prominence makes the R spike outscore the P/T waves, notches and noise
+    around it; the falloff makes the peak under the click win over a bigger
+    one further away (a small premature beat right after a normal one).
+
+    Existing beats compete like any other peak, so a click on a beat that is
+    already marked is reported as such instead of being pushed onto some
+    lesser bump nearby.
+
+    Returns (sample index, None) for a free peak, (None, beat ts) when the
+    peak aimed at is already a beat, (None, None) when there is no peak.
+    """
+    reach = max(_REACH_SLACKS * slack, _MIN_REACH_S)
+    lo = int(np.searchsorted(time, ts - reach, side="left"))
+    hi = int(np.searchsorted(time, ts + reach, side="right"))
     if hi - lo < 1:
-        return None
-    segment = values[lo:hi] * sign
-    taken = np.zeros(len(segment), dtype=bool)
-    for existing in beat_ts[np.abs(beat_ts - ts) < half_window + min_gap]:
-        taken |= np.abs(time[lo:hi] - existing) < min_gap
-    if taken.all():
-        return None
-    segment = np.where(taken, segment[~taken].min() - 1.0, segment)
-    peaks, _ = scipy.signal.find_peaks(segment)
-    if len(peaks) > 0:
-        return lo + int(peaks[np.argmax(segment[peaks])])
-    # No interior peak (the window is all slope): the highest sample is the
-    # best available answer.
-    return lo + int(np.argmax(segment))
+        return None, None
+    # Peaks are found on a stretch one reach wider each side, then kept only
+    # if inside the reach: find_peaks never reports a segment's end samples
+    # and measures prominence only within the segment, so searching the reach
+    # alone would skip a spike sitting on its edge.
+    ext_lo = int(np.searchsorted(time, ts - 2 * reach, side="left"))
+    ext_hi = int(np.searchsorted(time, ts + 2 * reach, side="right"))
+    peaks, props = scipy.signal.find_peaks(values[ext_lo:ext_hi] * sign, prominence=0)
+    peaks = peaks + ext_lo
+    inside = (peaks >= lo) & (peaks < hi)
+    peaks, prominences = peaks[inside], props["prominences"][inside]
+    if len(peaks) == 0:
+        return None, None
+    distance = np.abs(time[peaks] - ts)
+    best = int(peaks[np.argmax(prominences / (1 + (distance / slack) ** 2))])
+    existing = _beat_near(beat_ts, float(time[best]))
+    if existing is not None:
+        return None, existing
+    return best, None
 
 
 def _prepare(request: Request, payload):
@@ -176,7 +212,6 @@ def _prepare(request: Request, payload):
     time, values = _detection_signal(request, payload.path, payload.channel, cache_entry)
     beat_ts = beat_df["ts"].to_numpy(dtype=float)
     sign = _polarity(time, values, beat_ts, settings)
-    min_gap = settings.min_RR / 1000.0
     return {
         "imported": imported,
         "beat_df": beat_df,
@@ -185,39 +220,28 @@ def _prepare(request: Request, payload):
         "values": values,
         "beat_ts": beat_ts,
         "sign": sign,
-        "min_gap": min_gap,
     }, None
-
-
-def _existing_beat_near(ctx, ts: float) -> float | None:
-    gaps = np.abs(ctx["beat_ts"] - ts)
-    nearest = int(np.argmin(gaps))
-    if gaps[nearest] < ctx["min_gap"]:
-        return float(ctx["beat_ts"][nearest])
-    return None
 
 
 @router.post("/beats/snap", response_model=BeatSnapResult)
 def snap_beat(payload: BeatSnapRequest, request: Request) -> BeatSnapResult:
-    """Suggest where a beat added near `ts` belongs: the peak nearest a rough
-    click. Read-only."""
+    """Suggest where a beat added near `ts` belongs: the R peak the rough
+    click was aiming at. Read-only."""
     ctx, error = _prepare(request, payload)
     if error:
         return BeatSnapResult(status="error", error=error)
 
-    half_window = max(ctx["min_gap"], _MIN_HALF_WINDOW_S)
-    idx = _snap_index(
-        ctx["time"], ctx["values"], ctx["sign"], payload.ts, half_window,
-        ctx["beat_ts"], ctx["min_gap"],
+    slack = payload.slack if payload.slack is not None else _DEFAULT_SLACK_S
+    slack = float(np.clip(slack, _MIN_SLACK_S, _MAX_SLACK_S))
+    idx, existing = _snap_target(
+        ctx["time"], ctx["values"], ctx["sign"], payload.ts, slack, ctx["beat_ts"]
     )
+    if existing is not None:
+        return BeatSnapResult(
+            status="error", error=f"There is already a beat here (t={existing:.3f}s)"
+        )
     if idx is None:
-        existing = _existing_beat_near(ctx, payload.ts)
-        if existing is not None:
-            return BeatSnapResult(
-                status="error", error=f"There is already a beat here (t={existing:.3f}s)"
-            )
-        return BeatSnapResult(status="error", error="No signal near this position")
-
+        return BeatSnapResult(status="error", error="No peak near this position")
     return BeatSnapResult(status="ok", ts=float(ctx["time"][idx]))
 
 
@@ -246,7 +270,7 @@ def _add_beat_locked(payload: BeatAddRequest, request: Request) -> BeatAddResult
         idx -= 1
     new_ts = float(time[idx])
 
-    existing = _existing_beat_near(ctx, new_ts)
+    existing = _beat_near(ctx["beat_ts"], new_ts)
     if existing is not None:
         return BeatAddResult(
             status="error", error=f"There is already a beat here (t={existing:.3f}s)"
@@ -274,7 +298,7 @@ def _add_beat_locked(payload: BeatAddRequest, request: Request) -> BeatAddResult
         r_amplitude = float(values[idx] * ctx["sign"])
 
         added_at = db.record_manual_add(
-            conn, file_row["id"], new_ts, r_amplitude, ctx["min_gap"]
+            conn, file_row["id"], new_ts, r_amplitude, SAME_BEAT_S
         )
         db.insert_beat(conn, file_row["id"], new_ts, rr, r_amplitude, hr, added_at)
 

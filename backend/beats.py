@@ -63,9 +63,7 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
                     )
                     if file_row is not None:
                         df = beat_editing.apply_manual_edits(
-                            df,
-                            db.list_manual_edits(conn, file_row["id"]),
-                            request.app.state.beat_settings.min_RR / 1000.0,
+                            df, db.list_manual_edits(conn, file_row["id"])
                         )
                         # Only when the saved record is for THIS channel: review
                         # decisions belong to the beats of the channel they

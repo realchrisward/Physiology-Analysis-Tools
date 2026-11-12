@@ -1682,18 +1682,27 @@
   async function snapPendingTo(ts: number) {
     addBeatBusy = true
     addBeatError = null
-    const result = await snapBeat(path, channel, ts)
+    // The click is only as precise as a few pixels at this zoom; the backend
+    // weighs peaks by distance against that, so zoomed out a rough click still
+    // finds its peak and zoomed in the peak right under the cursor wins.
+    const slack = chart ? Math.abs(chart.posToVal(BEAT_HIT_TOLERANCE_PX, 'x') - chart.posToVal(0, 'x')) : undefined
+    const result = await snapBeat(path, channel, ts, slack && Number.isFinite(slack) ? slack : undefined)
     addBeatBusy = false
-    if (result.status === 'ok' && result.ts !== null && !result.error) {
-      pendingBeat = { ts: result.ts, source: 'snapped' }
-      const { min, max } = chart?.scales.x ?? {}
-      const currentWidth = min != null && max != null ? max - min : ADD_BEAT_ZOOM_SECONDS
-      const width = Math.min(currentWidth, ADD_BEAT_ZOOM_SECONDS)
-      await setVisibleRange(result.ts - width / 2, result.ts + width / 2)
-      chart?.redraw()
+    const ok = result.status === 'ok' && result.ts !== null && !result.error
+    if (ok) {
+      pendingBeat = { ts: result.ts as number, source: 'snapped' }
     } else {
       addBeatError = result.error ?? 'Could not find a peak here'
     }
+    // Zoom in either way: to check the suggestion, or, when the snap refused
+    // (e.g. the peak it found is already a beat), so the next click is
+    // precise enough to pick out the peak that was meant.
+    const center = ok ? (result.ts as number) : ts
+    const { min, max } = chart?.scales.x ?? {}
+    const currentWidth = min != null && max != null ? max - min : ADD_BEAT_ZOOM_SECONDS
+    const width = Math.min(currentWidth, ADD_BEAT_ZOOM_SECONDS)
+    await setVisibleRange(center - width / 2, center + width / 2)
+    chart?.redraw()
   }
 
   async function handleAddBeatClick(u: uPlot, upEvent: MouseEvent) {

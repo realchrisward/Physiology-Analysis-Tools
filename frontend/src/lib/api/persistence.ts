@@ -56,10 +56,11 @@ export function deleteBadData(path: string, id: number): Promise<BadDataDeleteRe
   return apiPost('/files/bad-data', 'DELETE', { path, id })
 }
 
-// Where a beat added near `ts` belongs: the signal peak nearest the click.
-// Read-only — nothing is saved until `addBeat`.
-export function snapBeat(path: string, channel: string, ts: number): Promise<BeatSnapResult> {
-  return apiPost('/files/beats/snap', 'POST', { path, channel, ts })
+// Where a beat added near `ts` belongs: the R peak the click was aiming at.
+// `slack` is how far off the click may be, in seconds (a few pixels at the
+// current zoom). Read-only — nothing is saved until `addBeat`.
+export function snapBeat(path: string, channel: string, ts: number, slack?: number): Promise<BeatSnapResult> {
+  return apiPost('/files/beats/snap', 'POST', { path, channel, ts, slack })
 }
 
 // Adds a beat the detector missed, at the sample nearest `ts`.

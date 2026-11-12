@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ImportRequest(BaseModel):
@@ -269,6 +269,9 @@ class BeatSnapRequest(BaseModel):
     path: str
     channel: str
     ts: float
+    # How far off the click may plausibly be, in seconds (a few screen pixels
+    # at the current zoom). Optional; the backend has a default.
+    slack: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class BeatSnapResult(BaseModel):
