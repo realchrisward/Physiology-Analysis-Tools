@@ -23,7 +23,7 @@ test('waitForHealth resolves once a real status:ok server comes up', async () =>
     setTimeout(() => server.listen(port, '127.0.0.1', resolve), 300)
   })
 
-  await waitForHealth(port, 3000, state)
+  await waitForHealth(port, 90000, state)
 
   await new Promise((resolve) => server.close(resolve))
 })

@@ -1,6 +1,14 @@
+<script module lang="ts">
+  // The sidebar's filter, kept for the session (not across restarts): it
+  // survives the sidebar collapsing and the screen changing under it.
+  export type StatusFilter = 'all' | 'ready' | 'progress' | 'problems'
+  export const sidebarFilter: { query: string; status: StatusFilter } = $state({ query: '', status: 'all' })
+</script>
+
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { formatRelativeTime } from '../../lib/format'
+  import { matchesQuery } from '../../lib/search'
   import {
     clearFileRegistry,
     fileRegistry,
@@ -20,10 +28,15 @@
     closeFlagProject,
     openFlagProjects,
     openProjectPaths,
+    projectRecordings,
     startFlagListImport,
+    type FlagProject,
+    type FlagProjectAnimal,
   } from '../../lib/stores/flagProjects.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
+  import MenuButton, { type MenuItem } from '../shared/MenuButton.svelte'
+  import SearchField from '../shared/SearchField.svelte'
   import SidebarProjectTree from './SidebarProjectTree.svelte'
   import SidebarRowStatus from './SidebarRowStatus.svelte'
   import SidebarStatusDot from './SidebarStatusDot.svelte'
@@ -37,6 +50,7 @@
     onFileRemoved,
     onSettingsOpen,
     onAboutOpen,
+    onRequestExpand,
   }: {
     collapsed?: boolean
     activePath?: string | null
@@ -55,6 +69,9 @@
     // owned and rendered by App.svelte, so this just reports the click.
     onSettingsOpen?: () => void
     onAboutOpen?: () => void
+    // Ctrl+K on a collapsed sidebar: the shell expands it so the filter can
+    // take the focus.
+    onRequestExpand?: () => void
   } = $props()
 
   // "Opened 5 minutes ago" would go stale on screen, so re-read the clock
@@ -97,8 +114,14 @@
 
   // Files already in this session's registry are omitted here — they're
   // already visible (and openable) in the main list above, so listing them
-  // again under "Recent files" would just be a duplicate entry.
-  let recentOnly = $derived(recentFiles.filter((f) => !fileRegistry.some((row) => row.path === f.path)))
+  // again under "Recent files" would just be a duplicate entry. The filter's
+  // words apply here too (a status does not: these aren't loaded).
+  let recentOnly = $derived(
+    recentFiles.filter(
+      (f) =>
+        !fileRegistry.some((row) => row.path === f.path) && matchesQuery(sidebarFilter.query, f.filename, f.path),
+    ),
+  )
 
   function handleReview(row: FileRow) {
     if (!canOpen(row) || row.defaultChannel === null) return
@@ -112,9 +135,133 @@
   let projectPaths = $derived(openProjectPaths())
   let fileRows = $derived(fileRegistry.filter((row) => !projectPaths.has(row.path)))
   let hasAnything = $derived(fileRegistry.length > 0 || projects.length > 0)
-  // The "Files" label heads the list unless only projects are open, in which
+
+  // ---- Filter -------------------------------------------------------------
+  // Text (file name or path; for FP/FN reviews also the project and animal
+  // IDs) and a status group. Both narrow the files and the project trees.
+  const STATUS_GROUPS: Record<Exclude<StatusFilter, 'all'>, FileRow['status'][]> = {
+    ready: ['ready', 'detected'],
+    progress: ['queued', 'detecting'],
+    problems: ['error', 'detection-error'],
+  }
+  const STATUS_FILTER_LABEL: Record<StatusFilter, string> = {
+    all: 'All files',
+    ready: 'Ready to review',
+    progress: 'In progress',
+    problems: 'Problems',
+  }
+
+  let filtering = $derived(sidebarFilter.query.trim() !== '' || sidebarFilter.status !== 'all')
+  let rowsByPath = $derived(new Map(fileRegistry.map((row) => [row.path, row])))
+
+  function statusMatches(status: FileRow['status'] | undefined): boolean {
+    if (sidebarFilter.status === 'all') return true
+    return status !== undefined && STATUS_GROUPS[sidebarFilter.status].includes(status)
+  }
+
+  function rowMatches(row: FileRow): boolean {
+    return statusMatches(row.status) && matchesQuery(sidebarFilter.query, row.filename, row.path)
+  }
+
+  // A recording of a project shows when its status fits and the words are
+  // found in the project's name or in the recording itself (so a project's
+  // name shows all its recordings, an animal ID just that one).
+  function animalMatches(project: FlagProject, animal: FlagProjectAnimal): boolean {
+    const row = rowsByPath.get(animal.filePath ?? '')
+    if (!statusMatches(row?.status)) return false
+    return matchesQuery(
+      sidebarFilter.query,
+      project.name,
+      project.csvPath,
+      animal.animalId,
+      row?.filename,
+      animal.filePath,
+    )
+  }
+
+  let visibleFileRows = $derived(filtering ? fileRows.filter(rowMatches) : fileRows)
+  let visibleProjects = $derived(
+    filtering
+      ? projects.filter(
+          (project) =>
+            projectRecordings(project).some((animal) => animalMatches(project, animal)) ||
+            // A project with no recordings found yet still answers to its name.
+            (sidebarFilter.status === 'all' && matchesQuery(sidebarFilter.query, project.name, project.csvPath)),
+        )
+      : projects,
+  )
+  let nothingMatches = $derived(filtering && hasAnything && visibleFileRows.length === 0 && visibleProjects.length === 0)
+
+  // The "Files" label heads the list unless only projects are shown, in which
   // case "FP/FN reviews" takes the top spot (and carries the Clear button).
-  let filesFirst = $derived(fileRows.length > 0 || projects.length === 0)
+  let filesFirst = $derived(visibleFileRows.length > 0 || visibleProjects.length === 0)
+
+  function clearFilter() {
+    sidebarFilter.query = ''
+    sidebarFilter.status = 'all'
+  }
+
+  let statusItems: MenuItem[] = $derived(
+    (Object.keys(STATUS_FILTER_LABEL) as StatusFilter[]).map((status) => ({
+      id: status,
+      label: STATUS_FILTER_LABEL[status],
+      checked: sidebarFilter.status === status,
+      testid: `sidebar-status-filter-${status}`,
+      onSelect: () => (sidebarFilter.status = status),
+    })),
+  )
+
+  let importItems: MenuItem[] = $derived([
+    {
+      id: 'files',
+      label: 'Files…',
+      icon: 'file-plus',
+      testid: 'sidebar-import-files-button',
+      disabled: importQueue.importing,
+      onSelect: () => void handleImportFiles(),
+    },
+    {
+      id: 'folder',
+      label: 'Folder…',
+      icon: 'folder',
+      testid: 'sidebar-import-folder-button',
+      disabled: importQueue.importing,
+      onSelect: () => void handleImportFolder(),
+    },
+    {
+      id: 'flags',
+      label: 'FP/FN list…',
+      icon: 'target',
+      testid: 'sidebar-import-flag-list-button',
+      disabled: importQueue.importing,
+      onSelect: () => void startFlagListImport(),
+    },
+  ])
+
+  let searchInput: HTMLInputElement | undefined = $state()
+
+  // Ctrl+K (Cmd+K) jumps to the filter from anywhere, unless a dialog owns
+  // the keyboard.
+  async function focusFilter() {
+    if (collapsed) {
+      onRequestExpand?.()
+      await tick()
+    }
+    searchInput?.focus()
+    searchInput?.select()
+  }
+
+  onMount(() => {
+    function onKeydown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      if (event.key.toLowerCase() !== 'k') return
+      if (document.querySelector('[role="dialog"]')) return
+      event.preventDefault()
+      void focusFilter()
+    }
+    window.addEventListener('keydown', onKeydown)
+    return () => window.removeEventListener('keydown', onKeydown)
+  })
 
   function handleClearFiles() {
     // Clear means everything: closing the projects also takes their
@@ -167,42 +314,58 @@
 
 <aside class="sidebar" class:collapsed data-testid="sidebar" bind:this={asideEl}>
   <div class="sidebar-import">
-    <button
-      type="button"
-      class="btn btn-sm sidebar-import-btn"
-      data-testid="sidebar-import-files-button"
-      onclick={handleImportFiles}
-      disabled={importQueue.importing}
-      title="Import Files"
-      aria-label="Import Files"
+    <!-- One Import menu (files, a folder, an FP/FN list) instead of three
+         stacked buttons, leaving the room for the filter below. -->
+    <MenuButton
+      items={importItems}
+      label={importQueue.importing ? 'Import (wait for the current import to finish)' : 'Import'}
+      testid="sidebar-import-menu-button"
+      triggerClass="btn btn-sm sidebar-import-btn"
+      placement={collapsed ? 'right' : 'below'}
     >
-      <Icon name="file-plus" size={16} />
-      {#if !collapsed}<span>Import Files</span>{/if}
-    </button>
-    <button
-      type="button"
-      class="btn btn-sm sidebar-import-btn"
-      data-testid="sidebar-import-folder-button"
-      onclick={handleImportFolder}
-      disabled={importQueue.importing}
-      title="Import Folder"
-      aria-label="Import Folder"
-    >
-      <Icon name="folder" size={16} />
-      {#if !collapsed}<span>Import Folder</span>{/if}
-    </button>
-    <button
-      type="button"
-      class="btn btn-sm sidebar-import-btn"
-      data-testid="sidebar-import-flag-list-button"
-      onclick={() => startFlagListImport()}
-      disabled={importQueue.importing}
-      title="Import FP/FN list"
-      aria-label="Import FP/FN list"
-    >
-      <Icon name="target" size={16} />
-      {#if !collapsed}<span>FP/FN list</span>{/if}
-    </button>
+      {#snippet trigger()}
+        <Icon name="plus" size={16} />
+        {#if !collapsed}<span>Import</span><Icon name="chevron-down" size={14} />{/if}
+      {/snippet}
+    </MenuButton>
+
+    {#if !collapsed}
+      <div class="sidebar-filter">
+        <SearchField
+          bind:value={sidebarFilter.query}
+          bind:input={searchInput}
+          placeholder="Filter files…  Ctrl+K"
+          label="Filter files"
+          testid="sidebar-filter-input"
+          size="sm"
+        />
+        <span class="sidebar-filter-status" class:active={sidebarFilter.status !== 'all'}>
+          <MenuButton
+            items={statusItems}
+            label={`Show: ${STATUS_FILTER_LABEL[sidebarFilter.status]}`}
+            testid="sidebar-status-filter-button"
+            triggerClass="icon-btn sidebar-filter-btn"
+          >
+            {#snippet trigger()}
+              <Icon name="filter" size={14} />
+            {/snippet}
+          </MenuButton>
+        </span>
+      </div>
+    {:else}
+      <!-- Highlighted while a filter narrows the rail below it. -->
+      <button
+        type="button"
+        class="btn btn-sm sidebar-import-btn"
+        class:sidebar-filter-on={filtering}
+        data-testid="sidebar-search-collapsed-button"
+        title={filtering ? 'Files are filtered — click to change (Ctrl+K)' : 'Filter files (Ctrl+K)'}
+        aria-label={filtering ? 'Files are filtered; change the filter' : 'Filter files'}
+        onclick={() => void focusFilter()}
+      >
+        <Icon name="search" size={16} />
+      </button>
+    {/if}
   </div>
 
   {#if importQueue.detecting && !collapsed}
@@ -214,7 +377,12 @@
 
   {#if !collapsed}
     <div class="sidebar-list-header">
-      <h3 class="sidebar-list-label">{filesFirst ? 'Files' : 'FP/FN reviews'}</h3>
+      <h3 class="sidebar-list-label" data-testid="sidebar-list-label">
+        {filesFirst ? 'Files' : 'FP/FN reviews'}
+        {#if filtering && filesFirst && fileRows.length > 0}
+          <span class="sidebar-list-count">· {visibleFileRows.length} of {fileRows.length}</span>
+        {/if}
+      </h3>
       {#if hasAnything}
         <button
           type="button"
@@ -230,7 +398,7 @@
     </div>
   {/if}
   <div class="sidebar-list" data-testid="sidebar-file-list">
-    {#each fileRows as row (row.path)}
+    {#each visibleFileRows as row (row.path)}
       <!-- The whole row opens the file: a click anywhere on it, or Enter/Space
            when focused. The X inside it is its own button. -->
       <div
@@ -267,14 +435,32 @@
         {/if}
       </div>
     {/each}
-    {#if projects.length > 0}
+    {#if visibleProjects.length > 0}
       {#if filesFirst && !collapsed}
         <h3 class="sidebar-list-label sidebar-group-label">FP/FN reviews</h3>
       {/if}
-      <SidebarProjectTree {projects} {collapsed} {activePath} {onFileRemoved} />
+      <SidebarProjectTree
+        projects={visibleProjects}
+        {collapsed}
+        {activePath}
+        {onFileRemoved}
+        animalFilter={filtering ? animalMatches : null}
+      />
     {/if}
     {#if !hasAnything && !collapsed}
       <p class="sidebar-empty text-muted">No files imported yet</p>
+    {/if}
+    {#if nothingMatches && !collapsed}
+      <div class="sidebar-empty text-muted" data-testid="sidebar-no-matches">
+        <p>
+          {sidebarFilter.query.trim()
+            ? `No files match “${sidebarFilter.query.trim()}”`
+            : `No files are ${STATUS_FILTER_LABEL[sidebarFilter.status].toLowerCase()}`}
+        </p>
+        <button type="button" class="btn btn-sm" data-testid="sidebar-clear-filter-button" onclick={clearFilter}>
+          Clear filter
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -293,7 +479,9 @@
       {#if recentSectionOpen}
         <div class="sidebar-recent-list" data-testid="sidebar-recent-list">
           {#if recentOnly.length === 0}
-            <p class="sidebar-empty text-muted">No recent files</p>
+            <p class="sidebar-empty text-muted">
+              {sidebarFilter.query.trim() ? 'No recent files match' : 'No recent files'}
+            </p>
           {:else}
             {#each recentOnly as file (file.path)}
               <button
@@ -402,14 +590,60 @@
     align-items: center;
   }
 
-  .sidebar-import-btn {
+  .sidebar-import :global(.sidebar-import-btn) {
     justify-content: center;
   }
 
-  .sidebar.collapsed .sidebar-import-btn {
+  .sidebar.collapsed .sidebar-import :global(.sidebar-import-btn) {
     width: 32px;
     height: 32px;
     padding: 0;
+  }
+
+  .sidebar-filter {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .sidebar-filter-status {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .sidebar-filter-status :global(.sidebar-filter-btn) {
+    width: 30px;
+    height: 30px;
+  }
+
+  /* A status filter is on: mark the button so a short list isn't a mystery. */
+  .sidebar-filter-status.active :global(.sidebar-filter-btn) {
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+  }
+
+  .sidebar-filter-status.active::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    pointer-events: none;
+  }
+
+  .sidebar-import .sidebar-filter-on {
+    border-color: var(--color-accent);
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+  }
+
+  .sidebar-list-count {
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .sidebar-list-header {

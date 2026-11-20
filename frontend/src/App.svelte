@@ -11,6 +11,7 @@
   import { themeState } from './lib/stores/theme.svelte'
   import { autoOpenRequest, fileRegistry, reviewNavigation, type ReviewSelection } from './lib/stores/fileRegistry.svelte'
   import { recordRecentFile } from './lib/stores/recentFiles.svelte'
+  import { reviewReload } from './lib/stores/reviewReload.svelte'
   import { closeFlagImportDialog, flagImportDialog, flagSession, getFlagProject } from './lib/stores/flagProjects.svelte'
   import {
     answerLeave,
@@ -206,6 +207,7 @@
     onFileRemoved={handleFileRemoved}
     onSettingsOpen={() => (settingsOpen = true)}
     onAboutOpen={() => (aboutOpen = true)}
+    onRequestExpand={() => (sidebarCollapsed = false)}
   />
 
   <main class="main-content">
@@ -224,7 +226,10 @@
            `initialChannel`). Forcing a full remount on path change is the
            same "start clean" approach already used for `{#key
            activeChannel}` inside EcgGraph. -->
-      {#key shownFile.path}
+      <!-- …and on the recording's reload counter: a report replacing its
+           review (or a backup being restored) remounts it the same way, so it
+           reads the saved review again from scratch. -->
+      {#key `${shownFile.path}\n${reviewReload.seq[shownFile.path] ?? 0}`}
         <ReviewWorkspace
           path={shownFile.path}
           channels={shownFile.channels}

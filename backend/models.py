@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -209,6 +209,16 @@ class BadDataMark(BaseModel):
     stop: float
 
 
+class ReviewBackupInfo(BaseModel):
+    """A saved review copied aside before a report replaced it (see
+    db.create_backup); restorable until `expires_at`."""
+
+    created_at: str
+    expires_at: str
+    # The report that replaced the review this backup holds.
+    replaced_by: str | None = None
+
+
 class FileStateResult(BaseModel):
     status: str
     found: bool = False
@@ -217,7 +227,38 @@ class FileStateResult(BaseModel):
     bad_data_marks: list[BadDataMark] = []
     beat_settings: BeatSettingsModel | None = None
     arrhythmia_settings: ArrhythmiaSettingsModel | None = None
+    # The report the saved review was taken from, if it was ("Replace my
+    # review with this report"), and when (ISO, UTC).
+    source_report: str | None = None
+    source_report_at: str | None = None
+    # The newest unexpired backup of the review before a report replaced it.
+    backup: ReviewBackupInfo | None = None
     error: str | None = None
+
+
+class FileStateSummaryResult(BaseModel):
+    """Counts of what is saved for a file, without the beats themselves."""
+
+    status: str
+    found: bool = False
+    channel: str | None = None
+    beats: int = 0
+    reviewed: int = 0
+    bad_data_marks: int = 0
+    source_report: str | None = None
+    backup: ReviewBackupInfo | None = None
+    error: str | None = None
+
+
+class RestoreBackupRequest(BaseModel):
+    path: str
+
+
+class RestoreBackupResult(BaseModel):
+    status: str
+    error: str | None = None
+    # The backup made of the review the restore replaced, if it had any.
+    kept: ReviewBackupInfo | None = None
 
 
 class ChannelPersistRequest(BaseModel):
@@ -538,6 +579,34 @@ class ReportNavigationResult(BaseModel):
     # not run, or a restored recording whose flags are empty): a beat we
     # haven't reviewed then has no decision, so its agreement is 'unknown'.
     has_our_flags: bool = False
+    # How many report beats have each agreement (agree, report_only,
+    # ours_only, pending, unmatched, unknown).
+    agreement_counts: dict[str, int] = {}
+
+
+class ReportApplyRequest(BaseModel):
+    recording_path: str
+    # The report the technician previewed: refused if another one has been
+    # attached since.
+    report_path: str
+    # The channel the report's beats are saved against.
+    channel: str
+    # 'keep': copy the current saved review aside first (restorable for
+    # db.BACKUP_RETENTION_DAYS days); 'none': replace it outright.
+    backup: Literal["keep", "none"] = "keep"
+
+
+class ReportApplyResult(BaseModel):
+    status: str
+    error: str | None = None
+    beats: int = 0
+    reviewed: int = 0
+    bad_data_marks: int = 0
+    # Report beats left out because they lie outside the recording.
+    skipped_outside: int = 0
+    mean_hr: float | None = None
+    duration: float | None = None
+    backup: ReviewBackupInfo | None = None
 
 
 class ReportBeatResult(BaseModel):

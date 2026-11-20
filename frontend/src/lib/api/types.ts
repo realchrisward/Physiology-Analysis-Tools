@@ -204,6 +204,15 @@ export interface BadDataMark {
   stop: number
 }
 
+// A saved review copied aside before a report replaced it; restorable until
+// `expires_at` (ISO, UTC).
+export interface ReviewBackupInfo {
+  created_at: string
+  expires_at: string
+  // The report that replaced the review this backup holds.
+  replaced_by: string | null
+}
+
 export interface FileStateResult {
   status: string
   found: boolean
@@ -212,7 +221,31 @@ export interface FileStateResult {
   bad_data_marks: BadDataMark[]
   beat_settings: BeatSettingsModel | null
   arrhythmia_settings: ArrhythmiaSettingsModel | null
+  // The report the saved review was taken from, and when (ISO, UTC).
+  source_report?: string | null
+  source_report_at?: string | null
+  backup?: ReviewBackupInfo | null
   error: string | null
+}
+
+// Counts of what is saved for a file, without the beats themselves.
+export interface FileStateSummaryResult {
+  status: string
+  found: boolean
+  channel: string | null
+  beats: number
+  reviewed: number
+  bad_data_marks: number
+  source_report: string | null
+  backup: ReviewBackupInfo | null
+  error: string | null
+}
+
+export interface RestoreBackupResult {
+  status: string
+  error: string | null
+  // The backup made of the review the restore replaced (restoring is a swap).
+  kept?: ReviewBackupInfo | null
 }
 
 export interface ChannelPersistResult {
@@ -397,6 +430,23 @@ export interface ReportNavigationResult {
   extra_ours?: number
   has_our_beats?: boolean
   has_our_flags?: boolean
+  agreement_counts?: Partial<Record<ReportAgreement, number>>
+}
+
+// What to do with the saved review before a report replaces it.
+export type ReportBackupChoice = 'keep' | 'none'
+
+export interface ReportApplyResult {
+  status: 'ok' | 'error'
+  error?: string | null
+  beats?: number
+  reviewed?: number
+  bad_data_marks?: number
+  // Report beats left out because they lie outside the recording.
+  skipped_outside?: number
+  mean_hr?: number | null
+  duration?: number | null
+  backup?: ReviewBackupInfo | null
 }
 
 export interface ReportBeatResult {

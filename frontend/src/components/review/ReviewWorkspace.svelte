@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
   import { detectArrhythmias, type ArrhythmiaMethod } from '../../lib/api/arrhythmia'
-  import { formatDuration, formatHeartRate } from '../../lib/format'
+  import { formatDate, formatDuration, formatHeartRate } from '../../lib/format'
   import { getBeatsOfInterest } from '../../lib/api/windowing'
   import {
     discardFileState,
@@ -10,12 +10,15 @@
     getFileState,
     persistBeats,
     putChannel,
+    restoreReviewBackup,
   } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
   import ReportBeatInfo from './ReportBeatInfo.svelte'
   import ReportControl from './ReportControl.svelte'
+  import ReportUseDialog, { type BackupMode } from './ReportUseDialog.svelte'
+  import { reloadReview } from '../../lib/stores/reviewReload.svelte'
   import Icon from '../shared/Icon.svelte'
   import { clearArrhythmiaRuns, getArrhythmiaRuns, markArrhythmiaRan } from '../../lib/stores/arrhythmiaRuns.svelte'
   import { channelLabel, fileRegistry } from '../../lib/stores/fileRegistry.svelte'
@@ -29,13 +32,18 @@
   } from '../../lib/stores/reviewGuard.svelte'
   import {
     attachReport,
+    cancelChoice,
+    chooseCompare,
     detachReport,
+    dismissReplaceNotice,
     dismissReportSuggestion,
+    getReplaceNotice,
     getReportSession,
     getReportSuggestion,
     isReportKept,
     keepReport,
     refreshReportNavigation,
+    replaceWithReport,
     restoreLinkedReport,
     suggestReport,
   } from '../../lib/stores/reports.svelte'
@@ -338,8 +346,10 @@
   function scheduleReportSync() {
     if (destroyed) return
     const status = getReportSession(path).status
-    if (status === 'loading') {
+    if (status === 'loading' || status === 'choosing') {
       reportSyncWaitingForLoad = true
+      // The dialog shows how well the report matches our beats: keep it true.
+      if (status === 'choosing') void refreshReportNavigation(path)
       return
     }
     if (status !== 'ready') return
@@ -421,6 +431,9 @@
     event.preventDefault()
     dragDepth = 0
     dragging = false
+    // The report dialog is up: a second report must not swap the first one
+    // out from under the choice being made about it.
+    if (reportDialogOpen) return
 
     const files = Array.from(event.dataTransfer?.files ?? [])
     if (files.length !== 1) {
@@ -443,8 +456,114 @@
       return
     }
     dropMessage = null
-    void attachReport(path, filePath)
+    void attachReport(path, filePath, { ask: true })
   }
+
+  // ---- Compare with, or replace the review with, a report -----------------
+  // A report the technician just loaded waits in `choosing` until they pick
+  // what it is for; one already being compared with can be adopted as the
+  // review from the toolbar popover ("Use as my review…"). Both go through
+  // ReportUseDialog, which gathers the choice; carrying it out is here.
+  let useAsReviewRequested: boolean = $state(false)
+  let reportDialogOpen = $derived(
+    reportSession.status === 'choosing' || (useAsReviewRequested && reportSession.status === 'ready'),
+  )
+  // The request only stands while that report is being compared with.
+  $effect(() => {
+    if (reportSession.status !== 'ready') useAsReviewRequested = false
+  })
+
+  function handleReportCompare() {
+    chooseCompare(path)
+    // The dialog showed the file-name warning, and comparing anyway answers
+    // it: the "Keep it?" strip must not ask a second time.
+    if (getReportSession(path).summary?.name_matches_recording === false) keepReport(path)
+  }
+
+  function handleReportUseCancel() {
+    if (reportSession.status === 'choosing') void cancelChoice(path)
+    useAsReviewRequested = false
+  }
+
+  // Resolves to a message for the dialog, or null once the review is replaced
+  // (the workspace then reloads from the saved review).
+  async function handleReportReplace(channel: string, backup: BackupMode): Promise<string | null> {
+    if (hasPendingUncertain() && !(await guardBeatChange())) {
+      return 'Nothing was replaced: confirm or reject the open beat first.'
+    }
+    if (backup === 'export') {
+      const stem = fileNameOf(path).replace(/\.[^./\\]+$/, '')
+      let outputPath: string | null | undefined
+      try {
+        outputPath = await window.api?.pickReportSavePath(`${stem}-review-before-replace.xlsx`)
+      } catch (err) {
+        return `Could not open the save dialog: ${err instanceof Error ? err.message : String(err)}`
+      }
+      if (!outputPath) {
+        return window.api
+          ? 'Export cancelled, so nothing was replaced.'
+          : 'Exporting needs the desktop app. Choose another option.'
+      }
+      const exported = await generateReport(path, outputPath)
+      if (exported.status !== 'ok' || exported.error) {
+        return `Could not export your review (${exported.error ?? 'unknown error'}), so nothing was replaced.`
+      }
+    }
+
+    const result = await replaceWithReport(path, channel, backup === 'keep' ? 'keep' : 'none')
+    if (result.status !== 'ok' || result.error) return result.error ?? 'Could not replace the review.'
+
+    // The sidebar row shows the beats the recording has now.
+    const row = fileRegistry.find((candidate) => candidate.path === path)
+    if (row) {
+      row.beatCount = result.beats ?? row.beatCount
+      row.meanHr = result.mean_hr ?? null
+      if (row.status === 'ready' || row.status === 'detection-error') {
+        row.status = 'detected'
+        row.error = null
+      }
+    }
+    // The flags are the report's now, not the output of a run made here.
+    clearArrhythmiaRuns(path)
+    clearPendingUncertain(path)
+    useAsReviewRequested = false
+    reloadReview(path)
+    return null
+  }
+
+  // ---- Restoring the review a report replaced -----------------------------
+  // A swap: the backend keeps the review it replaces as a backup in turn.
+  let restoringBackup: boolean = $state(false)
+  let restoreError: string | null = $state(null)
+  // The banner's Restore asks once before switching.
+  let confirmingRestore: boolean = $state(false)
+
+  async function handleRestoreBackup() {
+    if (restoringBackup) return
+    // It drops the open beat along with the rest of the current review.
+    if (hasPendingUncertain() && !(await guardBeatChange())) return
+    restoringBackup = true
+    restoreError = null
+    try {
+      const result = await restoreReviewBackup(path)
+      if (result.status !== 'ok' || result.error) {
+        if (!destroyed) restoreError = result.error ?? 'Could not restore the previous review.'
+        return
+      }
+      clearArrhythmiaRuns(path)
+      clearPendingUncertain(path)
+      reloadReview(path)
+    } finally {
+      if (!destroyed) restoringBackup = false
+    }
+  }
+
+  // Shown once, right after a report replaced the review: this mount (the
+  // reload that followed) takes the notice out of the store, so coming back
+  // to the recording later shows the ordinary "picked up" banner instead.
+  // svelte-ignore state_referenced_locally
+  let replaceNotice = $state(getReplaceNotice(path))
+  untrack(() => dismissReplaceNotice(path))
 
   // FP/FN review: the beats a model flagged in THIS recording, if it belongs
   // to an open project — highlighted on the graph, which also opens zoomed on
@@ -477,6 +596,9 @@
   // channel, not on every reactive re-run.
   let autoArrhythmiaChannel: string | null = null
   let autoArrhythmiaRunning: boolean = $state(false)
+  // The channel whose saved review was taken from a report (set by hydration):
+  // its flags are the report's, so the automatic run leaves them alone.
+  let reportReviewChannel: string | null = null
   // Arrhythmia methods that have produced results for the ACTIVE channel,
   // shown as green "done" buttons in ArrhythmiaControls. Held in a session
   // store (not here) because this component is remounted per file, and the
@@ -558,6 +680,8 @@
   $effect(() => {
     if (!hydrationChecked) return
     const channel = activeChannel
+    // A graph remounted on the same channel ("Start fresh") is a new start too.
+    void graphEpoch
     if (!channel || autoArrhythmiaChannel === channel) return
     autoArrhythmiaChannel = channel
 
@@ -570,6 +694,7 @@
       if (
         state === 'has-beats' &&
         beatsOfInterest.length === 0 &&
+        channel !== reportReviewChannel &&
         !getArrhythmiaRuns(path, channel).includes('heuristic')
       ) {
         await autoRunArrhythmiaDetection(channel)
@@ -647,8 +772,38 @@
 
   // Set when mount-time hydration found prior work for this file, so the
   // banner can say what was brought back. `null` = started fresh.
-  let restored: { reviewedBeats: number; totalBeats: number; marks: number } | null = $state(null)
+  // Bumped to remount the graph on the same channel (after "Start fresh"):
+  // see handleStartFresh.
+  let graphEpoch: number = $state(0)
+
+  let restored: {
+    reviewedBeats: number
+    totalBeats: number
+    marks: number
+    // The report the saved review was taken from, and when (ISO).
+    sourceReport: string | null
+    sourceReportAt: string | null
+    // When the newest backup (of the review before a report replaced it) was
+    // made and when it expires (ISO), if there is one.
+    backupCreatedAt: string | null
+    backupExpiresAt: string | null
+  } | null = $state(null)
   let discarding: boolean = $state(false)
+
+  // Replacing while beats are being detected would race the detection
+  // writing its own beats (the backend discards such a result, but the
+  // technician would only see the detection fail).
+  // Likewise an arrhythmia run or a save of the beats still on its way: it
+  // would land on top of the replaced review.
+  let replaceBlockedReason = $derived(
+    detection.status === 'pending' || fileRow?.status === 'queued' || fileRow?.status === 'detecting'
+      ? 'Beat detection is still running for this recording. You can replace the review once it has finished.'
+      : autoArrhythmiaRunning || persistPending
+        ? 'The review is still being saved. You can replace it in a moment.'
+        : discarding
+          ? 'The saved review is being discarded ("Start fresh"). Try again in a moment.'
+          : null,
+  )
 
   // Throws away the restored session and re-detects from scratch — the
   // escape hatch for "this saved review is wrong, start over".
@@ -668,11 +823,22 @@
       beatsOfInterest = []
       typicalRr = null
       lastPersistedChannel = null
+      // The saved bad-data marks are gone with the rest (including any a
+      // report brought in when it replaced the review).
+      initialBadDataMarks = []
       clearArrhythmiaRuns(path)
       // Let the automatic on-load run fire again for this channel now that
-      // there is nothing persisted to inherit.
+      // there is nothing persisted to inherit (a report's flags included).
       autoArrhythmiaChannel = null
+      reportReviewChannel = null
       await handleChannelChange()
+      if (destroyed) return
+      // The graph seeds its bad-data marks once, on mount, and is remounted
+      // only when the channel CHANGES: re-detecting the same channel left the
+      // discarded marks (and beats) on screen until the file was reopened.
+      // A fresh mount reads the new beats and no marks; the bump also lets
+      // the automatic arrhythmia run (keyed on the same counter) fire again.
+      graphEpoch += 1
     } finally {
       if (!destroyed) discarding = false
     }
@@ -746,10 +912,24 @@
         // Restoring silently means a technician can't tell whether they're
         // continuing prior work or starting over — and can't choose. Both
         // are shown, and can be acted on, via the banner below.
+        const beats = result.beats ?? []
         restored = {
-          reviewedBeats: (result.beats ?? []).filter((b) => b.review_state !== 'unreviewed').length,
-          totalBeats: (result.beats ?? []).length,
+          reviewedBeats: beats.filter((b) => b.review_state !== 'unreviewed').length,
+          totalBeats: beats.length,
           marks: (result.bad_data_marks ?? []).length,
+          sourceReport: result.source_report ?? null,
+          sourceReportAt: result.source_report_at ?? null,
+          backupCreatedAt: result.backup?.created_at ?? null,
+          backupExpiresAt: result.backup?.expires_at ?? null,
+        }
+        // A review taken from a report carries the report's arrhythmia flags:
+        // the automatic heuristic run must not overwrite them with ours.
+        if (result.source_report) reportReviewChannel = result.channel
+        // The sidebar row was filled in by detection at import; what the
+        // recording has is the saved review.
+        if (fileRow && fileRow.status === 'detected' && beats.length > 0 && fileRow.beatCount !== beats.length) {
+          fileRow.beatCount = beats.length
+          fileRow.meanHr = beats.reduce((sum, beat) => sum + beat.hr, 0) / beats.length
         }
       }
     } finally {
@@ -937,6 +1117,8 @@
       // keyed/mounted against.
       activeChannel = channel
       clearArrhythmiaRuns(path)
+      // Freshly detected beats carry no report flags, on any channel.
+      reportReviewChannel = null
       // A different channel is a different set of beats for the report to match.
       scheduleReportSync()
       // Remember this channel choice for next time this file is reopened
@@ -1155,11 +1337,12 @@
 
     <span class="toolbar-divider" aria-hidden="true"></span>
 
-    <!-- Report labels: an xlsx report with per-beat labels, shown read-only
-         over this recording. A per-file action like the two groups above. -->
+    <!-- Report: an xlsx report with per-beat labels, compared with this
+         recording's review or adopted as it. A per-file action like the two
+         groups above. -->
     <div class="toolbar-group">
-      <span class="toolbar-group-label">Report labels</span>
-      <ReportControl {path} />
+      <span class="toolbar-group-label">Report</span>
+      <ReportControl {path} onUseAsReview={() => (useAsReviewRequested = true)} />
     </div>
   </div>
   </div>
@@ -1197,7 +1380,7 @@
         type="button"
         class="btn btn-sm"
         data-testid="report-suggestion-load-button"
-        onclick={() => void attachReport(path, candidate)}
+        onclick={() => void attachReport(path, candidate, { ask: true })}
       >
         Load
       </button>
@@ -1235,20 +1418,105 @@
     </div>
   {/if}
 
-  {#if restored}
+  {#if replaceNotice}
+    <!-- Right after a report replaced the review: says what came in, and
+         offers the backup straight away. -->
+    <div class="restore-banner" data-testid="review-replaced-banner" role="status">
+      <Icon name="check-circle" size={14} />
+      <span>
+        Review replaced with <strong>{replaceNotice.reportName}</strong> —
+        <strong>{replaceNotice.beats.toLocaleString()}</strong> beats,
+        <strong>{replaceNotice.reviewed.toLocaleString()}</strong> reviewed,
+        <strong>{replaceNotice.badDataMarks}</strong> bad-data {replaceNotice.badDataMarks === 1 ? 'range' : 'ranges'}.
+        {#if replaceNotice.skippedOutside > 0}
+          {replaceNotice.skippedOutside.toLocaleString()} report beats outside the recording were left out.
+        {/if}
+      </span>
+      {#if replaceNotice.backupExpiresAt}
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-testid="undo-replace-button"
+          title={`Put back the review you had before (backup kept until ${formatDate(replaceNotice.backupExpiresAt)})`}
+          disabled={restoringBackup}
+          onclick={handleRestoreBackup}
+        >
+          {restoringBackup ? 'Restoring…' : 'Undo'}
+        </button>
+      {/if}
+      {#if restoreError}<span class="text-danger" data-testid="restore-error">{restoreError}</span>{/if}
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="dismiss-replaced-banner"
+        aria-label="Dismiss"
+        onclick={() => {
+          replaceNotice = null
+          restored = null
+        }}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {:else if restored}
     <div class="restore-banner" data-testid="restored-session-banner">
       <Icon name="check-circle" size={14} />
       <span>
-        Picked up where you left off — <strong>{restored.totalBeats}</strong> saved beats,
+        Picked up where you left off —
+        {#if restored.sourceReport}
+          review imported from <strong title={restored.sourceReport}>{fileNameOf(restored.sourceReport)}</strong
+          >{#if restored.sourceReportAt}&nbsp;on {formatDate(restored.sourceReportAt)}{/if},
+        {/if}
+        <strong>{restored.totalBeats}</strong> saved beats,
         <strong>{restored.reviewedBeats}</strong> already reviewed, and
         <strong>{restored.marks}</strong> bad-data {restored.marks === 1 ? 'range' : 'ranges'}.
       </span>
+      {#if restored.backupExpiresAt}
+        {#if confirmingRestore}
+          <!-- Asked first: the review on screen is swapped out (and kept as a
+               backup), which is easy to do by accident from a banner. -->
+          <span class="restore-confirm" data-testid="restore-backup-confirm-text">
+            Switch to the review backed up on {formatDate(restored.backupCreatedAt ?? restored.backupExpiresAt)}?
+            The current one is kept as a backup.
+          </span>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            data-testid="restore-backup-confirm"
+            disabled={restoringBackup || discarding}
+            onclick={handleRestoreBackup}
+          >
+            {restoringBackup ? 'Restoring…' : 'Switch'}
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="restore-backup-cancel"
+            disabled={restoringBackup}
+            onclick={() => (confirmingRestore = false)}
+          >
+            Cancel
+          </button>
+        {:else}
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="restore-backup-button"
+            title={`Put back the review saved before a report replaced it (backup kept until ${formatDate(restored.backupExpiresAt)})`}
+            disabled={restoringBackup || discarding}
+            onclick={() => (confirmingRestore = true)}
+          >
+            Restore previous review…
+          </button>
+        {/if}
+      {/if}
+      {#if restoreError}<span class="text-danger" data-testid="restore-error">{restoreError}</span>{/if}
       <button
         type="button"
         class="btn btn-sm"
         data-testid="start-fresh-button"
         title="Discard the saved review for this file and detect again from scratch"
-        disabled={discarding}
+        disabled={discarding || restoringBackup}
         onclick={handleStartFresh}
       >
         {discarding ? 'Starting fresh…' : 'Start fresh'}
@@ -1288,7 +1556,7 @@
         </div>
       {/if}
       {#if hydrationChecked}
-        {#key activeChannel}
+        {#key `${activeChannel}\n${graphEpoch}`}
           <EcgGraph
             {path}
             channel={activeChannel}
@@ -1426,11 +1694,27 @@
     </div>
   </div>
 
-  {#if dragging}
+  {#if dragging && !reportDialogOpen}
     <div class="drop-overlay" class:drop-overlay-fixed={focusMode} data-testid="report-drop-overlay">
       <Icon name="upload" size={28} />
-      <span>Drop to load as report labels</span>
+      <span>Drop an .xlsx report to compare with or use as this review</span>
     </div>
+  {/if}
+
+  {#if reportDialogOpen}
+    <!-- Keyed on the report: a different one always starts the dialog over. -->
+    {#key reportSession.summary?.report_path}
+      <ReportUseDialog
+        {path}
+        {activeChannel}
+        {channels}
+        initialStep={reportSession.status === 'choosing' ? 'choose' : 'replace'}
+        blockedReason={replaceBlockedReason}
+        onCompare={handleReportCompare}
+        onCancel={handleReportUseCancel}
+        onReplace={handleReportReplace}
+      />
+    {/key}
   {/if}
 </div>
 
@@ -1529,6 +1813,7 @@
 
   .restore-banner {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
@@ -1540,6 +1825,11 @@
 
   .restore-banner span {
     flex: 1;
+  }
+
+  .restore-banner .restore-confirm {
+    flex-basis: 100%;
+    font-weight: 500;
   }
 
   /* Named size container: the toolbar (and ArrhythmiaControls inside it)

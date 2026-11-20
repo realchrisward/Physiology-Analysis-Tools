@@ -10,9 +10,11 @@ const REPO_ROOT = path.join(__dirname, '..')
 // be considerably slower than it is here: real-time antivirus scanning
 // each newly-installed native extension (.pyd) the first time it loads is
 // a known, common cause, and can on its own push a cold start past 8s even
-// though the backend is starting fine. Overridable via an env var so a
-// slow machine can be tuned without a code change.
-const HEALTH_TIMEOUT_MS = Number(process.env.PAT_BACKEND_HEALTH_TIMEOUT_MS) || 30000
+// though the backend is starting fine. The first start after a laptop boots
+// (antivirus and indexing still busy) can take minutes, so the default
+// allows 5 minutes. Overridable via an env var so a slow machine can be
+// tuned without a code change.
+const HEALTH_TIMEOUT_MS = Number(process.env.PAT_BACKEND_HEALTH_TIMEOUT_MS) || 300000
 const POLL_INTERVAL_MS = 200
 
 function findFreePort() {
@@ -144,7 +146,7 @@ async function startBackend({ token, onExit } = {}) {
     state.stopping = true
     if (state.exited) return Promise.resolve()
     return new Promise((resolve) => {
-      const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 3000)
+      const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 90000)
       proc.once('exit', () => {
         clearTimeout(forceKillTimer)
         resolve()

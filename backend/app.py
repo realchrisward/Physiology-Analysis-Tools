@@ -86,6 +86,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
     # backend/reports.py). Dropped when the recording is evicted; kept across a
     # re-import of the same file.
     app.state.report_cache: dict = {}
+    # Recordings whose beat_cache frame came from beat detection and has not
+    # been saved since: the next save of it clears the file's "taken from a
+    # report" provenance (see db_routes._persist_beats_locked).
+    app.state.fresh_beats: set[str] = set()
+    # See locks.beat_epoch.
+    app.state.beat_epochs: dict[str, int] = {}
     app.state.db_path = db_path if db_path is not None else db.default_db_path()
 
     # Starlette puts the most recently added middleware outermost. The token

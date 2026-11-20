@@ -23,6 +23,23 @@ _registry: dict[str, threading.RLock] = {}
 _registry_lock = threading.Lock()
 
 
+def beat_epoch(state, path: str) -> int:
+    """How many times the recording's beats were swapped for a saved review
+    from outside the detector (a report replacing the review, a backup being
+    restored). Beat detection reads it before it starts and refuses to store
+    its result if it changed meanwhile: that result would replace the newly
+    saved beats in memory while SQLite holds the others."""
+    return getattr(state, "beat_epochs", {}).get(path, 0)
+
+
+def bump_beat_epoch(state, path: str) -> None:
+    """Call while holding `path_lock(path)`."""
+    epochs = getattr(state, "beat_epochs", None)
+    if epochs is None:
+        epochs = state.beat_epochs = {}
+    epochs[path] = epochs.get(path, 0) + 1
+
+
 def path_lock(path: str) -> threading.RLock:
     """The re-entrant lock for `path`, created on first use.
 

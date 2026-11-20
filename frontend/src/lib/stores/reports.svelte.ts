@@ -38,20 +38,30 @@
 // to attach fails, this side asks it what it holds and shows exactly that.
 
 import {
+  applyReport,
   findReportCandidates,
   getReportNavigation,
   getReportState,
   loadReport,
   unloadReport,
 } from '../api/reports'
-import type { ReportLoadResult, ReportNavigationResult, ReportSummary } from '../api/types'
+import type {
+  ReportApplyResult,
+  ReportBackupChoice,
+  ReportLoadResult,
+  ReportNavigationResult,
+  ReportSummary,
+} from '../api/types'
 
-export type ReportStatus = 'idle' | 'loading' | 'ready' | 'error' | 'missing'
+export type ReportStatus = 'idle' | 'loading' | 'choosing' | 'ready' | 'error' | 'missing'
 
 export interface ReportSession {
-  // idle    - nothing attached.
-  // loading - a load (picked, dropped, suggested or restored from a link) is in flight.
-  // ready   - attached; `summary` is set. `error` may still hold a note about a
+  // idle     - nothing attached.
+  // loading  - a load (picked, dropped, suggested or restored from a link) is in flight.
+  // choosing - read and held by the backend, waiting for the technician to
+  //            choose between comparing with it and replacing the review with
+  //            it. Not linked yet; `summary` is set.
+  // ready    - attached for comparison; `summary` is set. `error` may still hold a note about a
   //           failed attempt to replace it (the previous report was kept).
   // error   - the attempt to attach `reportPath` failed.
   // missing - the report this recording was linked to could not be read
@@ -172,6 +182,19 @@ const pendingUnload: Set<string> = loadPendingUnload()
 
 // Why removing a recording's report failed, shown next to the Load button.
 const unloadErrors: Record<string, string> = $state({})
+
+/** What the last "replace my review with this report" did, for the banner that says so. */
+export interface ReplaceNotice {
+  reportName: string
+  beats: number
+  reviewed: number
+  badDataMarks: number
+  skippedOutside: number
+  // ISO time the backup of the previous review expires, when one was kept.
+  backupExpiresAt: string | null
+}
+
+const replaceNotices: Record<string, ReplaceNotice> = $state({})
 
 let generation = 0
 const opGen = new Map<string, number>()
@@ -374,12 +397,29 @@ export function dismissReportSuggestion(path: string): void {
   }
 }
 
+/** The notice about the recording's review having just been replaced by a report. Reactive. */
+export function getReplaceNotice(path: string): ReplaceNotice | null {
+  return replaceNotices[path] ?? null
+}
+
+export function dismissReplaceNotice(path: string): void {
+  delete replaceNotices[path]
+}
+
 /**
- * Loads `reportPath` for the recording, replacing any report already attached.
- * On success the report is linked to the recording, its folder remembered and
- * the navigation targets fetched. Returns whether it ended up loaded.
+ * Loads `reportPath` for the recording, replacing any report already attached
+ * on the backend. With `ask` (every load the technician starts) it then waits
+ * in `choosing` for `chooseCompare` / `cancelChoice` / `replaceWithReport`;
+ * without it (a retry of a report already chosen for comparison) it is linked
+ * at once. Either way its navigation targets are fetched. Returns whether it
+ * ended up loaded.
  */
-export async function attachReport(recordingPath: string, reportPath: string): Promise<boolean> {
+export async function attachReport(
+  recordingPath: string,
+  reportPath: string,
+  options: { ask?: boolean } = {},
+): Promise<boolean> {
+  const ask = options.ask ?? false
   const op = bump(opGen, recordingPath)
   bump(epoch, recordingPath)
   dismissReportSuggestion(recordingPath)
@@ -397,7 +437,18 @@ export async function attachReport(recordingPath: string, reportPath: string): P
   }
 
   if (result.status === 'ok' && !result.error && result.summary) {
-    commitLoaded(recordingPath, result.summary, true)
+    if (ask) {
+      bump(epoch, recordingPath)
+      setSession(recordingPath, {
+        status: 'choosing',
+        summary: result.summary,
+        error: null,
+        reportPath: result.summary.report_path,
+        navigation: null,
+      })
+    } else {
+      commitLoaded(recordingPath, result.summary, true)
+    }
     void refreshReportNavigation(recordingPath)
     return true
   }
@@ -428,6 +479,79 @@ export async function attachReport(recordingPath: string, reportPath: string): P
   return false
 }
 
+/**
+ * The technician chose to compare with the report waiting in `choosing`: it
+ * becomes the recording's report (linked, so it comes back on reopen, and its
+ * folder remembered). Navigation already fetched for it is kept.
+ */
+export function chooseCompare(recordingPath: string): void {
+  const session = reportSessions[recordingPath]
+  if (!session || session.status !== 'choosing' || !session.summary) return
+  session.status = 'ready'
+  setLink(recordingPath, session.summary.report_path)
+  setPendingUnload(recordingPath, false)
+  delete unloadErrors[recordingPath]
+  rememberFolder(session.summary.report_path)
+}
+
+/**
+ * The technician backed out of using the report waiting in `choosing`: it is
+ * taken off the backend, and the report the recording was linked to before
+ * (if any, e.g. "Change report…" then Cancel) is loaded again.
+ */
+export async function cancelChoice(recordingPath: string): Promise<void> {
+  if (reportSessions[recordingPath]?.status !== 'choosing') return
+  const op = invalidate(recordingPath)
+  detachOps.set(recordingPath, op)
+  delete reportSessions[recordingPath]
+  const gone = await unloadBackend(recordingPath, op)
+  if (!gone || !isCurrent(recordingPath, op)) return
+  await restoreLinkedReport(recordingPath)
+}
+
+/**
+ * Replaces the recording's saved review with its attached report (waiting in
+ * `choosing`, or already compared with), saving the beats against `channel`.
+ * On success the backend has detached the report, so its session and link
+ * go, and a notice for the review screen is left behind. The caller reloads
+ * the review screen.
+ */
+export async function replaceWithReport(
+  recordingPath: string,
+  channel: string,
+  backup: ReportBackupChoice,
+): Promise<ReportApplyResult> {
+  const session = reportSessions[recordingPath]
+  if (!session || (session.status !== 'choosing' && session.status !== 'ready') || !session.summary) {
+    return { status: 'error', error: 'No report is loaded for this recording.' }
+  }
+  const summary = session.summary
+  const op = bump(opGen, recordingPath)
+  const result = await enqueue(recordingPath, async () => {
+    if (!isCurrent(recordingPath, op)) return null
+    return applyReport(recordingPath, summary.report_path, channel, backup)
+  })
+  if (result === null) return { status: 'error', error: 'Something else happened to this report first.' }
+  if (result.status !== 'ok' || result.error) return result
+
+  // The report is the review now, and the backend no longer holds it.
+  if (isCurrent(recordingPath, op)) {
+    bump(epoch, recordingPath)
+    delete reportSessions[recordingPath]
+    clearLink(recordingPath)
+    dismissReportSuggestion(recordingPath)
+  }
+  replaceNotices[recordingPath] = {
+    reportName: summary.filename,
+    beats: result.beats ?? 0,
+    reviewed: result.reviewed ?? 0,
+    badDataMarks: result.bad_data_marks ?? 0,
+    skippedOutside: result.skipped_outside ?? 0,
+    backupExpiresAt: result.backup?.expires_at ?? null,
+  }
+  return result
+}
+
 // `remember`: the folder is only worth remembering for a report the technician
 // chose, not for one restored by itself.
 function commitLoaded(recordingPath: string, summary: ReportSummary, remember: boolean): void {
@@ -447,8 +571,10 @@ function commitLoaded(recordingPath: string, summary: ReportSummary, remember: b
  */
 export async function restoreLinkedReport(recordingPath: string): Promise<void> {
   const current = reportSessions[recordingPath]
-  // A load for this recording is already in flight and will land by itself.
-  if (current?.status === 'loading') return
+  // A load for this recording is already in flight and will land by itself;
+  // a report waiting for the technician's choice is not the recording's
+  // report until they make it (the backend holding it must not make it so).
+  if (current?.status === 'loading' || current?.status === 'choosing') return
 
   const op = bump(opGen, recordingPath)
   const wasReady = current?.status === 'ready'
@@ -579,7 +705,14 @@ export function forgetReportSessions(paths: string[]): void {
     delete reportSessions[path]
     delete suggestions[path]
     delete unloadErrors[path]
+    delete replaceNotices[path]
   }
+}
+
+// Sessions whose report can be matched against our beats: attached for
+// comparison, or waiting for the technician's choice (the dialog shows the match).
+function isAttached(session: ReportSession | undefined): boolean {
+  return session?.status === 'ready' || session?.status === 'choosing'
 }
 
 /**
@@ -589,7 +722,7 @@ export function forgetReportSessions(paths: string[]): void {
  * meanwhile is answered by exactly one more.
  */
 export function refreshReportNavigation(recordingPath: string): Promise<void> {
-  if (reportSessions[recordingPath]?.status !== 'ready') return Promise.resolve()
+  if (!isAttached(reportSessions[recordingPath])) return Promise.resolve()
   const running = navRunning.get(recordingPath)
   if (running) {
     navDirty.add(recordingPath)
@@ -604,7 +737,7 @@ export function refreshReportNavigation(recordingPath: string): Promise<void> {
         const result = await getReportNavigation(recordingPath)
         const session = reportSessions[recordingPath]
         // The report was replaced or removed while this was in flight.
-        if (!session || session.status !== 'ready' || (epoch.get(recordingPath) ?? 0) !== forEpoch) continue
+        if (!isAttached(session) || (epoch.get(recordingPath) ?? 0) !== forEpoch) continue
         session.navigation = result
       } while (navDirty.has(recordingPath))
     } finally {
@@ -665,6 +798,7 @@ export function resetForTesting(): void {
   for (const key of Object.keys(kept)) delete kept[key]
   for (const key of Object.keys(suggestions)) delete suggestions[key]
   for (const key of Object.keys(unloadErrors)) delete unloadErrors[key]
+  for (const key of Object.keys(replaceNotices)) delete replaceNotices[key]
   pendingUnload.clear()
   reportFolders.length = 0
   opGen.clear()

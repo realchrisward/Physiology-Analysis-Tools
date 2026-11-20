@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 from physiology_analysis_tools.modules import heartbeat_detection
 
 from backend import beat_editing, db
-from backend.locks import path_lock
+from backend.locks import beat_epoch, path_lock
 from backend.models import Beat, BeatDetectionResult, BeatDetectRequest
 
 router = APIRouter(prefix="/beats", tags=["beats"])
@@ -17,6 +17,10 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
         return BeatDetectionResult(
             status="error", error=f"File not imported: {payload.path}"
         )
+
+    # A report replacing the saved review (or a backup being restored) while
+    # this runs makes the result stale: see locks.beat_epoch.
+    epoch_at_start = beat_epoch(request.app.state, payload.path)
 
     # perf_counter, not monotonic: monotonic ticks at ~15 ms on Windows, so a
     # fast detection could report exactly 0.
@@ -47,6 +51,26 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
                 status="error",
                 error=f"File not imported: {payload.path}",
                 elapsed_seconds=time.perf_counter() - start,
+            )
+        if beat_epoch(request.app.state, payload.path) != epoch_at_start:
+            # A saved review taken from a report (or a restored backup) became
+            # the recording's beats while this ran: it stays, and its beats
+            # are the answer (the import queue then lists what the recording
+            # really has). Storing this result instead would replace those
+            # beats in memory while SQLite holds them.
+            saved = request.app.state.beat_cache.get(payload.path)
+            if saved is None:
+                return BeatDetectionResult(
+                    status="error",
+                    error=(
+                        "The saved review was replaced while beats were being "
+                        "detected, so this detection was discarded. Run it again "
+                        "if you still want it."
+                    ),
+                    elapsed_seconds=time.perf_counter() - start,
+                )
+            return _detection_result(
+                saved, time.perf_counter() - start, request, payload.path
             )
 
         # A re-detect must not throw away what the technician did by hand: put
@@ -84,7 +108,14 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
 
         elapsed_seconds = time.perf_counter() - start
         request.app.state.beat_cache[payload.path] = df
+        fresh = getattr(request.app.state, "fresh_beats", None)
+        if fresh is not None:
+            fresh.add(payload.path)
 
+    return _detection_result(df, elapsed_seconds, request, payload.path)
+
+
+def _detection_result(df, elapsed_seconds: float, request: Request, path: str) -> BeatDetectionResult:
     # Assumes beatcaller()'s output columns (ts, RR, R_amplitude, HR) — if that
     # shape ever changes, update this loop too, since it's outside the try/except above.
     beats = [
@@ -100,7 +131,7 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
     mean_hr = float(df["HR"].mean()) if count > 0 else None
     duration = float(df["ts"].iloc[-1] - df["ts"].iloc[0]) if count > 0 else None
 
-    imported = request.app.state.imported_files.get(payload.path)
+    imported = request.app.state.imported_files.get(path)
     file_size_bytes = imported.size if imported is not None else None
 
     return BeatDetectionResult(

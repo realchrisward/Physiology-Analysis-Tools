@@ -2,7 +2,7 @@ import itertools
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS files (
     beat_settings_json TEXT,
     arrhythmia_settings_json TEXT,
     updated_at TEXT NOT NULL,
+    -- The report this file's review was taken from ("Replace my review with
+    -- this report"), and when. Cleared when beats are detected afresh.
+    source_report TEXT,
+    source_report_at TEXT,
     UNIQUE(path, size, mtime)
 );
 
@@ -78,6 +82,61 @@ CREATE TABLE IF NOT EXISTS channel_labels (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (path, channel)
 );
+
+-- A file's whole saved review, copied aside before a report replaced it, so
+-- the replacement can be undone. Keyed like `files` (path, size, mtime), not
+-- by files.id: restoring re-creates that row. Each backup expires.
+CREATE TABLE IF NOT EXISTS review_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    replaced_by TEXT,
+    channel TEXT,
+    beat_settings_json TEXT,
+    arrhythmia_settings_json TEXT,
+    source_report TEXT,
+    source_report_at TEXT,
+    file_updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS backup_beats (
+    backup_id INTEGER NOT NULL REFERENCES review_backups(id),
+    ts REAL NOT NULL,
+    rr REAL NOT NULL,
+    r_amplitude REAL NOT NULL,
+    hr REAL NOT NULL,
+    bradycardia_absolute INTEGER,
+    tachycardia_absolute INTEGER,
+    skipped_beat INTEGER,
+    prem_beat INTEGER,
+    abn_cluster INTEGER,
+    any_arrhythmia INTEGER,
+    other_arrhythmia INTEGER,
+    review_state TEXT NOT NULL,
+    reassigned_category TEXT,
+    manual_added_at TEXT,
+    uncertain INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS backup_bad_data_marks (
+    backup_id INTEGER NOT NULL REFERENCES review_backups(id),
+    start REAL NOT NULL,
+    stop REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_manual_beat_edits (
+    backup_id INTEGER NOT NULL REFERENCES review_backups(id),
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    r_amplitude REAL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_backups_path ON review_backups(path);
+CREATE INDEX IF NOT EXISTS idx_backup_beats_backup ON backup_beats(backup_id);
 """
 
 
@@ -91,7 +150,7 @@ def default_db_path() -> str:
 # Stored in the database file itself (PRAGMA user_version), so a file that is
 # deleted and recreated (Settings > reset database) is correctly seen as
 # un-initialised again, which a per-path in-process flag would not notice.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _schema_lock = threading.Lock()
 
 # How long a connection waits on another writer before "database is locked".
@@ -126,20 +185,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
             return
         conn.executescript(SCHEMA_SQL)
-        # Databases created before manual beat editing / the uncertain mark
-        # lack these columns; CREATE TABLE IF NOT EXISTS above will not add
-        # them to an existing table.
-        beat_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(beats)")
-        }
-        for column, definition in (
-            ("manual_added_at", "TEXT"),
-            ("uncertain", "INTEGER NOT NULL DEFAULT 0"),
+        # Databases created before manual beat editing / the uncertain mark /
+        # replacing a review with a report lack these columns; CREATE TABLE IF
+        # NOT EXISTS above will not add them to an existing table.
+        for table, column, definition in (
+            ("beats", "manual_added_at", "TEXT"),
+            ("beats", "uncertain", "INTEGER NOT NULL DEFAULT 0"),
+            ("files", "source_report", "TEXT"),
+            ("files", "source_report_at", "TEXT"),
         ):
-            if column in beat_columns:
+            existing = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column in existing:
                 continue
             try:
-                conn.execute(f"ALTER TABLE beats ADD COLUMN {column} {definition}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             except sqlite3.OperationalError as e:
                 # Another process upgraded the file between the check and here.
                 if "duplicate column" not in str(e).lower():
@@ -207,6 +268,8 @@ def upsert_file(
     channel=_UNSET,
     beat_settings_json=_UNSET,
     arrhythmia_settings_json=_UNSET,
+    source_report=_UNSET,
+    source_report_at=_UNSET,
     commit: bool = True,
 ) -> int:
     """Insert or update the `files` row for (path, size, mtime).
@@ -230,6 +293,8 @@ def upsert_file(
         "channel": channel,
         "beat_settings_json": beat_settings_json,
         "arrhythmia_settings_json": arrhythmia_settings_json,
+        "source_report": source_report,
+        "source_report_at": source_report_at,
     }
     for column, value in optional.items():
         if value is not _UNSET:
@@ -603,13 +668,32 @@ def replace_beats(
 
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 
+    default_review = ("unreviewed", None, False)
+    review_values = [
+        preserved_state.get(ts, default_review) for ts in beat_df["ts"].tolist()
+    ]
+    write_beats(conn, file_id, beat_df, review_values)
+
+    if commit:
+        conn.commit()
+
+    return preserved_state
+
+
+def write_beats(
+    conn: sqlite3.Connection,
+    file_id: int,
+    beat_df,
+    review_values: list[tuple[str, str | None, bool]],
+) -> None:
+    """Insert every row of `beat_df` as a beat of `file_id`, with
+    `review_values[i]` = (review_state, reassigned_category, uncertain) for
+    row i. The caller deletes what was there before and commits."""
     # One executemany over precomputed column lists, not an execute per beat:
     # at ~150k beats the per-row version held the write lock for many seconds,
     # which is what made every concurrent request time out.
     ts_values = beat_df["ts"].tolist()
     optional_columns = [_nullable_bools(beat_df, col) for col in OPTIONAL_BEAT_COLUMNS]
-    default_review = ("unreviewed", None, False)
-    review_values = [preserved_state.get(ts, default_review) for ts in ts_values]
     if "manual_added_at" in beat_df.columns:
         added = beat_df["manual_added_at"]
         added_missing = added.isna().to_numpy()
@@ -640,7 +724,211 @@ def replace_beats(
         ),
     )
 
-    if commit:
-        conn.commit()
 
-    return preserved_state
+# ---------------------------------------------------------------------------
+# Review backups (taken before a report replaces a file's review)
+# ---------------------------------------------------------------------------
+
+BACKUP_RETENTION_DAYS = 7
+# Backups kept per recording; replacing more often than this drops the oldest.
+MAX_BACKUPS_PER_FILE = 5
+
+_BEAT_COPY_COLUMNS = (
+    "ts, rr, r_amplitude, hr, bradycardia_absolute, tachycardia_absolute, "
+    "skipped_beat, prem_beat, abn_cluster, any_arrhythmia, other_arrhythmia, "
+    "review_state, reassigned_category, manual_added_at, uncertain"
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _delete_backups(conn: sqlite3.Connection, ids: list[int]) -> None:
+    for backup_id in ids:
+        for table in (
+            "backup_beats",
+            "backup_bad_data_marks",
+            "backup_manual_beat_edits",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE backup_id=?", (backup_id,))
+        conn.execute("DELETE FROM review_backups WHERE id=?", (backup_id,))
+
+
+def purge_expired_backups(conn: sqlite3.Connection) -> int:
+    """Drop (and commit dropping) every backup past its expiry. Returns how
+    many went. Must not be called inside another transaction."""
+    ids = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM review_backups WHERE expires_at <= ?", (_now_iso(),)
+        ).fetchall()
+    ]
+    if ids:
+        _delete_backups(conn, ids)
+        conn.commit()
+    return len(ids)
+
+
+def create_backup(
+    conn: sqlite3.Connection,
+    file_row: sqlite3.Row,
+    replaced_by: str | None,
+    days: int = BACKUP_RETENTION_DAYS,
+) -> sqlite3.Row:
+    """Copy the file's whole saved review (its `files` row, beats, bad-data
+    marks and manual edits) aside, to expire after `days`, and drop the
+    oldest backups beyond MAX_BACKUPS_PER_FILE. Part of the caller's
+    transaction: nothing is committed here."""
+    created = datetime.now(timezone.utc)
+    cursor = conn.execute(
+        "INSERT INTO review_backups (path, size, mtime, created_at, expires_at, "
+        "replaced_by, channel, beat_settings_json, arrhythmia_settings_json, "
+        "source_report, source_report_at, file_updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            file_row["path"],
+            file_row["size"],
+            file_row["mtime"],
+            created.isoformat(),
+            (created + timedelta(days=days)).isoformat(),
+            replaced_by,
+            file_row["channel"],
+            file_row["beat_settings_json"],
+            file_row["arrhythmia_settings_json"],
+            file_row["source_report"],
+            file_row["source_report_at"],
+            file_row["updated_at"],
+        ),
+    )
+    backup_id = cursor.lastrowid
+    file_id = file_row["id"]
+    conn.execute(
+        f"INSERT INTO backup_beats (backup_id, {_BEAT_COPY_COLUMNS}) "
+        f"SELECT ?, {_BEAT_COPY_COLUMNS} FROM beats WHERE file_id=? ORDER BY ts",
+        (backup_id, file_id),
+    )
+    conn.execute(
+        "INSERT INTO backup_bad_data_marks (backup_id, start, stop) "
+        "SELECT ?, start, stop FROM bad_data_marks WHERE file_id=? ORDER BY id",
+        (backup_id, file_id),
+    )
+    conn.execute(
+        "INSERT INTO backup_manual_beat_edits (backup_id, ts, kind, r_amplitude, "
+        "created_at) SELECT ?, ts, kind, r_amplitude, created_at "
+        "FROM manual_beat_edits WHERE file_id=? ORDER BY id",
+        (backup_id, file_id),
+    )
+
+    older = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM review_backups WHERE path=? AND size=? AND mtime=? "
+            "ORDER BY id DESC",
+            (file_row["path"], file_row["size"], file_row["mtime"]),
+        ).fetchall()
+    ][MAX_BACKUPS_PER_FILE:]
+    _delete_backups(conn, older)
+    return conn.execute(
+        "SELECT * FROM review_backups WHERE id=?", (backup_id,)
+    ).fetchone()
+
+
+def latest_backup(
+    conn: sqlite3.Connection, path: str, size: int, mtime: float
+) -> sqlite3.Row | None:
+    """The newest unexpired backup of this file's review, if any."""
+    return conn.execute(
+        "SELECT * FROM review_backups WHERE path=? AND size=? AND mtime=? "
+        "AND expires_at > ? ORDER BY id DESC LIMIT 1",
+        (path, size, mtime, _now_iso()),
+    ).fetchone()
+
+
+def has_saved_review(conn: sqlite3.Connection, file_id: int) -> bool:
+    """Whether the file has any beats or bad-data marks saved."""
+    return any(
+        conn.execute(f"SELECT 1 FROM {table} WHERE file_id=? LIMIT 1", (file_id,)).fetchone()
+        for table in ("beats", "bad_data_marks")
+    )
+
+
+def clear_file_rows(conn: sqlite3.Connection, file_id: int) -> None:
+    """Delete the file's beats, manual edits and bad-data marks, keeping its
+    `files` row. Part of the caller's transaction."""
+    conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM manual_beat_edits WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM bad_data_marks WHERE file_id=?", (file_id,))
+
+
+RESTORED_FROM_BACKUP = "(restored an earlier review)"
+
+
+def restore_backup(
+    conn: sqlite3.Connection, backup: sqlite3.Row
+) -> tuple[int, sqlite3.Row | None]:
+    """Put a backup back as the file's saved review and delete that backup,
+    in one transaction. The review saved now is not thrown away: it is backed
+    up first (when there is any), so restoring is a swap that can itself be
+    undone. Returns (the file's id, the backup of the review it replaced).
+    Raises LookupError if the backup was deleted (expired and purged) after
+    it was read."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Read again inside the write transaction: a purge of expired backups
+        # committed since `backup` was read would otherwise leave this copying
+        # nothing back over the review it is about to clear.
+        if (
+            conn.execute(
+                "SELECT 1 FROM review_backups WHERE id=?", (backup["id"],)
+            ).fetchone()
+            is None
+        ):
+            raise LookupError("The backup expired and was removed.")
+        current = get_file_row(conn, backup["path"], backup["size"], backup["mtime"])
+        kept = None
+        if current is not None:
+            if has_saved_review(conn, current["id"]):
+                kept = create_backup(conn, current, RESTORED_FROM_BACKUP)
+            clear_file_rows(conn, current["id"])
+        file_id = upsert_file(
+            conn,
+            backup["path"],
+            backup["size"],
+            backup["mtime"],
+            channel=backup["channel"],
+            beat_settings_json=backup["beat_settings_json"],
+            arrhythmia_settings_json=backup["arrhythmia_settings_json"],
+            source_report=backup["source_report"],
+            source_report_at=backup["source_report_at"],
+            commit=False,
+        )
+        conn.execute(
+            f"INSERT INTO beats (file_id, {_BEAT_COPY_COLUMNS}) "
+            f"SELECT ?, {_BEAT_COPY_COLUMNS} FROM backup_beats WHERE backup_id=? "
+            "ORDER BY ts",
+            (file_id, backup["id"]),
+        )
+        conn.execute(
+            "INSERT INTO bad_data_marks (file_id, start, stop) "
+            "SELECT ?, start, stop FROM backup_bad_data_marks WHERE backup_id=? "
+            "ORDER BY rowid",
+            (file_id, backup["id"]),
+        )
+        conn.execute(
+            "INSERT INTO manual_beat_edits (file_id, ts, kind, r_amplitude, "
+            "created_at) SELECT ?, ts, kind, r_amplitude, created_at "
+            "FROM backup_manual_beat_edits WHERE backup_id=? ORDER BY rowid",
+            (file_id, backup["id"]),
+        )
+        if backup["file_updated_at"]:
+            conn.execute(
+                "UPDATE files SET updated_at=? WHERE id=?",
+                (backup["file_updated_at"], file_id),
+            )
+        _delete_backups(conn, [backup["id"]])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return file_id, kept

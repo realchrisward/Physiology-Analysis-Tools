@@ -12,14 +12,22 @@
     refreshReportSummary,
     reportFolders,
   } from '../../lib/stores/reports.svelte'
-  import { REPORT_LABEL_COLOR_VAR, REPORT_LABEL_NAME, REPORT_LABEL_TITLE, REPORT_LABELS } from '../../lib/reports'
+  import {
+    REPORT_AGREEMENT_ROWS,
+    REPORT_LABEL_COLOR_VAR,
+    REPORT_LABEL_NAME,
+    REPORT_LABEL_TITLE,
+    REPORT_LABELS,
+    reportMatch,
+  } from '../../lib/reports'
 
-  // The toolbar's "Report labels" control: load an xlsx report whose per-beat
-  // labels are shown over the recording, see what was loaded and how well it
-  // matches the beats detected here, replace it or remove it. All state is the
+  // The toolbar's "Report" control: load an xlsx report (the review screen
+  // then asks whether to compare with it or replace the review with it), see
+  // the report being compared with and how well it matches the beats detected
+  // here, change it, adopt it as the review, or remove it. All state is the
   // shared `reports` store's (keyed by recording path), so this component only
   // renders it and issues the actions.
-  let { path }: { path: string } = $props()
+  let { path, onUseAsReview }: { path: string; onUseAsReview?: () => void } = $props()
 
   const uid = $props.id()
 
@@ -62,18 +70,15 @@
       : [],
   )
 
-  // How many of the report's beats line up with a beat detected HERE. Hidden
-  // until our beats exist: before that nothing can match and "0%" would only
-  // look like a problem.
-  let match = $derived.by(() => {
-    if (!navigation || navigation.status !== 'ok' || !navigation.has_our_beats) return null
-    const total = navigation.total ?? 0
-    if (total <= 0) return null
-    const matched = navigation.matched ?? 0
-    // Never round up to 100% while a beat is unmatched.
-    const percent = matched >= total ? 100 : Math.min(99, Math.floor((matched / total) * 100))
-    const notDetected = navigation.targets?.not_detected?.length ?? total - matched
-    return { matched, total, percent, notDetected, extra: navigation.extra_ours ?? 0, low: matched / total < 0.9 }
+  // How many of the report's beats line up with a beat detected HERE (null
+  // until our beats exist).
+  let match = $derived(reportMatch(navigation))
+
+  // The agreement buckets that have any beats, for the popover.
+  let agreementRows = $derived.by(() => {
+    const counts = navigation?.status === 'ok' ? navigation.agreement_counts : undefined
+    if (!counts || !navigation?.has_our_beats) return []
+    return REPORT_AGREEMENT_ROWS.map((row) => ({ ...row, n: counts[row.key] ?? 0 })).filter((row) => row.n > 0)
   })
 
   let matchTitle = $derived.by(() => {
@@ -105,7 +110,8 @@
     note = null
     try {
       const picked = await window.api?.pickReport?.(reportFolders[0])
-      if (picked) void attachReport(path, picked)
+      // A fresh pick: the review screen asks what it is for once it is read.
+      if (picked) void attachReport(path, picked, { ask: true })
     } catch (err) {
       note = `Could not open the file picker: ${err instanceof Error ? err.message : String(err)}`
     } finally {
@@ -115,13 +121,20 @@
 
   function retry() {
     const target = session.reportPath ?? link
-    if (target) void attachReport(path, target)
+    // A linked report that could not be read was already chosen for
+    // comparison; a pick that failed to load was never chosen for anything.
+    if (target) void attachReport(path, target, { ask: session.status !== 'missing' || target !== link })
     else void choose()
   }
 
   function remove() {
     open = false
     void detachReport(path)
+  }
+
+  function useAsReview() {
+    open = false
+    onUseAsReview?.()
   }
 
   function cancel() {
@@ -197,6 +210,13 @@
       </span>
       <button type="button" class="btn btn-sm" data-testid="report-cancel-button" onclick={cancel}>Cancel</button>
     </span>
+  {:else if session.status === 'choosing' && summary}
+    <!-- The review screen's dialog is asking what the report is for. -->
+    <span class="report-loading text-muted" data-testid="report-choosing" title={summary.report_path}>
+      <Icon name="file-text" size={14} />
+      <span class="chip-name">{summary.filename}</span>
+      — choose how to use it
+    </span>
   {:else if session.status === 'ready' && summary}
     <div class="chip-wrap">
       <button
@@ -206,11 +226,12 @@
         data-testid="report-chip"
         aria-expanded={popoverOpen}
         aria-controls={popoverOpen ? `${uid}-details` : undefined}
-        aria-label={`Report ${summary.filename}, show details`}
+        aria-label={`Comparing with report ${summary.filename}, show details`}
         bind:this={chipButton}
         onclick={toggle}
       >
         <Icon name="file-text" size={14} />
+        <span class="chip-mode">Comparing</span>
         <span class="chip-name" data-testid="report-chip-name" title={summary.report_path}>{summary.filename}</span>
         <span class="chip-counts" data-testid="report-chip-counts">
           {#each countParts as part, index (part.key)}
@@ -286,6 +307,15 @@
             </p>
           {/if}
 
+          {#if agreementRows.length > 0}
+            <h4>Agreement with this review</h4>
+            <ul class="totals" data-testid="report-details-agreement">
+              {#each agreementRows as row (row.key)}
+                <li title={row.title}><span class="total-name">{row.name}</span><strong>{row.n}</strong></li>
+              {/each}
+            </ul>
+          {/if}
+
           {#if differences.length > 0}
             <h4>Detection settings that differ</h4>
             <table class="diff" data-testid="report-details-differences">
@@ -314,8 +344,25 @@
           {/if}
 
           <div class="actions">
-            <button type="button" class="btn btn-sm" data-testid="report-replace-button" onclick={choose}>
-              Replace…
+            {#if onUseAsReview}
+              <button
+                type="button"
+                class="btn btn-sm use-as-review"
+                data-testid="report-use-as-review-button"
+                title="Replace this recording's review with the report's beats, decisions and bad-data marks"
+                onclick={useAsReview}
+              >
+                Use as my review…
+              </button>
+            {/if}
+            <button
+              type="button"
+              class="btn btn-sm"
+              data-testid="report-replace-button"
+              title="Pick a different report to compare with"
+              onclick={choose}
+            >
+              Change report…
             </button>
             <button
               type="button"
@@ -365,7 +412,7 @@
       type="button"
       class="btn btn-sm"
       data-testid="load-report-button"
-      title="Load an xlsx report with per-beat labels (2 arrhythmia, 1 not reviewed, 0 normal, -1 rejected) to compare with this recording"
+      title="Load an xlsx report with per-beat labels (2 arrhythmia, 1 not reviewed, 0 normal, -1 rejected) to compare with this recording's review, or to replace it"
       onclick={choose}
     >
       Load report…
@@ -448,6 +495,18 @@
 
   button.report-chip.open {
     border-color: var(--color-accent);
+  }
+
+  .chip-mode {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .use-as-review {
+    margin-right: auto;
   }
 
   .chip-name {
@@ -653,6 +712,7 @@
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: var(--space-2);
     padding-top: var(--space-2);

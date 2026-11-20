@@ -35,6 +35,7 @@
     collapsed = false,
     activePath = null,
     onFileRemoved,
+    animalFilter = null,
   }: {
     projects: FlagProject[]
     collapsed?: boolean
@@ -42,7 +43,15 @@
     // Closing a project takes its recordings out of the file list; the app
     // shell has to leave the review view if one of them was open.
     onFileRemoved?: (path: string) => void
+    // Set while the sidebar is filtered: only the recordings it accepts are
+    // listed, and every project is shown unfolded so the matches are in view.
+    animalFilter?: ((project: FlagProject, animal: FlagProjectAnimal) => boolean) | null
   } = $props()
+
+  function shownRecordings(project: FlagProject): FlagProjectAnimal[] {
+    const recordings = projectRecordings(project)
+    return animalFilter ? recordings.filter((animal) => animalFilter(project, animal)) : recordings
+  }
 
   // Projects start expanded, so only the ones the user folded are recorded.
   let foldedProjects: Record<string, boolean> = $state({})
@@ -125,7 +134,7 @@
   {#each projects as project (project.id)}
     {@const stats = projectStats(project)}
     {@const missing = stats.selected - stats.found}
-    {@const expanded = collapsed || !foldedProjects[project.id]}
+    {@const expanded = collapsed || animalFilter !== null || !foldedProjects[project.id]}
     <div class="project">
       {#if collapsed}
         <div class="project-root-icon" data-testid="flag-project-node" role="img" aria-label={project.name} title={project.name}>
@@ -167,7 +176,7 @@
 
       {#if expanded}
         <div class="project-children" role="group" aria-label={`${project.name} recordings`}>
-          {#each projectRecordings(project) as animal (animal.animalId)}
+          {#each shownRecordings(project) as animal (animal.animalId)}
             {@const row = rowsByPath.get(animal.filePath ?? '')}
             {@const openable = canOpen(row)}
             {@const name = row?.filename ?? animal.animalId}
@@ -254,7 +263,7 @@
             </div>
           {/each}
 
-          {#if missing > 0 && !collapsed}
+          {#if missing > 0 && !collapsed && animalFilter === null}
             <button
               type="button"
               class="missing-row"

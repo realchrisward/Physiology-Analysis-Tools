@@ -610,7 +610,7 @@ describe('ImportScreen opening several recent files', () => {
     return { path: `/data/${name}.txt`, filename: `${name}.txt`, size: 100, defaultChannel: 'channel 1' }
   }
 
-  it('Open all loads every recent file in one import and opens the first one listed', async () => {
+  it('Select all, then Open, loads every recent file in one import and opens the first one listed', async () => {
     const fetchMock = vi.fn().mockResolvedValue(importOkResponse(['c', 'b', 'a'].map(fileInfo)))
     vi.stubGlobal('fetch', fetchMock)
     await seedRecents('a', 'b', 'c') // newest first: c, b, a
@@ -618,8 +618,9 @@ describe('ImportScreen opening several recent files', () => {
     autoOpenRequest.value = null
 
     render(ImportScreen)
-    expect(screen.getByTestId('open-all-button')).toHaveTextContent('Open all (3)')
-    await fireEvent.click(screen.getByTestId('open-all-button'))
+    await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
+    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open 3')
+    await fireEvent.click(screen.getByTestId('open-selected-button'))
 
     await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/c.txt'))
     expect(importCall(fetchMock)).toEqual(['/data/c.txt', '/data/b.txt', '/data/a.txt'])
@@ -635,9 +636,10 @@ describe('ImportScreen opening several recent files', () => {
     autoOpenRequest.value = null
 
     render(ImportScreen)
-    expect(screen.getByTestId('open-selected-button')).toBeDisabled()
+    // The bulk actions only appear once something is ticked.
+    expect(screen.queryByTestId('open-selected-button')).not.toBeInTheDocument()
     await fireEvent.click(screen.getAllByTestId('recent-file-checkbox')[1]) // b
-    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open selected (1)')
+    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open 1')
     await fireEvent.click(screen.getByTestId('open-selected-button'))
 
     await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/b.txt'))
@@ -650,10 +652,10 @@ describe('ImportScreen opening several recent files', () => {
     render(ImportScreen)
 
     await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
-    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open selected (3)')
+    expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open 3')
 
     await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
-    expect(screen.getByTestId('open-selected-button')).toBeDisabled()
+    expect(screen.queryByTestId('open-selected-button')).not.toBeInTheDocument()
   })
 
   it('clicking a file card still opens only that one file', async () => {
@@ -669,7 +671,7 @@ describe('ImportScreen opening several recent files', () => {
     autoOpenRequest.value = null
   })
 
-  it('does not re-import files already loaded this session when opening all', async () => {
+  it('does not re-import files already loaded this session when opening several', async () => {
     const fetchMock = vi.fn().mockResolvedValue(importOkResponse([fileInfo('b')]))
     vi.stubGlobal('fetch', fetchMock)
     await seedRecents('a', 'b')
@@ -688,7 +690,8 @@ describe('ImportScreen opening several recent files', () => {
     autoOpenRequest.value = null
 
     render(ImportScreen)
-    await fireEvent.click(screen.getByTestId('open-all-button'))
+    await fireEvent.click(screen.getByTestId('select-all-recent-checkbox'))
+    await fireEvent.click(screen.getByTestId('open-selected-button'))
 
     await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/b.txt'))
     expect(importCall(fetchMock)).toEqual(['/data/b.txt'])

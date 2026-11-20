@@ -8,13 +8,15 @@
     openFlagProject,
     projectStats,
     removeFlagProjects,
+    type FlagProject,
   } from '../../lib/stores/flagProjects.svelte'
   import Icon from '../shared/Icon.svelte'
   import FlagCountPill from './FlagCountPill.svelte'
 
   // The rows of Home's "FP/FN reviews" section. `now` is the Home screen's
   // minute ticker, so "Opened 5 minutes ago" stays honest while it's open.
-  let { now }: { now: number } = $props()
+  // `projects` is what Home's search and sort left (every project by default).
+  let { now, projects = flagProjects }: { now: number; projects?: FlagProject[] } = $props()
 
   function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
     return count === 1 ? singular : pluralForm
@@ -34,7 +36,7 @@
 </script>
 
 <ul class="flag-project-list">
-  {#each flagProjects as project (project.id)}
+  {#each projects as project (project.id)}
     {@const stats = projectStats(project)}
     <li class="flag-project" data-testid="flag-project-row">
       <span class="flag-project-icon"><Icon name="target" size={18} /></span>

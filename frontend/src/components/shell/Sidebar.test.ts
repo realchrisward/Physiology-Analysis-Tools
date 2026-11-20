@@ -37,12 +37,13 @@ function pushRow(overrides: Partial<FileRow> = {}): FileRow {
 // ImportScreen.test.ts for that side) — so these tests drive the store
 // directly rather than going through a full import flow.
 describe('Sidebar file list', () => {
-  it('labels the main list "Files", and labels the two import buttons distinctly', () => {
+  it('labels the main list "Files", and labels the import menu entries distinctly', async () => {
     render(Sidebar)
 
     expect(screen.getByText('Files')).toBeInTheDocument()
-    expect(screen.getByTestId('sidebar-import-files-button')).toHaveTextContent('Import Files')
-    expect(screen.getByTestId('sidebar-import-folder-button')).toHaveTextContent('Import Folder')
+    await fireEvent.click(screen.getByTestId('sidebar-import-menu-button'))
+    expect(screen.getByTestId('sidebar-import-files-button')).toHaveTextContent('Files…')
+    expect(screen.getByTestId('sidebar-import-folder-button')).toHaveTextContent('Folder…')
   })
 
   it('renders a row per registered file, showing status text', () => {
@@ -189,7 +190,7 @@ describe('Sidebar file list', () => {
 })
 
 describe('Sidebar import controls', () => {
-  it('triggers the file picker via the compact import button', async () => {
+  it('triggers the file picker via the import menu', async () => {
     ;(window as any).api = {
       pickFiles: vi.fn().mockResolvedValue([]),
       pickFolder: vi.fn().mockResolvedValue([]),
@@ -198,6 +199,7 @@ describe('Sidebar import controls', () => {
 
     render(Sidebar)
 
+    await fireEvent.click(screen.getByTestId('sidebar-import-menu-button'))
     await fireEvent.click(screen.getByTestId('sidebar-import-files-button'))
 
     expect((window as any).api.pickFiles).toHaveBeenCalledTimes(1)
@@ -241,14 +243,17 @@ describe('Sidebar import controls', () => {
 
     render(Sidebar)
 
+    await fireEvent.click(screen.getByTestId('sidebar-import-menu-button'))
     await fireEvent.click(screen.getByTestId('sidebar-import-files-button'))
 
     await waitFor(() => {
       expect(screen.getByTestId('sidebar-detecting')).toBeInTheDocument()
     })
     await waitFor(() => {
-      expect(screen.getByTestId('sidebar-import-files-button')).not.toBeDisabled()
+      expect(screen.getByTestId('sidebar-import-menu-button')).not.toBeDisabled()
     })
+    await fireEvent.click(screen.getByTestId('sidebar-import-menu-button'))
+    expect(screen.getByTestId('sidebar-import-files-button')).not.toBeDisabled()
 
     resolveDetect!({
       ok: true,

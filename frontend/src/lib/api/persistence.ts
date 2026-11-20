@@ -11,12 +11,25 @@ import type {
   ChannelPersistResult,
   DiscardStateResult,
   FileStateResult,
+  FileStateSummaryResult,
   PersistBeatsResult,
   ReportResult,
+  RestoreBackupResult,
 } from './types'
 
 export function getFileState(path: string): Promise<FileStateResult> {
   return apiGet('/files/state', { path })
+}
+
+// Counts only (beats, reviewed beats, bad-data marks) plus any backup: what
+// replacing the saved review would discard.
+export function getFileStateSummary(path: string): Promise<FileStateSummaryResult> {
+  return apiGet('/files/state/summary', { path })
+}
+
+// Puts back the review a report replaced (the newest unexpired backup).
+export function restoreReviewBackup(path: string): Promise<RestoreBackupResult> {
+  return apiPost('/files/state/restore-backup', 'POST', { path })
 }
 
 export function putChannel(path: string, channel: string): Promise<ChannelPersistResult> {

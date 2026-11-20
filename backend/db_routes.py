@@ -13,7 +13,7 @@ from physiology_analysis_tools.modules import (
 )
 
 from backend import beat_editing, categories, db
-from backend.locks import path_lock
+from backend.locks import bump_beat_epoch, path_lock
 from backend.models import (
     ArrhythmiaSettingsModel,
     BadDataAddRequest,
@@ -36,11 +36,15 @@ from backend.models import (
     DiscardStateRequest,
     DiscardStateResult,
     FileStateResult,
+    FileStateSummaryResult,
     PersistBeatsRequest,
     PersistBeatsResult,
     PersistedBeat,
     ReportRequest,
     ReportResult,
+    RestoreBackupRequest,
+    RestoreBackupResult,
+    ReviewBackupInfo,
 )
 
 router = APIRouter(prefix="/files", tags=["persistence"])
@@ -84,34 +88,16 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             if holding_lock and request.app.state.imported_files.get(path) is imported:
                 try:
                     if beat_rows:
-                        cache_df = pd.DataFrame(
-                            {
-                                "ts": [beat_row["ts"] for beat_row in beat_rows],
-                                "RR": [beat_row["rr"] for beat_row in beat_rows],
-                                "R_amplitude": [
-                                    beat_row["r_amplitude"] for beat_row in beat_rows
-                                ],
-                                "HR": [beat_row["hr"] for beat_row in beat_rows],
-                            }
-                        )
-                        for col in categories.ALL_OPTIONAL_COLUMNS:
-                            col_values = [beat_row[col] for beat_row in beat_rows]
-                            if any(value is not None for value in col_values):
-                                cache_df[col] = [_to_bool(value) for value in col_values]
-                        if any(beat_row["manual_added_at"] for beat_row in beat_rows):
-                            cache_df["manual_added_at"] = [
-                                beat_row["manual_added_at"] for beat_row in beat_rows
-                            ]
-                        cache_df["review_state"] = [
-                            beat_row["review_state"] for beat_row in beat_rows
-                        ]
-                        cache_df["reassigned_category"] = [
-                            beat_row["reassigned_category"] for beat_row in beat_rows
-                        ]
-                        cache_df["uncertain"] = [
-                            bool(beat_row["uncertain"]) for beat_row in beat_rows
-                        ]
-                        request.app.state.beat_cache[path] = cache_df
+                        request.app.state.beat_cache[path] = _cache_frame(beat_rows)
+                        # The frame is the saved one again, not a detection.
+                        getattr(request.app.state, "fresh_beats", set()).discard(path)
+                        # A review taken from a report is not what the detector
+                        # finds: a detection still running from the import must
+                        # not replace it in memory when it lands (see
+                        # locks.beat_epoch). An ordinary saved review is the
+                        # detector's own beats, and keeps the old behaviour.
+                        if row["source_report"]:
+                            bump_beat_epoch(request.app.state, path)
                 except Exception:
                     pass
         finally:
@@ -169,11 +155,135 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             bad_data_marks=bad_data_marks,
             beat_settings=beat_settings,
             arrhythmia_settings=arrhythmia_settings,
+            source_report=row["source_report"],
+            source_report_at=row["source_report_at"],
+            backup=_backup_info(
+                db.latest_backup(conn, path, imported.size, imported.modified_time)
+            ),
         )
     except Exception as e:
         return FileStateResult(status="error", error=str(e))
     finally:
         conn.close()
+
+
+def _cache_frame(beat_rows) -> pd.DataFrame:
+    """Saved `beats` rows (ordered by ts) as the in-memory beat frame every
+    beat-reading endpoint works from."""
+    cache_df = pd.DataFrame(
+        {
+            "ts": [beat_row["ts"] for beat_row in beat_rows],
+            "RR": [beat_row["rr"] for beat_row in beat_rows],
+            "R_amplitude": [beat_row["r_amplitude"] for beat_row in beat_rows],
+            "HR": [beat_row["hr"] for beat_row in beat_rows],
+        }
+    )
+    for col in categories.ALL_OPTIONAL_COLUMNS:
+        col_values = [beat_row[col] for beat_row in beat_rows]
+        if any(value is not None for value in col_values):
+            cache_df[col] = [_to_bool(value) for value in col_values]
+    if any(beat_row["manual_added_at"] for beat_row in beat_rows):
+        cache_df["manual_added_at"] = [
+            beat_row["manual_added_at"] for beat_row in beat_rows
+        ]
+    cache_df["review_state"] = [beat_row["review_state"] for beat_row in beat_rows]
+    cache_df["reassigned_category"] = [
+        beat_row["reassigned_category"] for beat_row in beat_rows
+    ]
+    cache_df["uncertain"] = [bool(beat_row["uncertain"]) for beat_row in beat_rows]
+    return cache_df
+
+
+def _backup_info(row) -> ReviewBackupInfo | None:
+    if row is None:
+        return None
+    return ReviewBackupInfo(
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        replaced_by=row["replaced_by"],
+    )
+
+
+@router.get("/state/summary", response_model=FileStateSummaryResult)
+def get_file_state_summary(path: str, request: Request) -> FileStateSummaryResult:
+    """How much review work is saved for a file (counts only) and whether a
+    backup of an earlier review exists: what replacing it would discard."""
+    imported = request.app.state.imported_files.get(path)
+    if imported is None or imported.status != "ok":
+        return FileStateSummaryResult(status="error", error=f"File not imported: {path}")
+    conn = db.connect(request.app.state.db_path)
+    try:
+        backup = _backup_info(
+            db.latest_backup(conn, path, imported.size, imported.modified_time)
+        )
+        row = db.get_file_row(conn, path, imported.size, imported.modified_time)
+        if row is None:
+            return FileStateSummaryResult(status="ok", found=False, backup=backup)
+        counts = conn.execute(
+            "SELECT COUNT(*) AS beats, "
+            "COALESCE(SUM(review_state != 'unreviewed'), 0) AS reviewed "
+            "FROM beats WHERE file_id=?",
+            (row["id"],),
+        ).fetchone()
+        marks = conn.execute(
+            "SELECT COUNT(*) FROM bad_data_marks WHERE file_id=?", (row["id"],)
+        ).fetchone()[0]
+        return FileStateSummaryResult(
+            status="ok",
+            found=True,
+            channel=row["channel"],
+            beats=counts["beats"],
+            reviewed=counts["reviewed"],
+            bad_data_marks=marks,
+            source_report=row["source_report"],
+            backup=backup,
+        )
+    except Exception as e:
+        return FileStateSummaryResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/state/restore-backup", response_model=RestoreBackupResult)
+def restore_backup(payload: RestoreBackupRequest, request: Request) -> RestoreBackupResult:
+    """Put back the newest unexpired backup (the review a report replaced).
+    What is saved now is backed up first, so this is a swap, not a loss
+    (`kept`). The in-memory beats become the restored ones."""
+    with path_lock(payload.path):
+        state = request.app.state
+        imported = state.imported_files.get(payload.path)
+        if imported is None or imported.status != "ok":
+            return RestoreBackupResult(
+                status="error", error=f"File not imported: {payload.path}"
+            )
+        conn = db.connect(state.db_path)
+        try:
+            backup = db.latest_backup(
+                conn, payload.path, imported.size, imported.modified_time
+            )
+            if backup is None:
+                return RestoreBackupResult(
+                    status="error",
+                    error="There is no backup to restore (it may have expired).",
+                )
+            file_id, kept = db.restore_backup(conn, backup)
+            beat_rows = conn.execute(
+                "SELECT * FROM beats WHERE file_id=? ORDER BY ts", (file_id,)
+            ).fetchall()
+        except Exception as e:
+            return RestoreBackupResult(status="error", error=str(e))
+        finally:
+            conn.close()
+        # The restored review is the recording's beats now (none: nothing
+        # detected yet, as when the backup was taken).
+        if beat_rows:
+            state.beat_cache[payload.path] = _cache_frame(beat_rows)
+        else:
+            state.beat_cache.pop(payload.path, None)
+        state.typical_rr_cache.pop(payload.path, None)
+        getattr(state, "fresh_beats", set()).discard(payload.path)
+        bump_beat_epoch(state, payload.path)
+        return RestoreBackupResult(status="ok", kept=_backup_info(kept))
 
 
 def _to_bool(value: int | None) -> bool | None:
@@ -302,22 +412,43 @@ def _persist_beats_locked(
             status="error", error="Beat detection has not been run for this file yet"
         )
 
+    # Beats freshly detected (not yet saved) replace a review taken from a
+    # report, so the file stops saying it came from one. Otherwise the saved
+    # beats are still the report's, and so are the beat settings saved with
+    # them (an arrhythmia run only changes the flags).
+    fresh_beats = getattr(request.app.state, "fresh_beats", set())
+    fresh = payload.path in fresh_beats
+
     conn = db.connect(request.app.state.db_path)
     try:
+        existing = db.get_file_row(conn, payload.path, imported.size, imported.modified_time)
+        from_report = existing is not None and bool(existing["source_report"])
+        provenance = {}
+        if not from_report or fresh:
+            # The beats are this channel's detection: it and the settings that
+            # made it are what the review is now. (Beats still the report's
+            # stay on the channel they were saved against: a save racing the
+            # replace must not move them.)
+            provenance["channel"] = payload.channel
+            provenance["beat_settings_json"] = json.dumps(
+                request.app.state.beat_settings.__dict__
+            )
+        if from_report and fresh:
+            provenance.update(source_report=None, source_report_at=None)
         file_id = db.upsert_file(
             conn,
             payload.path,
             imported.size,
             imported.modified_time,
-            channel=payload.channel,
-            beat_settings_json=json.dumps(request.app.state.beat_settings.__dict__),
             arrhythmia_settings_json=json.dumps(
                 request.app.state.arrhythmia_settings.__dict__
             ),
             commit=False,
+            **provenance,
         )
         preserved_state = db.replace_beats(conn, file_id, beat_df, commit=False)
         conn.commit()
+        fresh_beats.discard(payload.path)
 
         # Sync review_state/reassigned_category/uncertain onto the
         # beat_cache[path] DataFrame `/beats/window` reads from —

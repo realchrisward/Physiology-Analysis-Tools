@@ -1,5 +1,7 @@
 import { apiGet, apiPost } from './http'
 import type {
+  ReportApplyResult,
+  ReportBackupChoice,
   ReportBeatResult,
   ReportCandidatesResult,
   ReportLoadResult,
@@ -10,6 +12,25 @@ import type {
 /** Parses an xlsx report and attaches it to an imported recording (replacing any previous one). */
 export function loadReport(recordingPath: string, reportPath: string): Promise<ReportLoadResult> {
   return apiPost('/reports/load', 'POST', { recording_path: recordingPath, report_path: reportPath })
+}
+
+/**
+ * Replaces the recording's saved review with the attached report (which must
+ * still be `reportPath`), saving its beats against `channel`. The report is
+ * detached afterwards.
+ */
+export function applyReport(
+  recordingPath: string,
+  reportPath: string,
+  channel: string,
+  backup: ReportBackupChoice,
+): Promise<ReportApplyResult> {
+  return apiPost('/reports/apply', 'POST', {
+    recording_path: recordingPath,
+    report_path: reportPath,
+    channel,
+    backup,
+  })
 }
 
 /** Detaches the recording's report. */

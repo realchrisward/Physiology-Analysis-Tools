@@ -51,6 +51,44 @@ export function formatRelativeTime(ts: number, now: number = Date.now()): string
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
+/** "24 Sep 2026" for an ISO timestamp; an unreadable value is shown as it came. */
+export function formatDate(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+export type RecencyGroup = 'Today' | 'Yesterday' | 'Earlier this week' | 'Older'
+
+/** Which "Today / Yesterday / Earlier this week / Older" heading a time falls under (calendar days). */
+export function recencyGroup(ts: number, now: number = Date.now()): RecencyGroup {
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(ts)) / 86400000)
+  if (dayDiff <= 0) return 'Today'
+  if (dayDiff === 1) return 'Yesterday'
+  if (dayDiff < 7) return 'Earlier this week'
+  return 'Older'
+}
+
+/** The file name at the end of a path ("C:\data\a.adicht" → "a.adicht"). */
+export function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() || path
+}
+
+/**
+ * The folder a file is in, shortened to its last two parts for a list row
+ * ("C:\Users\me\Data\ECG_Traces\a.adicht" → "…\Data\ECG_Traces"). The full
+ * path belongs in the row's tooltip.
+ */
+export function shortFolder(path: string): string {
+  const separator = path.includes('\\') ? '\\' : '/'
+  const parts = path.split(/[\\/]/)
+  parts.pop()
+  const folders = parts.filter(Boolean)
+  if (folders.length === 0) return ''
+  if (folders.length <= 2) return parts.join(separator)
+  return `…${separator}${folders.slice(-2).join(separator)}`
+}
+
 /** A heart rate to at most two decimals ("471.47"), not "471.4702384650006". */
 export function formatHeartRate(hr: number): string {
   return String(Math.round(hr * 100) / 100)

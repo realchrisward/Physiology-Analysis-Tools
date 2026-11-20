@@ -22,6 +22,7 @@ Here only the header's width is read, and only the rows of the sheets needed.
 """
 
 import datetime
+import json
 import math
 import os
 import re
@@ -33,8 +34,13 @@ import openpyxl
 import pandas as pd
 from fastapi import APIRouter, Request
 
-from backend import categories
+from backend import categories, db
+from backend.locks import bump_beat_epoch, path_lock
 from backend.models import (
+    ArrhythmiaSettingsModel,
+    BeatSettingsModel,
+    ReportApplyRequest,
+    ReportApplyResult,
     ReportBadDataRange,
     ReportBeat,
     ReportBeatResult,
@@ -48,6 +54,7 @@ from backend.models import (
     ReportUnloadRequest,
     ReportUnloadResult,
     ReportWindowResult,
+    ReviewBackupInfo,
 )
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -189,6 +196,25 @@ class _Matching:
 
 
 @dataclass(eq=False)
+class _BeatValues:
+    """The report's other per-beat columns, parallel to `_Entry.ts`, kept for
+    replacing our review with the report (POST /reports/apply). Absent
+    columns are all-NaN (numbers) or None (text)."""
+
+    rr: np.ndarray  # float64
+    r_amplitude: np.ndarray  # float64
+    hr: np.ndarray  # float64
+    # Our own category columns as the report writes them (bradycardia_absolute,
+    # ..., any_arrhythmia), when present: float64 1/0, NaN where blank.
+    flags: dict[str, np.ndarray]
+    # Only in this app's own export.
+    review_state: np.ndarray | None  # object: lower-cased text or None
+    reassigned_category: np.ndarray | None  # object: text or None
+    uncertain: np.ndarray | None  # float64 1/0, NaN where blank
+    manual_added_at: np.ndarray | None  # object: text or None
+
+
+@dataclass(eq=False)
 class _Entry:
     # Everything but `memo` is set when the report is loaded and never changes.
     summary: ReportSummary  # settings_differences/warnings are filled per request
@@ -202,6 +228,7 @@ class _Entry:
     # is built per request (see _summary_for), between these two groups.
     warnings_before_settings: list[str]
     warnings_after_settings: list[str]
+    values: _BeatValues | None = None
     # The matching for "our beats don't exist yet" (set right after building).
     unknown: _Matching | None = None
     # (the beat frame it was computed for, the matching). Replaced as a single
@@ -734,6 +761,50 @@ def _read_sheets(wb) -> _Workbook:
     )
 
 
+def _beat_values(table: _Table, columns: _Columns, rows: np.ndarray) -> _BeatValues:
+    """The report's per-beat columns besides ts/label, for the given rows
+    (positions into the table, in the entry's sorted order)."""
+
+    def numbers(key: str, *, bools: bool = False) -> np.ndarray | None:
+        position = columns.by_name.get(key)
+        if position is None:
+            return None
+        return _as_floats(table.column(position), bools=bools)[rows]
+
+    def texts(key: str, *, lower: bool = False) -> np.ndarray | None:
+        position = columns.by_name.get(key)
+        if position is None:
+            return None
+        out = []
+        for value in table.column(position).to_numpy(dtype=object)[rows]:
+            text = None if _blank_cell(value) else str(value).strip()
+            if text and lower:
+                text = text.lower()
+            out.append(text or None)
+        return np.array(out, dtype=object)
+
+    missing = np.full(rows.size, np.nan)
+    flags = {}
+    for name in categories.ALL_OPTIONAL_COLUMNS:
+        column = numbers(_compact(name), bools=True)
+        if column is not None:
+            flags[name] = column
+    return _BeatValues(
+        rr=_or(numbers("rr"), missing),
+        r_amplitude=_or(numbers("ramplitude"), missing),
+        hr=_or(numbers("hr"), missing),
+        flags=flags,
+        review_state=texts("reviewstate", lower=True),
+        reassigned_category=texts("reassignedcategory"),
+        uncertain=numbers("uncertain", bools=True),
+        manual_added_at=texts("manualaddedat"),
+    )
+
+
+def _or(value, default):
+    return default if value is None else value
+
+
 def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
     parsed = _read_workbook(report_path)
     sheet_name, columns, table = parsed.sheet, parsed.columns, parsed.table
@@ -843,6 +914,7 @@ def _build_entry(report_path: str, recording_path: str, state) -> _Entry:
         settings_raw=settings_raw,
         warnings_before_settings=warnings_before,
         warnings_after_settings=warnings_after,
+        values=_beat_values(table, columns, rows),
     )
     entry.unknown = _unknown_matching(entry)
     return entry
@@ -1237,6 +1309,9 @@ def get_report_navigation(path: str, request: Request) -> ReportNavigationResult
         matching = _matching(entry, frame, request.app.state, path)
     except Exception as e:
         return ReportNavigationResult(status="error", error=_match_error(e))
+    counts = np.bincount(
+        matching.agreement.astype(np.int64), minlength=len(AGREEMENT_NAMES)
+    )
     return ReportNavigationResult(
         status="ok",
         targets=matching.targets,
@@ -1245,6 +1320,9 @@ def get_report_navigation(path: str, request: Request) -> ReportNavigationResult
         extra_ours=matching.extra_ours,
         has_our_beats=matching.has_our_beats,
         has_our_flags=matching.has_our_flags,
+        agreement_counts={
+            name: int(counts[code]) for code, name in enumerate(AGREEMENT_NAMES)
+        },
     )
 
 
@@ -1335,3 +1413,340 @@ def find_report_candidates(payload: ReportCandidatesRequest) -> ReportCandidates
             status="error", error=f"Could not search for reports: {e}"
         )
     return ReportCandidatesResult(status="ok", paths=paths)
+
+
+# ---------------------------------------------------------------------------
+# Replacing our review with the report (POST /reports/apply)
+# ---------------------------------------------------------------------------
+
+_SKIP = object()
+
+
+def _coerce_setting(raw, current):
+    """A report's settings-sheet value as the type of our current value, or
+    _SKIP when it can't be (a blank for a required number, text for a bool)."""
+    if _is_blank(raw):
+        return None if current is None else _SKIP
+    if isinstance(current, bool):
+        value = _as_bool(raw)
+        return _SKIP if value is None else value
+    number = _as_float(raw)
+    if isinstance(current, int):
+        if number is None or not math.isfinite(number) or number != int(number):
+            return _SKIP
+        return int(number)
+    if isinstance(current, float) or current is None:
+        if number is None or not math.isfinite(number):
+            return _SKIP
+        if current is None and number == int(number):
+            return int(number)
+        return float(number)
+    if isinstance(current, str):
+        return str(raw).strip()
+    return _SKIP
+
+
+def _settings_snapshot(settings_raw: dict[str, object], state) -> tuple[str, str]:
+    """The (beat, arrhythmia) settings JSON saved with a review taken from the
+    report: our current settings with every value the report's settings sheet
+    has for the same name laid over them. A value our settings model rejects
+    is left at ours. The live settings are not changed."""
+
+    def overlay(settings, model) -> dict:
+        merged = dict(getattr(settings, "__dict__", {}))
+        for name in list(merged):
+            if name not in settings_raw:
+                continue
+            value = _coerce_setting(settings_raw[name], merged[name])
+            if value is _SKIP:
+                continue
+            trial = {**merged, name: value}
+            try:
+                model(**trial)
+            except Exception:
+                continue
+            merged = trial
+        return merged
+
+    return (
+        json.dumps(overlay(getattr(state, "beat_settings", None), BeatSettingsModel)),
+        json.dumps(
+            overlay(getattr(state, "arrhythmia_settings", None), ArrhythmiaSettingsModel)
+        ),
+    )
+
+
+def _signal_at(signal_entry, channel: str, ts: np.ndarray) -> np.ndarray:
+    """The channel's value at the sample nearest each of `ts`."""
+    frame = signal_entry["df"]
+    times = frame[signal_entry["time_column"]].to_numpy(dtype=float)
+    values = frame[channel].to_numpy(dtype=float)
+    if times.size == 0:
+        return np.full(ts.size, np.nan)
+    if times.size == 1:
+        return np.full(ts.size, values[0])
+    right = np.clip(np.searchsorted(times, ts), 1, times.size - 1)
+    left = right - 1
+    nearest = np.where(np.abs(ts - times[left]) <= np.abs(times[right] - ts), left, right)
+    return values[nearest]
+
+
+def _positive(values: np.ndarray) -> np.ndarray:
+    return np.isfinite(values) & (values > 0)
+
+
+def _beat_frame_from_report(
+    entry: _Entry, signal_entry, channel: str
+) -> tuple[pd.DataFrame, int]:
+    """The report as a beat frame in `beat_cache` shape (ts, RR, R_amplitude,
+    HR, every category column, any_arrhythmia, review_state,
+    reassigned_category, uncertain and, if the report has it,
+    manual_added_at), plus how many report beats were left out for lying
+    outside the recording.
+
+    The label decides each beat's review, the same way the review actions
+    would have left it (db.update_beat_category):
+      2  -> confirmed, flagged (the report's categories, else 'other')
+      1  -> unreviewed, flagged (likewise)
+      0  -> unreviewed, nothing flagged
+      -1 -> rejected, nothing flagged
+    A reassigned category and the uncertain mark are taken from the report
+    (this app's own export has them) only where its review_state agrees with
+    the label, so a hand-edited label is never contradicted.
+    """
+    values = entry.values
+    if values is None:
+        raise _ReportError("This report was loaded by an older version; load it again.")
+    if channel not in signal_entry["df"].columns:
+        raise _ReportError(f"Channel {channel!r} is not in this recording.")
+
+    ts = entry.ts
+    keep = np.ones(ts.size, dtype=bool)
+    span = _recording_span(signal_entry)
+    if span is not None:
+        keep = (ts >= span[0] - MATCH_TOLERANCE_S) & (ts <= span[1] + MATCH_TOLERANCE_S)
+    idx = np.flatnonzero(keep)
+    skipped_outside = int(ts.size - idx.size)
+    if idx.size == 0:
+        raise _ReportError(
+            "None of the report's beats lie inside this recording, so there is "
+            "nothing to use. It probably belongs to a different recording."
+        )
+    beat_ts = ts[idx]
+    labels = entry.labels[idx]
+    n = idx.size
+
+    # RR: the report's; else the gap to the previous beat (the first beat
+    # takes the second gap, as apply_manual_edits does); else the typical
+    # gap. The database requires a number.
+    rr = values.rr[idx].copy()
+    gaps = np.full(n, np.nan)
+    if n >= 2:
+        gaps[1:] = np.diff(beat_ts)
+        gaps[0] = gaps[1]
+    bad = ~_positive(rr)
+    rr[bad] = gaps[bad]
+    bad = ~_positive(rr)
+    if bad.any():
+        good = rr[~bad]
+        rr[bad] = float(np.median(good)) if good.size else 1.0
+    hr = values.hr[idx].copy()
+    bad = ~_positive(hr)
+    hr[bad] = 60.0 / rr[bad]
+    amplitude = values.r_amplitude[idx].copy()
+    bad = ~np.isfinite(amplitude)
+    if bad.any():
+        amplitude[bad] = _signal_at(signal_entry, channel, beat_ts[bad])
+        amplitude[~np.isfinite(amplitude)] = 0.0
+
+    names = categories.REASSIGNABLE_CATEGORIES
+    flags = {name: np.zeros(n, dtype=bool) for name in names}
+    for name in names:
+        if name in values.flags:
+            flags[name] = np.nan_to_num(values.flags[name][idx]) != 0
+    # The report's annot_<category> columns, where it lacks the plain ones.
+    for position, name in enumerate(entry.category_names):
+        if name in flags and name not in values.flags:
+            flags[name] = entry.category_flags[idx, position].astype(bool)
+    flagged = (labels == 2) | (labels == 1)
+    for name in names:
+        flags[name] &= flagged
+    flags["other_arrhythmia"] |= flagged & ~np.any([flags[x] for x in names], axis=0)
+
+    review_state = np.where(
+        labels == 2, "confirmed", np.where(labels == -1, "rejected", "unreviewed")
+    ).astype(object)
+    decided = review_state != "unreviewed"
+    if values.review_state is not None:
+        theirs = values.review_state[idx]
+        agrees = np.array(
+            [t == ours for t, ours in zip(theirs, review_state)], dtype=bool
+        )
+    else:
+        agrees = np.ones(n, dtype=bool)
+
+    reassigned = np.full(n, None, dtype=object)
+    if values.reassigned_category is not None:
+        theirs = values.reassigned_category[idx]
+        for i in np.flatnonzero(agrees & (review_state == "confirmed")):
+            category = theirs[i]
+            if category in names:
+                reassigned[i] = category
+                # A reassigned beat is flagged as that category alone.
+                for name in names:
+                    flags[name][i] = name == category
+
+    uncertain = np.zeros(n, dtype=bool)
+    if values.uncertain is not None:
+        uncertain = decided & agrees & (np.nan_to_num(values.uncertain[idx]) != 0)
+
+    frame = pd.DataFrame({"ts": beat_ts, "RR": rr, "R_amplitude": amplitude, "HR": hr})
+    for name in names:
+        frame[name] = flags[name]
+    frame["any_arrhythmia"] = flagged
+    if values.manual_added_at is not None:
+        added = values.manual_added_at[idx]
+        if any(value is not None for value in added):
+            frame["manual_added_at"] = added
+    frame["review_state"] = review_state
+    frame["reassigned_category"] = reassigned
+    frame["uncertain"] = uncertain
+    return frame, skipped_outside
+
+
+def _backup_info(row) -> ReviewBackupInfo | None:
+    if row is None:
+        return None
+    return ReviewBackupInfo(
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        replaced_by=row["replaced_by"],
+    )
+
+
+@router.post("/apply", response_model=ReportApplyResult)
+def apply_report(payload: ReportApplyRequest, request: Request) -> ReportApplyResult:
+    """Replace the recording's saved review with the attached report's beats,
+    decisions and bad-data marks, optionally keeping a backup of what was
+    saved. The report is detached afterwards: it is now the review.
+
+    Holds the path's lock throughout, so no edit, review action, arrhythmia
+    run or detection result can land between reading the old state and
+    swapping in the new one."""
+    with path_lock(payload.recording_path):
+        return _apply_report_locked(payload, request.app.state)
+
+
+def _apply_report_locked(payload: ReportApplyRequest, state) -> ReportApplyResult:
+    path = payload.recording_path
+    imported = state.imported_files.get(path)
+    signal_entry = state.signal_cache.get(path)
+    if imported is None or imported.status != "ok" or signal_entry is None:
+        return ReportApplyResult(status="error", error=f"File not imported: {path}")
+    if payload.channel not in imported.channels:
+        return ReportApplyResult(
+            status="error",
+            error=f"Channel {payload.channel!r} is not in this recording.",
+        )
+    entry = state.report_cache.get(path)
+    if entry is None or entry.summary.report_path != payload.report_path:
+        return ReportApplyResult(
+            status="error",
+            error="That report is no longer loaded for this recording. Load it again.",
+        )
+
+    try:
+        frame, skipped_outside = _beat_frame_from_report(
+            entry, signal_entry, payload.channel
+        )
+        beat_settings_json, arrhythmia_settings_json = _settings_snapshot(
+            entry.settings_raw, state
+        )
+    except _ReportError as e:
+        return ReportApplyResult(status="error", error=str(e))
+    except Exception as e:
+        return ReportApplyResult(status="error", error=f"Could not use the report: {e}")
+    marks = entry.summary.bad_data_marks
+
+    conn = db.connect(state.db_path)
+    try:
+        db.purge_expired_backups(conn)
+        # One write transaction from the first read on, so the backup is of
+        # exactly what gets replaced.
+        conn.execute("BEGIN IMMEDIATE")
+        backup = None
+        file_row = db.get_file_row(conn, path, imported.size, imported.modified_time)
+        if file_row is not None:
+            # A backup of nothing would only restore an empty review later.
+            if payload.backup == "keep" and db.has_saved_review(conn, file_row["id"]):
+                backup = db.create_backup(conn, file_row, payload.report_path)
+            db.clear_file_rows(conn, file_row["id"])
+        file_id = db.upsert_file(
+            conn,
+            path,
+            imported.size,
+            imported.modified_time,
+            channel=payload.channel,
+            beat_settings_json=beat_settings_json,
+            arrhythmia_settings_json=arrhythmia_settings_json,
+            source_report=payload.report_path,
+            source_report_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            commit=False,
+        )
+        db.write_beats(
+            conn,
+            file_id,
+            frame,
+            list(
+                zip(
+                    frame["review_state"].tolist(),
+                    frame["reassigned_category"].tolist(),
+                    frame["uncertain"].tolist(),
+                )
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO bad_data_marks (file_id, start, stop) VALUES (?, ?, ?)",
+            [(file_id, mark.start, mark.stop) for mark in marks],
+        )
+        # Hand-added beats stay hand-added: a later re-detect puts them back.
+        if "manual_added_at" in frame.columns:
+            added = frame[frame["manual_added_at"].notna()]
+            conn.executemany(
+                "INSERT INTO manual_beat_edits (file_id, ts, kind, r_amplitude, "
+                "created_at) VALUES (?, ?, 'add', ?, ?)",
+                [
+                    (
+                        file_id,
+                        float(row.ts),
+                        float(row.R_amplitude),
+                        str(row.manual_added_at),
+                    )
+                    for row in added.itertuples()
+                ],
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return ReportApplyResult(status="error", error=f"Could not save the review: {e}")
+    finally:
+        conn.close()
+
+    # Saved: now (still under the lock) the in-memory state follows.
+    state.beat_cache[path] = frame
+    state.typical_rr_cache.pop(path, None)
+    getattr(state, "fresh_beats", set()).discard(path)
+    bump_beat_epoch(state, path)
+    _generations(state).remove(state.report_cache, path)
+
+    count = len(frame)
+    return ReportApplyResult(
+        status="ok",
+        beats=count,
+        reviewed=int((frame["review_state"] != "unreviewed").sum()),
+        bad_data_marks=len(marks),
+        skipped_outside=skipped_outside,
+        mean_hr=float(frame["HR"].mean()) if count else None,
+        duration=float(frame["ts"].iloc[-1] - frame["ts"].iloc[0]) if count else None,
+        backup=_backup_info(backup),
+    )
