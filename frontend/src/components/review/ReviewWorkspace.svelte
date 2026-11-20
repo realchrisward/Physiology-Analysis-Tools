@@ -489,7 +489,7 @@
   // (the workspace then reloads from the saved review).
   async function handleReportReplace(channel: string, backup: BackupMode): Promise<string | null> {
     if (hasPendingUncertain() && !(await guardBeatChange())) {
-      return 'Nothing was replaced: confirm or reject the open beat first.'
+      return 'Nothing was replaced: choose Arrhythmia or Not arrhythmia for the open beat first.'
     }
     if (backup === 'export') {
       const stem = fileNameOf(path).replace(/\.[^./\\]+$/, '')

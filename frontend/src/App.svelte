@@ -208,6 +208,7 @@
     onSettingsOpen={() => (settingsOpen = true)}
     onAboutOpen={() => (aboutOpen = true)}
     onRequestExpand={() => (sidebarCollapsed = false)}
+    showImportProgress={view !== 'import'}
   />
 
   <main class="main-content">

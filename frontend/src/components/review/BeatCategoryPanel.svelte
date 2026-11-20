@@ -23,7 +23,7 @@
   type ReassignableCategory = (typeof REASSIGNABLE_CATEGORIES)[number]
 
   const UNCERTAIN_TITLE =
-    'Tick this if you are not sure of your call. It helps grade the quality of the training data. The beat still needs Confirm or Reject — the mark is saved together with that decision. (U)'
+    'Tick this if you are not sure of your call. It helps grade the quality of the training data. The beat still needs Arrhythmia or Not arrhythmia — the mark is saved together with that decision. (U)'
 
   const CATEGORY_LABELS: Record<ReassignableCategory, string> = {
     bradycardia_absolute: 'Bradycardia (absolute)',
@@ -296,9 +296,9 @@
             data-testid="reject-button"
             disabled={submitting}
             onclick={() => submit('reject')}
-            title="Mark this beat as rejected instead (R)"
+            title="Change this beat to not an arrhythmia (R)"
           >
-            Mark as rejected <kbd>R</kbd>
+            Change to not arrhythmia <kbd>R</kbd>
           </button>
         {:else}
           <button
@@ -307,9 +307,9 @@
             data-testid="confirm-button"
             disabled={submitting}
             onclick={() => submit('confirm')}
-            title="Mark this beat as confirmed instead (C)"
+            title="Change this beat to an arrhythmia (C)"
           >
-            Mark as confirmed <kbd>C</kbd>
+            Change to arrhythmia <kbd>C</kbd>
           </button>
         {/if}
       {/if}
@@ -344,7 +344,7 @@
     </label>
     {#if pendingUncertain}
       <p class="uncertain-hint" data-testid="uncertain-pending-hint">
-        Now confirm or reject — the mark is saved with your decision.
+        Now choose Arrhythmia or Not arrhythmia — the mark is saved with your decision.
       </p>
     {/if}
   </div>
@@ -357,9 +357,9 @@
         data-testid="confirm-button"
         disabled={submitting}
         onclick={() => submit('confirm')}
-        title="Confirm this beat (C)"
+        title="This beat is an arrhythmia (C)"
       >
-        Confirm <kbd>C</kbd>
+        Arrhythmia <kbd>C</kbd>
       </button>
       <button
         type="button"
@@ -367,9 +367,9 @@
         data-testid="reject-button"
         disabled={submitting}
         onclick={() => submit('reject')}
-        title="Reject this beat (R)"
+        title="This beat is not an arrhythmia (R)"
       >
-        Reject <kbd>R</kbd>
+        Not arrhythmia <kbd>R</kbd>
       </button>
     {/if}
 

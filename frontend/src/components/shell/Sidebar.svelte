@@ -35,6 +35,7 @@
   } from '../../lib/stores/flagProjects.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
   import Icon from '../shared/Icon.svelte'
+  import ImportProgress from '../shared/ImportProgress.svelte'
   import MenuButton, { type MenuItem } from '../shared/MenuButton.svelte'
   import SearchField from '../shared/SearchField.svelte'
   import SidebarProjectTree from './SidebarProjectTree.svelte'
@@ -51,7 +52,11 @@
     onSettingsOpen,
     onAboutOpen,
     onRequestExpand,
+    showImportProgress = true,
   }: {
+    // Home shows its own, larger import progress; the sidebar's is for the
+    // other screens.
+    showImportProgress?: boolean
     collapsed?: boolean
     activePath?: string | null
     onReview?: (selection: ReviewSelection) => void
@@ -368,6 +373,9 @@
     {/if}
   </div>
 
+  {#if !collapsed && showImportProgress}
+    <ImportProgress compact />
+  {/if}
   {#if importQueue.detecting && !collapsed}
     <div class="sidebar-detecting" data-testid="sidebar-detecting">
       <span class="text-muted">Detecting beats…</span>

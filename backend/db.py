@@ -321,7 +321,7 @@ def upsert_file(
 CATEGORY_COLUMNS = categories.REASSIGNABLE_CATEGORIES
 
 UNCERTAIN_NEEDS_DECISION = (
-    "Confirm or reject this beat first — the uncertain mark is saved with a decision."
+    "Choose Arrhythmia or Not arrhythmia for this beat first — the uncertain mark is saved with that decision."
 )
 
 

@@ -23,6 +23,7 @@
   import { clearRecentFiles, recentFiles, removeRecentFiles, type RecentFile } from '../../lib/stores/recentFiles.svelte'
   import FlagProjectList from '../flags/FlagProjectList.svelte'
   import Icon from '../shared/Icon.svelte'
+  import ImportProgress from '../shared/ImportProgress.svelte'
   import SearchField from '../shared/SearchField.svelte'
 
   // Keeps "Opened 5 minutes ago" (and the Today / Yesterday groups) honest
@@ -279,6 +280,7 @@
     </header>
   {/if}
 
+  <ImportProgress />
   {#if importQueue.detecting}
     <div class="banner detecting-banner" role="status">
       <span class="spinner" aria-hidden="true"></span>

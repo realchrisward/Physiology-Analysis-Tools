@@ -3886,8 +3886,8 @@
             <li data-testid="report-nav-hint"><kbd>,</kbd> <kbd>.</kbd> Report labels</li>
           {/if}
           {#if beatsOfInterest.length > 0}
-            <li><kbd>C</kbd> Confirm arrhythmia</li>
-            <li><kbd>R</kbd> Reject</li>
+            <li><kbd>C</kbd> Arrhythmia</li>
+            <li><kbd>R</kbd> Not arrhythmia</li>
           {/if}
         </ul>
       {/if}
@@ -4188,8 +4188,8 @@
       </div>
       {@render focusOverlay?.()}
       <ul class="nav-hint focus-overlay-keys" aria-label="Keyboard shortcuts">
-        <li><kbd>C</kbd> Confirm</li>
-        <li><kbd>R</kbd> Reject</li>
+        <li><kbd>C</kbd> Arrhythmia</li>
+        <li><kbd>R</kbd> Not arrhythmia</li>
         <li><kbd>N</kbd>/<kbd>P</kbd> Next / Previous</li>
         {#if flaggedTimes.length > 0}
           <li><kbd>[</kbd>/<kbd>]</kbd> Model flags</li>

@@ -38,9 +38,10 @@
     aria-modal="true"
     aria-labelledby="uncertain-leave-title"
   >
-    <h2 id="uncertain-leave-title">Confirm or reject this beat first</h2>
+    <h2 id="uncertain-leave-title">Choose Arrhythmia or Not arrhythmia first</h2>
     <p>
-      You marked this beat as uncertain. Uncertain beats still need your best call — press Confirm (C) or Reject (R).
+      You marked this beat as uncertain. Uncertain beats still need your best call — press Arrhythmia (C) or Not
+      arrhythmia (R).
       The uncertain mark is saved together with that decision so these beats can be weighted or re-checked when the
       training data is built.
     </p>

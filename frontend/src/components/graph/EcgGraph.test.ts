@@ -1827,8 +1827,8 @@ describe('EcgGraph focus mode and shortcuts', () => {
     const hint = screen.getByTestId('beat-nav-hint')
     expect(hint).toHaveTextContent('N Next')
     expect(hint).toHaveTextContent('P Previous')
-    expect(hint).toHaveTextContent('C Confirm arrhythmia')
-    expect(hint).toHaveTextContent('R Reject')
+    expect(hint).toHaveTextContent('C Arrhythmia')
+    expect(hint).toHaveTextContent('R Not arrhythmia')
   })
 
   it('labels the trace toggle and the marker filters', async () => {

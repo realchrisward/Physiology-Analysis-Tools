@@ -601,16 +601,19 @@ describe('ImportScreen opening several recent files', () => {
     for (const name of names) recordRecentFile(`/data/${name}.txt`, `${name}.txt`)
   }
 
+  // Every path sent to `/files/import`, in order (files are read one per request).
   function importCall(fetchMock: ReturnType<typeof vi.fn>) {
-    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/files/import'))
-    return call ? JSON.parse((call[1] as RequestInit).body as string).paths : null
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/files/import'))
+    return calls.length > 0
+      ? calls.flatMap((call) => JSON.parse((call[1] as RequestInit).body as string).paths)
+      : null
   }
 
   function fileInfo(name: string) {
     return { path: `/data/${name}.txt`, filename: `${name}.txt`, size: 100, defaultChannel: 'channel 1' }
   }
 
-  it('Select all, then Open, loads every recent file in one import and opens the first one listed', async () => {
+  it('Select all, then Open, loads every recent file and opens the first one listed', async () => {
     const fetchMock = vi.fn().mockResolvedValue(importOkResponse(['c', 'b', 'a'].map(fileInfo)))
     vi.stubGlobal('fetch', fetchMock)
     await seedRecents('a', 'b', 'c') // newest first: c, b, a
@@ -622,8 +625,9 @@ describe('ImportScreen opening several recent files', () => {
     expect(screen.getByTestId('open-selected-button')).toHaveTextContent('Open 3')
     await fireEvent.click(screen.getByTestId('open-selected-button'))
 
+    // The first one opens as soon as it is read; the others keep loading.
     await waitFor(() => expect(autoOpenRequest.value?.path).toBe('/data/c.txt'))
-    expect(importCall(fetchMock)).toEqual(['/data/c.txt', '/data/b.txt', '/data/a.txt'])
+    await waitFor(() => expect(importCall(fetchMock)).toEqual(['/data/c.txt', '/data/b.txt', '/data/a.txt']))
     expect(fileRegistry).toHaveLength(3)
     autoOpenRequest.value = null
   })

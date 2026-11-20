@@ -88,8 +88,8 @@ async function startBackend({ token, onExit } = {}) {
   // one concrete, actionable cause.
   if (!fs.existsSync(pythonBin)) {
     throw new Error(
-      `Python virtual environment not found at ${pythonBin}. Follow the setup steps in instructions.md ` +
-        '(create .venv and install backend/requirements.txt) before starting the app.',
+      `Python virtual environment not found at ${pythonBin}. The app is not installed yet: run ` +
+        'installation\\install.bat (Windows) or installation/install.sh (macOS) first — see instructions.md.',
     )
   }
 
@@ -146,7 +146,7 @@ async function startBackend({ token, onExit } = {}) {
     state.stopping = true
     if (state.exited) return Promise.resolve()
     return new Promise((resolve) => {
-      const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 90000)
+      const forceKillTimer = setTimeout(() => proc.kill('SIGKILL'), 10000)
       proc.once('exit', () => {
         clearTimeout(forceKillTimer)
         resolve()
