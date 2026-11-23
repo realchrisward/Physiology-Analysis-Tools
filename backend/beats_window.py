@@ -90,9 +90,9 @@ def typical_rr_for(request: Request, path: str, df: pd.DataFrame) -> float | Non
 def get_beats_of_interest(path: str, request: Request) -> BeatsOfInterestResult:
     """Every beat currently flagged as an arrhythmia, by timestamp.
 
-    A beat the technician rejected has `any_arrhythmia` cleared by the review
-    action itself, so it drops out of this list automatically — reviewing a
-    beat away genuinely removes it from the navigation.
+    A beat the technician rejected keeps the detector's flags (the report
+    shows them next to its label), but drops out of this list: reviewing a
+    beat away removes it from the navigation.
     """
     df = request.app.state.beat_cache.get(path)
     if df is None:
@@ -107,7 +107,10 @@ def get_beats_of_interest(path: str, request: Request) -> BeatsOfInterestResult:
             status="ok", ts=[], count=0, typical_rr=typical_rr_for(request, path, df)
         )
 
-    flagged = df[df["any_arrhythmia"].fillna(False).astype(bool)]
+    is_flagged = df["any_arrhythmia"].fillna(False).astype(bool)
+    if "review_state" in df.columns:
+        is_flagged &= df["review_state"].ne("rejected")
+    flagged = df[is_flagged]
     timestamps = sorted(float(ts) for ts in flagged["ts"])
 
     return BeatsOfInterestResult(

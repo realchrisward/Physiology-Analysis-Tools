@@ -175,7 +175,9 @@
       channelYOut.push(channelYByX.has(x) ? (channelYByX.get(x) ?? null) : null)
 
       const beat = beatByTs.get(x)
-      const category = beat ? primaryDisplayCategory(beat) : null
+      // A rejected beat keeps the detector's flags, but it is not an
+      // arrhythmia: it shows as normal (with the rejected strike).
+      const category = beat ? (beat.review_state === 'rejected' ? 'normal' : primaryDisplayCategory(beat)) : null
       const reviewed = beat ? beat.review_state !== 'unreviewed' : false
 
       // Every marker shares one fixed lane height. The old approach put each
@@ -684,8 +686,8 @@
     }
   }
 
-  // Rejecting a beat clears every category flag (it genuinely wasn't an
-  // arrhythmia), so it correctly buckets as 'normal' just like a beat that
+  // A rejected beat genuinely wasn't an arrhythmia (its detector flags are
+  // kept only for the report), so it buckets as 'normal' just like a beat that
   // was never flagged in the first place — but that collapses "a human
   // reviewed and dismissed this" into the same marker as "this was never
   // suspicious." This overlay draws a small diagonal strike on top of any
@@ -868,8 +870,8 @@
     }
   }
 
-  // True whenever the visible x-range differs from `fullExtent` (a pan,
-  // zoom, or Reset click having happened) — drives the Reset view button's
+  // True whenever the visible x-range has moved from the default view (the
+  // file's opening window, see `defaultViewEnd`) by a pan or zoom — drives the Reset view button's
   // highlighted state below, so it's obvious at a glance that the view has
   // moved from the default and a reset is available.
   let viewChanged: boolean = $state(false)
@@ -3228,9 +3230,12 @@
       // Opens on the first few seconds of the file (Settings → Appearance)
       // rather than the whole recording, and never jumps to a beat of
       // interest on its own — the technician steps to those with N/P.
-      const openWidth = graphPrefs.initialWindowSeconds
-      if (fullExtent.end - fullExtent.start > openWidth) {
-        void setVisibleRange(fullExtent.start, fullExtent.start + openWidth)
+      const openEnd = defaultViewEnd(fullExtent)
+      if (openEnd < fullExtent.end) {
+        void setVisibleRange(fullExtent.start, openEnd)
+        // This IS the default view (what Reset view returns to), so the
+        // Reset button is not highlighted yet.
+        viewChanged = false
         return
       }
 
@@ -3569,6 +3574,13 @@
     void refetch(min, max)
   })
 
+  // The view a recording opens on, and Reset view goes back to: the first
+  // `initialWindowSeconds` of the file (Settings → Appearance, 5 s unless
+  // changed), or the whole file when it is shorter than that.
+  function defaultViewEnd(extent: { start: number; end: number }): number {
+    return Math.min(extent.end, extent.start + graphPrefs.initialWindowSeconds)
+  }
+
   function handleResetView() {
     if (!chart || !fullExtent) return
     if (debounceTimer !== undefined) {
@@ -3577,11 +3589,14 @@
     }
     viewChanged = false
     expirePendingReportSelect()
-    chart.setScale('x', { min: fullExtent.start, max: fullExtent.end })
+    const end = defaultViewEnd(fullExtent)
+    chart.setScale('x', { min: fullExtent.start, max: end })
     // Reset View also hands Y back to auto-ranging, undoing any manual
     // Y-zoom — see `refetch`'s own comment on how.
     yManuallyZoomed = false
-    void refetch(fullExtent.start, fullExtent.end, { pad: false })
+    // The whole file has nothing beyond it to buffer; a window into it is
+    // fetched with the usual margin either side, as when the file opened.
+    void refetch(fullExtent.start, end, end >= fullExtent.end ? { pad: false } : {})
   }
 
   // Positions a bad-data mark within the marks bar as a percentage of the
@@ -3996,7 +4011,7 @@
       class="btn btn-sm"
       class:btn-active={viewChanged}
       data-testid="reset-view-button"
-      title="Reset view"
+      title="Back to the opening view (the first seconds of the recording)"
       onclick={handleResetView}
     >
       <Icon name="refresh-cw" size={14} /> Reset view
@@ -4315,7 +4330,7 @@
           <circle cx="0" cy="0" r="5" fill="none" stroke="currentColor" stroke-width="1.5" />
         </svg>
         Unreviewed
-        <!-- A rejected beat clears every category flag (see
+        <!-- A rejected beat draws as normal (see
              rejectedOverlaySeries' own comment), so on its own it would
              render identically to a never-flagged "Normal" beat — this
              strike is the only thing on the chart that still marks it as

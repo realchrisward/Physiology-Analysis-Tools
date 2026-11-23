@@ -806,14 +806,75 @@ def _annot_labels(beats_df: pd.DataFrame) -> np.ndarray:
     )
 
 
-def _review_columns_together(beats_df: pd.DataFrame) -> pd.DataFrame:
-    """Move `uncertain` and `annot_any_arrhythmia` to sit right after
-    `reassigned_category`, so the review outcome reads as one block (the table
-    itself keeps `manual_added_at` and `uncertain` at its end)."""
-    moved = ["uncertain", "annot_any_arrhythmia"]
-    others = [col for col in beats_df.columns if col not in moved]
-    at = others.index("reassigned_category") + 1
-    return beats_df[others[:at] + moved + others[at:]]
+# The detector flag columns in the order the original desktop app's report had
+# them (arrhythmia_detection.call_arrhythmias: the heuristic categories, then
+# the unsupervised one).
+_ORIGINAL_CATEGORY_ORDER = [
+    "bradycardia_absolute",
+    "tachycardia_absolute",
+    "skipped_beat",
+    "prem_beat",
+    "abn_cluster",
+]
+# This app's review columns, which the original report did not have: after
+# the original ones.
+_REVIEW_COLUMNS = ["review_state", "reassigned_category", "uncertain", "manual_added_at"]
+
+
+def _detector_filled(beats_df: pd.DataFrame, column: str) -> bool:
+    """Whether a detection method filled `column`. The original report only
+    had a method's columns when that method had run; here a method that never
+    ran leaves its column NULL. Reassigning a beat writes every category
+    column (and so did rejecting one, in reviews saved by earlier versions),
+    so beats the review left alone decide (all of them, if the review touched
+    every beat)."""
+    untouched = (beats_df["review_state"] != "rejected") & beats_df["reassigned_category"].isna()
+    rows = beats_df.loc[untouched, column] if untouched.any() else beats_df[column]
+    return bool(rows.notna().any())
+
+
+def _flags(series: pd.Series) -> list:
+    """A 0/1/NULL flag column as the True/False the original report wrote
+    (blank where the beat was not evaluated)."""
+    missing = series.isna().to_numpy()
+    return [None if m else bool(v) for v, m in zip(series.tolist(), missing)]
+
+
+def _original_beats_layout(beats_df: pd.DataFrame) -> pd.DataFrame:
+    """The `beats` sheet with the original desktop app's columns, names, order
+    and value types (its report was its whole beat table: beatcaller's ts / RR
+    / R_amplitude / HR / beats, then call_arrhythmias' flags and their integer
+    `annot_` copies), followed by this app's own review columns.
+
+    `annot_any_arrhythmia` is the review label, as in the original: 2 confirmed
+    arrhythmia, -1 rejected, 1 detected but not reviewed, 0 not detected. The
+    other `annot_` columns are the flags as 0/1, as the original wrote them.
+    `beats_df` is the saved table with `annot_any_arrhythmia` already added.
+    """
+    out = pd.DataFrame(
+        {
+            "ts": beats_df["ts"],
+            "RR": beats_df["rr"],
+            "R_amplitude": beats_df["r_amplitude"],
+            "HR": beats_df["hr"],
+            "beats": 1,
+        }
+    )
+    flag_columns = [
+        column for column in _ORIGINAL_CATEGORY_ORDER if _detector_filled(beats_df, column)
+    ] + ["any_arrhythmia", "other_arrhythmia"]
+    for column in flag_columns:
+        out[column] = _flags(beats_df[column])
+    for column in flag_columns:
+        if column == "any_arrhythmia":
+            out["annot_any_arrhythmia"] = beats_df["annot_any_arrhythmia"]
+        else:
+            out[f"annot_{column}"] = (
+                pd.to_numeric(beats_df[column], errors="coerce").fillna(0).astype(int)
+            )
+    for column in _REVIEW_COLUMNS:
+        out[column] = beats_df[column]
+    return out
 
 
 # The sample rate is estimated from this many samples at the start of the
@@ -976,7 +1037,6 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             params=(file_row["id"],),
         ).drop(columns=["id", "file_id"])
         beats_df["annot_any_arrhythmia"] = _annot_labels(beats_df)
-        beats_df = _review_columns_together(beats_df)
 
         mark_rows = conn.execute(
             "SELECT start, stop FROM bad_data_marks WHERE file_id=? ORDER BY id",
@@ -991,6 +1051,8 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
             {
                 **json.loads(file_row["beat_settings_json"]),
                 **json.loads(file_row["arrhythmia_settings_json"]),
+                # The original report's version of the app itself.
+                "main_version": _or_blank(_analysis_library_version),
                 "heartbeat_version": heartbeat_detection.__version__,
                 "arrhythmia_version": arrhythmia_detection.__version__,
                 "ml_version": ml_tools.__version__,
@@ -1011,7 +1073,9 @@ def generate_report(payload: ReportRequest, request: Request) -> ReportResult:
 
         try:
             writer = pd.ExcelWriter(output_path, engine="xlsxwriter")
-            beats_df.to_excel(writer, sheet_name="beats", index=False)
+            _original_beats_layout(beats_df).to_excel(
+                writer, sheet_name="beats", index=False
+            )
             bad_data_df.to_excel(writer, sheet_name="bad_data_marks", index=False)
             settings_df.to_excel(writer, sheet_name="settings", index=False)
             metadata_df.to_excel(writer, sheet_name="metadata", index=False)

@@ -155,8 +155,9 @@ def test_restore_reflects_reject_made_in_first_session(tmp_path, real_beats_txt_
     result = window_response.json()
     first_beat = result["beats"][0]
     assert first_beat["ts"] == pytest.approx(first_ts, abs=1e-6)
-    assert first_beat["tachycardia_absolute"] is False
-    assert first_beat["any_arrhythmia"] is False
+    assert first_beat["review_state"] == "rejected"
+    assert first_beat["tachycardia_absolute"] is True
+    assert first_beat["any_arrhythmia"] is True
 
 
 def test_restore_no_prior_record_leaves_beat_cache_untouched(

@@ -1509,7 +1509,7 @@ def _beat_frame_from_report(
       2  -> confirmed, flagged (the report's categories, else 'other')
       1  -> unreviewed, flagged (likewise)
       0  -> unreviewed, nothing flagged
-      -1 -> rejected, nothing flagged
+      -1 -> rejected, with the report's flags (a reject keeps the detector's)
     A reassigned category and the uncertain mark are taken from the report
     (this app's own export has them) only where its review_state agrees with
     the label, so a hand-edited label is never contradicted.
@@ -1569,9 +1569,14 @@ def _beat_frame_from_report(
         if name in flags and name not in values.flags:
             flags[name] = entry.category_flags[idx, position].astype(bool)
     flagged = (labels == 2) | (labels == 1)
+    rejected = labels == -1
     for name in names:
-        flags[name] &= flagged
+        flags[name] &= flagged | rejected
     flags["other_arrhythmia"] |= flagged & ~np.any([flags[x] for x in names], axis=0)
+    # A rejected beat is flagged as far as the report says it was detected.
+    rejected_flagged = rejected & np.any([flags[x] for x in names], axis=0)
+    if "any_arrhythmia" in values.flags:
+        rejected_flagged |= rejected & (np.nan_to_num(values.flags["any_arrhythmia"][idx]) != 0)
 
     review_state = np.where(
         labels == 2, "confirmed", np.where(labels == -1, "rejected", "unreviewed")
@@ -1601,9 +1606,23 @@ def _beat_frame_from_report(
         uncertain = decided & agrees & (np.nan_to_num(values.uncertain[idx]) != 0)
 
     frame = pd.DataFrame({"ts": beat_ts, "RR": rr, "R_amplitude": amplitude, "HR": hr})
+    # A category the report has no column for was not evaluated: it is saved
+    # blank, not "not flagged", like a detection method that never ran here
+    # (and an export then leaves it out, as the original report did). Beats
+    # flagged as 'other' for want of a category, and reassigned beats, do have
+    # a value.
+    known = {name for name in names if name in values.flags or name in entry.category_names}
+    if flags["other_arrhythmia"].any():
+        known.add("other_arrhythmia")
+    reassigned_rows = np.array([category is not None for category in reassigned], dtype=bool)
     for name in names:
-        frame[name] = flags[name]
-    frame["any_arrhythmia"] = flagged
+        if name in known:
+            frame[name] = flags[name]
+        else:
+            column = np.full(n, None, dtype=object)
+            column[reassigned_rows] = flags[name][reassigned_rows]
+            frame[name] = column
+    frame["any_arrhythmia"] = flagged | rejected_flagged
     if values.manual_added_at is not None:
         added = values.manual_added_at[idx]
         if any(value is not None for value in added):

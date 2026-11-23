@@ -55,7 +55,7 @@ def test_confirm_does_not_touch_category_flags(tmp_path, real_beats_txt_file):
     assert beat["review_state"] == "confirmed"
 
 
-def test_reject_cascades_and_clears_all_category_flags(tmp_path, real_beats_txt_file):
+def test_reject_keeps_the_detector_flags(tmp_path, real_beats_txt_file):
     client = TestClient(create_app(db_path=str(tmp_path / "test.db")))
     _setup_persisted_beats(client, real_beats_txt_file)
     ts = _exact_ts(client, real_beats_txt_file, 0.0855)
@@ -72,13 +72,9 @@ def test_reject_cascades_and_clears_all_category_flags(tmp_path, real_beats_txt_
 
     beat = _get_beat(client, real_beats_txt_file, 0.0855)
     assert beat is not None
-    assert beat["tachycardia_absolute"] is False
-    assert beat["any_arrhythmia"] is False
-    assert beat["bradycardia_absolute"] is False
-    assert beat["skipped_beat"] is False
-    assert beat["prem_beat"] is False
-    assert beat["abn_cluster"] is False
-    assert beat["other_arrhythmia"] is False
+    assert beat["review_state"] == "rejected"
+    assert beat["tachycardia_absolute"] is True
+    assert beat["any_arrhythmia"] is True
 
 
 def test_reassign_sets_category_and_clears_others(tmp_path, real_beats_txt_file):
@@ -190,13 +186,9 @@ def test_reject_is_immediately_visible_via_beats_window_same_instance(
     assert result["status"] == "ok"
     beat = result["beats"][0]
     assert beat["ts"] == pytest.approx(ts, abs=1e-6)
-    assert beat["tachycardia_absolute"] is False
-    assert beat["any_arrhythmia"] is False
-    assert beat["bradycardia_absolute"] is False
-    assert beat["skipped_beat"] is False
-    assert beat["prem_beat"] is False
-    assert beat["abn_cluster"] is False
-    assert beat["other_arrhythmia"] is False
+    assert beat["review_state"] == "rejected"
+    assert beat["tachycardia_absolute"] is True
+    assert beat["any_arrhythmia"] is True
 
 
 def test_reassign_is_immediately_visible_via_beats_window_same_instance(

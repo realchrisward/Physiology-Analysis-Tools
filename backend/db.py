@@ -346,9 +346,10 @@ def update_beat_category(
     refused (UncertainNeedsDecisionError) unless the beat is already confirmed
     or rejected, so the mark never exists on a beat without a decision.
 
-    `"reject"` clears every category column (not just the top-level
-    `any_arrhythmia` flag) so a rejected beat's per-category data doesn't
-    stay stuck showing as if it were still flagged.
+    `"reject"` leaves the category flags as the detector set them, as the
+    original desktop app did: the decision lives in `review_state`, and the
+    report still shows what was detected next to label -1. Everything that
+    shows or navigates flagged beats treats a rejected beat as normal.
 
     `"remove_flag"` is narrower than all three: it clears exactly one
     auto-detected category column (`category`, already validated by the
@@ -380,9 +381,7 @@ def update_beat_category(
         )
     elif action == "reject":
         conn.execute(
-            "UPDATE beats SET "
-            + ", ".join(f"{col}=0" for col in CATEGORY_COLUMNS)
-            + ", any_arrhythmia=0, review_state='rejected', "
+            "UPDATE beats SET review_state='rejected', "
             "reassigned_category=NULL" + uncertain_set + " WHERE id=?",
             (*uncertain_args, beat_id),
         )

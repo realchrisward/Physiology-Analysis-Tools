@@ -49,21 +49,21 @@
   } = $props()
 
   // `beat` is a plain prop from the parent's last fetch and never updates
-  // on its own after a successful remove/reassign/reject call — so once
+  // on its own after a successful remove/reassign call — so once
   // any action that changes WHICH categories are flagged succeeds, this
   // takes over as the source of truth for what's displayed, tracked
   // locally the same way `reviewState`/`reassignedCategory` already are,
   // rather than requiring the parent to re-fetch and re-pass a fresh
   // `beat`. `null` means "nothing's changed yet — derive from `beat` as
-  // normal"; every action that touches flags (remove_flag, reassign,
-  // reject — never confirm, which leaves flags untouched) sets it to the
-  // exact new set the backend now has.
+  // normal"; every action that touches flags (remove_flag, reassign — never
+  // confirm or reject, which leave flags untouched) sets it to the exact new
+  // set the backend now has.
   let categoryOverride: ReassignableCategory[] | null = $state(null)
 
   // Only categories that actually fired (`=== true`) are ever shown as
   // auto-detected, matching the workflow spec exactly (see task brief step
   // 3) — unless overridden locally by a successful action (see above).
-  let flaggedCategories = $derived(
+  let detectedCategories = $derived(
     categoryOverride ?? REASSIGNABLE_CATEGORIES.filter((cat) => beat[cat] === true),
   )
 
@@ -78,6 +78,10 @@
     beat.review_state && beat.review_state !== 'unreviewed' ? beat.review_state : null,
   )
   let reassignedCategory: string | null = $state(beat.reassigned_category ?? null)
+
+  // A rejected beat keeps the detector's flags (for the report), but none of
+  // them stands: it lists no categories. Arrhythmia brings them back.
+  let flaggedCategories = $derived(reviewState === 'rejected' ? [] : detectedCategories)
 
   // A beat with a terminal judgment already (confirmed or rejected) shows
   // that status plus a single button to switch it, instead of both Confirm
@@ -146,11 +150,9 @@
       // did server-side, so the chip list updates immediately without a
       // re-fetch — see `categoryOverride`'s own comment above.
       if (action === 'remove_flag' && category) {
-        categoryOverride = flaggedCategories.filter((cat) => cat !== category)
+        categoryOverride = detectedCategories.filter((cat) => cat !== category)
       } else if (action === 'reassign' && category) {
         categoryOverride = [category as ReassignableCategory]
-      } else if (action === 'reject') {
-        categoryOverride = []
       }
     } else {
       errorMessage = result.error ?? 'Category update failed'
