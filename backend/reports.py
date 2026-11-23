@@ -1640,14 +1640,9 @@ def _beat_frame_from_report(
     return frame, skipped_outside
 
 
-def _backup_info(row) -> ReviewBackupInfo | None:
-    if row is None:
-        return None
-    return ReviewBackupInfo(
-        created_at=row["created_at"],
-        expires_at=row["expires_at"],
-        replaced_by=row["replaced_by"],
-    )
+def _backup_info(conn, row) -> ReviewBackupInfo | None:
+    details = db.backup_details(conn, row)
+    return ReviewBackupInfo(**details) if details else None
 
 
 @router.post("/apply", response_model=ReportApplyResult)
@@ -1705,7 +1700,9 @@ def _apply_report_locked(payload: ReportApplyRequest, state) -> ReportApplyResul
         if file_row is not None:
             # A backup of nothing would only restore an empty review later.
             if payload.backup == "keep" and db.has_saved_review(conn, file_row["id"]):
-                backup = db.create_backup(conn, file_row, payload.report_path)
+                backup = db.create_backup(
+                    conn, file_row, payload.report_path, db.backup_days(payload.backup_days)
+                )
             db.clear_file_rows(conn, file_row["id"])
         file_id = db.upsert_file(
             conn,
@@ -1752,6 +1749,7 @@ def _apply_report_locked(payload: ReportApplyRequest, state) -> ReportApplyResul
                 ],
             )
         conn.commit()
+        backup_info = _backup_info(conn, backup)
     except Exception as e:
         conn.rollback()
         return ReportApplyResult(status="error", error=f"Could not save the review: {e}")
@@ -1774,5 +1772,5 @@ def _apply_report_locked(payload: ReportApplyRequest, state) -> ReportApplyResul
         skipped_outside=skipped_outside,
         mean_hr=float(frame["HR"].mean()) if count else None,
         duration=float(frame["ts"].iloc[-1] - frame["ts"].iloc[0]) if count else None,
-        backup=_backup_info(backup),
+        backup=backup_info,
     )

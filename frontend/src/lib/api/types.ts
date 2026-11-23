@@ -167,7 +167,25 @@ export interface BeatDeleteResult {
 
 export interface DiscardStateResult {
   status: string
+  // The backup made of the discarded review, if it had anything.
+  backup?: ReviewBackupInfo | null
   error: string | null
+}
+
+// A review saved while the recording had another size or modification time
+// (it was saved again on disk since).
+export interface PreviousVersionInfo {
+  saved_at: string
+  beats: number
+  reviewed: number
+  decided: number
+  bad_data_marks: number
+  channel: string | null
+}
+
+export interface AdoptPreviousResult {
+  status: string
+  error?: string | null
 }
 
 export interface BeatsOfInterestResult {
@@ -206,11 +224,36 @@ export interface BadDataMark {
 
 // A saved review copied aside before a report replaced it; restorable until
 // `expires_at` (ISO, UTC).
+// A copy of a review kept aside (before a report replaced it, or when an
+// earlier backup was restored over it), restorable until `expires_at`.
 export interface ReviewBackupInfo {
+  // Which backup (to restore one other than the newest).
+  id: number
   created_at: string
   expires_at: string
-  // The report that replaced the review this backup holds.
+  // How many days it is kept for.
+  days: number
+  // The report that replaced the review this backup holds; null when it was
+  // made by restoring an earlier backup (`made_by_restore`).
   replaced_by: string | null
+  made_by_restore: boolean
+  // Why it was made: 'report' (a report replaced the review), 'restore' (an
+  // earlier backup was restored over it), 'redetect' (beats were detected
+  // again and some reviewed beats were not found), 'channel' (another
+  // channel's review replaced it), 'fresh' (Start fresh) or 'earlier' (the
+  // review of an earlier version of the file was continued instead).
+  reason: 'report' | 'restore' | 'redetect' | 'channel' | 'fresh' | 'earlier'
+  // What the backed-up review holds.
+  beats: number
+  reviewed: number
+  // Arrhythmia or Not arrhythmia decisions.
+  decided: number
+  bad_data_marks: number
+  channel: string | null
+  // The report that review itself came from, if it did.
+  source_report: string | null
+  // Older backups of the same recording kept besides this one.
+  older_backups: number
 }
 
 export interface FileStateResult {
@@ -225,6 +268,10 @@ export interface FileStateResult {
   source_report?: string | null
   source_report_at?: string | null
   backup?: ReviewBackupInfo | null
+  // Every kept backup, newest first.
+  backups?: ReviewBackupInfo[]
+  // Not found: a review of an earlier version of the file, if any.
+  previous_version?: PreviousVersionInfo | null
   error: string | null
 }
 
@@ -236,7 +283,10 @@ export interface FileStateSummaryResult {
   beats: number
   reviewed: number
   bad_data_marks: number
+  // Arrhythmia or Not arrhythmia decisions.
+  decided: number
   source_report: string | null
+  source_report_at: string | null
   backup: ReviewBackupInfo | null
   error: string | null
 }
@@ -297,6 +347,13 @@ export interface ChannelLabelResult {
 export interface PersistBeatsResult {
   status: string
   count: number
+  // Reviewed beats that kept their review on the saved beats, and those that
+  // found no beat (backed up first: `backup`).
+  review_carried?: number
+  review_dropped?: number
+  // The saved review was another channel's (backed up, not carried).
+  previous_channel?: string | null
+  backup?: ReviewBackupInfo | null
   error: string | null
 }
 

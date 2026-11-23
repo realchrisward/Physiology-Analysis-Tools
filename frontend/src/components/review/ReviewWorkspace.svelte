@@ -2,13 +2,15 @@
   import { onMount, untrack } from 'svelte'
   import { detectBeats } from '../../lib/api/beats'
   import { detectArrhythmias, type ArrhythmiaMethod } from '../../lib/api/arrhythmia'
-  import { formatDate, formatDuration, formatHeartRate } from '../../lib/format'
+  import { formatDate, formatDuration, formatEditTime, formatHeartRate, formatTimeLeft } from '../../lib/format'
   import { REASSIGNABLE_CATEGORIES } from '../../lib/categories'
   import { getBeatsOfInterest } from '../../lib/api/windowing'
   import {
+    adoptPreviousReview,
     discardFileState,
     generateReport,
     getFileState,
+    getFileStateSummary,
     persistBeats,
     putChannel,
     restoreReviewBackup,
@@ -19,6 +21,8 @@
   import BeatCategoryPanel from './BeatCategoryPanel.svelte'
   import ReportBeatInfo from './ReportBeatInfo.svelte'
   import ReportControl from './ReportControl.svelte'
+  import ReviewBackupControl from './ReviewBackupControl.svelte'
+  import ConfirmDialog from '../shared/ConfirmDialog.svelte'
   import ReportUseDialog, { type BackupMode } from './ReportUseDialog.svelte'
   import { reloadReview } from '../../lib/stores/reviewReload.svelte'
   import Icon from '../shared/Icon.svelte'
@@ -38,6 +42,9 @@
     chooseCompare,
     detachReport,
     dismissReplaceNotice,
+    dismissRestoreNotice,
+    getRestoreNotice,
+    setRestoreNotice,
     dismissReportSuggestion,
     getReplaceNotice,
     getReportSession,
@@ -49,7 +56,15 @@
     restoreLinkedReport,
     suggestReport,
   } from '../../lib/stores/reports.svelte'
-  import type { BadDataMark, CategoryUpdateResult, ReportFilter, WindowBeat } from '../../lib/api/types'
+  import type {
+    BadDataMark,
+    CategoryUpdateResult,
+    FileStateSummaryResult,
+    PreviousVersionInfo,
+    ReportFilter,
+    ReviewBackupInfo,
+    WindowBeat,
+  } from '../../lib/api/types'
 
   interface DetectionSummary {
     status: 'pending' | 'ok' | 'error' | null
@@ -489,7 +504,7 @@
 
   // Resolves to a message for the dialog, or null once the review is replaced
   // (the workspace then reloads from the saved review).
-  async function handleReportReplace(channel: string, backup: BackupMode): Promise<string | null> {
+  async function handleReportReplace(channel: string, backup: BackupMode, backupDays: number = 7): Promise<string | null> {
     if (hasPendingUncertain() && !(await guardBeatChange())) {
       return 'Nothing was replaced: choose Arrhythmia or Not arrhythmia for the open beat first.'
     }
@@ -512,7 +527,7 @@
       }
     }
 
-    const result = await replaceWithReport(path, channel, backup === 'keep' ? 'keep' : 'none')
+    const result = await replaceWithReport(path, channel, backup === 'keep' ? 'keep' : 'none', backupDays)
     if (result.status !== 'ok' || result.error) return result.error ?? 'Could not replace the review.'
 
     // The sidebar row shows the beats the recording has now.
@@ -533,31 +548,155 @@
     return null
   }
 
-  // ---- Restoring the review a report replaced -----------------------------
-  // A swap: the backend keeps the review it replaces as a backup in turn.
+  // ---- Restoring a backup --------------------------------------------------
+  // A swap: the backend keeps the review it replaces as a backup in turn, for
+  // `days`. Resolves to whether it was restored (the screen then reloads).
   let restoringBackup: boolean = $state(false)
   let restoreError: string | null = $state(null)
-  // The banner's Restore asks once before switching.
-  let confirmingRestore: boolean = $state(false)
 
-  async function handleRestoreBackup() {
-    if (restoringBackup) return
+  async function handleRestoreBackup(days: number, backupId?: number): Promise<boolean> {
+    if (restoringBackup) return false
+    const backup =
+      (backupId !== undefined ? reviewSource.backups.find((item) => item.id === backupId) : undefined) ??
+      reviewSource.backup
     // It drops the open beat along with the rest of the current review.
-    if (hasPendingUncertain() && !(await guardBeatChange())) return
+    if (hasPendingUncertain() && !(await guardBeatChange())) return false
     restoringBackup = true
     restoreError = null
     try {
-      const result = await restoreReviewBackup(path)
+      const result = await restoreReviewBackup(path, days, backupId)
       if (result.status !== 'ok' || result.error) {
-        if (!destroyed) restoreError = result.error ?? 'Could not restore the previous review.'
+        if (!destroyed) restoreError = result.error ?? 'Could not restore the backup.'
+        return false
+      }
+      if (backup) setRestoreNotice(path, { restored: backup, kept: result.kept ?? null })
+      clearArrhythmiaRuns(path)
+      clearPendingUncertain(path)
+      reloadReview(path)
+      return true
+    } finally {
+      if (!destroyed) restoringBackup = false
+    }
+  }
+
+  // Where the saved review came from and the newest backup kept of an earlier
+  // one, as read when the recording opened (a replace or a restore reloads
+  // the screen, so this is always current). Drives the top bar's button.
+  let reviewSource: {
+    sourceReport: string | null
+    sourceReportAt: string | null
+    // The newest backup, and every one kept (newest first).
+    backup: ReviewBackupInfo | null
+    backups: ReviewBackupInfo[]
+  } = $state({ sourceReport: null, sourceReportAt: null, backup: null, backups: [] })
+
+  // A backup the backend just made (a save that could not carry everything
+  // over, Start fresh): the top bar's button offers it straight away.
+  function rememberBackup(info: ReviewBackupInfo | null | undefined) {
+    if (!info) return
+    const rest = reviewSource.backups.filter((item) => item.id !== info.id)
+    reviewSource = { ...reviewSource, backup: info, backups: [info, ...rest] }
+  }
+
+  // Beats detected here replace a review taken from a report: it is this
+  // app's review from then on (the backend clears the link when they are saved).
+  function forgetReportSource() {
+    reportReviewChannel = null
+    if (reviewSource.sourceReport) reviewSource = { ...reviewSource, sourceReport: null, sourceReportAt: null }
+  }
+
+  // What a save, a channel switch or Start fresh did to the review before it,
+  // when that is worth saying: what was kept, and where the rest went.
+  let saveNotice: {
+    kind: 'channel' | 'dropped' | 'fresh'
+    previousChannel: string | null
+    carried: number
+    dropped: number
+    // The backup just made of the review before, if one was.
+    backup: ReviewBackupInfo | null
+    // After a channel switch: a backup of an earlier review of the channel
+    // switched to, which the notice offers to bring back.
+    earlier: ReviewBackupInfo | null
+  } | null = $state(null)
+
+  // The file was saved again on disk since its review was saved: that review
+  // is offered (see the banner), not opened on its own.
+  let previousVersion: PreviousVersionInfo | null = $state(null)
+  let adoptingPrevious = $state(false)
+  let adoptError: string | null = $state(null)
+
+  async function handleAdoptPrevious() {
+    if (adoptingPrevious) return
+    if (hasPendingUncertain() && !(await guardBeatChange())) return
+    adoptingPrevious = true
+    adoptError = null
+    try {
+      const result = await adoptPreviousReview(path)
+      if (destroyed) return
+      if (result.status !== 'ok' || result.error) {
+        adoptError = result.error ?? 'Could not open the earlier review.'
         return
       }
       clearArrhythmiaRuns(path)
       clearPendingUncertain(path)
       reloadReview(path)
     } finally {
-      if (!destroyed) restoringBackup = false
+      if (!destroyed) adoptingPrevious = false
     }
+  }
+
+  // ---- Asking before saved review work is replaced -------------------------
+  // Switching channel, running beat detection again and Start fresh replace
+  // the saved beats. Each asks first when there is review work at stake, says
+  // what happens to it, and the backend keeps a backup of anything it can't
+  // carry over (reported afterwards in `saveNotice`).
+  let pendingConfirm: {
+    kind: 'channel' | 'redetect' | 'fresh'
+    saved: FileStateSummaryResult
+    toChannel?: string
+  } | null = $state(null)
+
+  async function savedReview(): Promise<FileStateSummaryResult | null> {
+    const result = await getFileStateSummary(path)
+    return result.status === 'ok' && result.found ? result : null
+  }
+
+  async function requestRerunDetection() {
+    const saved = await savedReview()
+    if (destroyed) return
+    if (saved && saved.reviewed > 0) {
+      pendingConfirm = { kind: 'redetect', saved }
+      return
+    }
+    await handleRerunDetection()
+  }
+
+  async function requestStartFresh() {
+    const saved = await savedReview()
+    if (destroyed) return
+    if (saved && (saved.beats > 0 || saved.bad_data_marks > 0)) {
+      pendingConfirm = { kind: 'fresh', saved }
+      return
+    }
+    await handleStartFresh()
+  }
+
+  async function confirmPending() {
+    const pending = pendingConfirm
+    pendingConfirm = null
+    if (!pending) return
+    if (pending.kind === 'channel' && pending.toChannel) {
+      selectedChannel = pending.toChannel
+      await handleChannelChange()
+    } else if (pending.kind === 'redetect') {
+      await handleRerunDetection()
+    } else if (pending.kind === 'fresh') {
+      await handleStartFresh()
+    }
+  }
+
+  function plural(n: number, one: string, many = `${one}s`): string {
+    return `${n.toLocaleString()} ${n === 1 ? one : many}`
   }
 
   // Shown once, right after a report replaced the review: this mount (the
@@ -566,6 +705,10 @@
   // svelte-ignore state_referenced_locally
   let replaceNotice = $state(getReplaceNotice(path))
   untrack(() => dismissReplaceNotice(path))
+  // Likewise right after a backup was restored.
+  // svelte-ignore state_referenced_locally
+  let restoreNotice = $state(getRestoreNotice(path))
+  untrack(() => dismissRestoreNotice(path))
 
   // FP/FN review: the beats a model flagged in THIS recording, if it belongs
   // to an open project — highlighted on the graph, which also opens zoomed on
@@ -785,10 +928,6 @@
     // The report the saved review was taken from, and when (ISO).
     sourceReport: string | null
     sourceReportAt: string | null
-    // When the newest backup (of the review before a report replaced it) was
-    // made and when it expires (ISO), if there is one.
-    backupCreatedAt: string | null
-    backupExpiresAt: string | null
   } | null = $state(null)
   let discarding: boolean = $state(false)
 
@@ -821,6 +960,11 @@
         return
       }
       restored = null
+      rememberBackup(result.backup)
+      saveNotice = result.backup
+        ? { kind: 'fresh', previousChannel: null, carried: 0, dropped: 0, backup: result.backup, earlier: null }
+        : null
+      forgetReportSource()
       selectedBeat = null
       beatsOfInterest = []
       typicalRr = null
@@ -921,8 +1065,12 @@
           marks: (result.bad_data_marks ?? []).length,
           sourceReport: result.source_report ?? null,
           sourceReportAt: result.source_report_at ?? null,
-          backupCreatedAt: result.backup?.created_at ?? null,
-          backupExpiresAt: result.backup?.expires_at ?? null,
+        }
+        reviewSource = {
+          sourceReport: result.source_report ?? null,
+          sourceReportAt: result.source_report_at ?? null,
+          backup: result.backup ?? null,
+          backups: result.backups ?? (result.backup ? [result.backup] : []),
         }
         // A review taken from a report carries the report's arrhythmia flags:
         // the automatic heuristic run must not overwrite them with ours.
@@ -933,6 +1081,17 @@
           fileRow.beatCount = beats.length
           fileRow.meanHr = beats.reduce((sum, beat) => sum + beat.hr, 0) / beats.length
         }
+      } else if (result.status === 'ok') {
+        // Nothing saved for the file as it is now. A backup may still be
+        // kept (Start fresh), and a review of an earlier version of the file
+        // is offered rather than lost from sight.
+        reviewSource = {
+          sourceReport: null,
+          sourceReportAt: null,
+          backup: result.backup ?? null,
+          backups: result.backups ?? (result.backup ? [result.backup] : []),
+        }
+        previousVersion = result.previous_version ?? null
       }
     } finally {
       // Every exit path — found, not-found, or an error/rejection getFileState
@@ -987,6 +1146,32 @@
 
     if (result.status === 'ok' && !result.error) {
       lastPersistedChannel = channel
+      rememberBackup(result.backup)
+      if (result.previous_channel) {
+        // Switching back to a channel reviewed before: its review is in a
+        // backup, offered here rather than left to be found.
+        const earlier =
+          reviewSource.backups.find((item) => item.channel === channel && item.id !== result.backup?.id) ?? null
+        if (result.backup || earlier) {
+          saveNotice = {
+            kind: 'channel',
+            previousChannel: result.previous_channel,
+            carried: 0,
+            dropped: result.review_dropped ?? 0,
+            backup: result.backup ?? null,
+            earlier,
+          }
+        }
+      } else if ((result.review_dropped ?? 0) > 0) {
+        saveNotice = {
+          kind: 'dropped',
+          previousChannel: null,
+          carried: result.review_carried ?? 0,
+          dropped: result.review_dropped ?? 0,
+          backup: result.backup ?? null,
+          earlier: null,
+        }
+      }
     } else {
       persistError = result.error ?? 'Failed to prepare review data'
     }
@@ -1170,8 +1355,19 @@
   // pending "uncertain" mark has to be dealt with first; if the technician
   // stays, the select goes back to the channel still on screen.
   async function handleChannelSelectChange() {
+    const target = selectedChannel
     if (hasPendingUncertain() && !(await guardBeatChange())) {
       selectedChannel = activeChannel
+      return
+    }
+    // Each channel has its own review: one with reviewed beats on another
+    // channel than this is replaced (kept as a backup), so ask first. The
+    // select shows the channel on screen until the answer.
+    const saved = await savedReview()
+    if (destroyed) return
+    if (saved && saved.channel && saved.channel !== target && saved.reviewed > 0) {
+      selectedChannel = activeChannel
+      pendingConfirm = { kind: 'channel', saved, toChannel: target }
       return
     }
     await handleChannelChange()
@@ -1200,7 +1396,7 @@
       activeChannel = channel
       clearArrhythmiaRuns(path)
       // Freshly detected beats carry no report flags, on any channel.
-      reportReviewChannel = null
+      forgetReportSource()
       // A different channel is a different set of beats for the report to match.
       scheduleReportSync()
       // Remember this channel choice for next time this file is reopened
@@ -1262,8 +1458,17 @@
       persistPending = false
       persistError = null
       clearArrhythmiaRuns(path)
+      forgetReportSource()
       refreshGraphBeats()
       await persistChannelData(channel)
+      if (destroyed || channel !== activeChannel) return
+      // New beats have no arrhythmia flags yet, and the beats of interest
+      // still pointed at the old ones: find them again, as when the file
+      // opened (the heuristic run, if nothing is flagged). Decisions and the
+      // categories of Arrhythmia beats were carried over by the save.
+      const state = await refreshBeatsOfInterest()
+      if (destroyed || channel !== activeChannel) return
+      if (state === 'has-beats' && beatsOfInterest.length === 0) await autoRunArrhythmiaDetection(channel)
     } else {
       detection = {
         status: 'error',
@@ -1434,6 +1639,15 @@
         <span class="summary-label">Report</span>
         <span class="summary-value" data-testid="toolbar-summary-report">{reportSummary}</span>
       </span>
+      {#if reviewSource.backup}
+        <span
+          class="summary-item"
+          title={`Backup of your earlier review, made ${formatEditTime(reviewSource.backup.created_at)}, kept until ${formatDate(reviewSource.backup.expires_at)}`}
+        >
+          <span class="summary-label">Backup</span>
+          <span class="summary-value" data-testid="toolbar-summary-backup">{formatTimeLeft(reviewSource.backup.expires_at)}</span>
+        </span>
+      {/if}
       <button
         type="button"
         class="icon-btn toolbar-fold-btn"
@@ -1513,7 +1727,7 @@
           class="btn btn-sm"
           data-testid="rerun-detection-button"
           disabled={!hydrationChecked || detection.status === 'pending'}
-          onclick={handleRerunDetection}
+          onclick={() => void requestRerunDetection()}
         >
           Re-run detection
         </button>
@@ -1589,7 +1803,19 @@
          groups above. -->
     <div class="toolbar-group">
       <span class="toolbar-group-label">Report</span>
-      <ReportControl {path} onUseAsReview={() => (useAsReviewRequested = true)} />
+      <div class="toolbar-group-row">
+        <ReportControl {path} onUseAsReview={() => (useAsReviewRequested = true)} />
+        <ReviewBackupControl
+          {path}
+          sourceReport={reviewSource.sourceReport}
+          sourceReportAt={reviewSource.sourceReportAt}
+          backups={reviewSource.backups}
+          restoring={restoringBackup}
+          error={restoreError}
+          channelName={(channel) => channelLabel(fileRow, channel)}
+          onRestore={handleRestoreBackup}
+        />
+      </div>
     </div>
   </div>
   </div>
@@ -1665,30 +1891,194 @@
     </div>
   {/if}
 
+  {#if previousVersion}
+    <!-- The recording was saved again on disk after its review: offered, not
+         dropped from sight. -->
+    <div class="restore-banner previous-version-banner" data-testid="previous-version-banner" role="status">
+      <Icon name="clock" size={14} />
+      <span>
+        This recording was saved again on disk after your review of
+        <strong>{formatEditTime(previousVersion.saved_at)}</strong>
+        ({previousVersion.beats.toLocaleString()} beats, {previousVersion.reviewed.toLocaleString()} reviewed,
+        {previousVersion.bad_data_marks} bad-data {previousVersion.bad_data_marks === 1 ? 'range' : 'ranges'}{#if previousVersion.channel},
+          on {channelLabel(fileRow, previousVersion.channel)}{/if}), so it opened without it. Continue that review if
+        the recording's data did not change (for example, it was only re-saved).
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        data-testid="adopt-previous-button"
+        disabled={adoptingPrevious}
+        onclick={() => void handleAdoptPrevious()}
+      >
+        {adoptingPrevious ? 'Opening…' : 'Continue that review'}
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="dismiss-previous-version"
+        title="Keep the new review; the earlier one stays saved for the earlier version of the file"
+        disabled={adoptingPrevious}
+        onclick={() => (previousVersion = null)}
+      >
+        Start a new review
+      </button>
+      {#if adoptError}<span class="text-danger" data-testid="adopt-previous-error">{adoptError}</span>{/if}
+    </div>
+  {/if}
+
+  {#if saveNotice}
+    <div class="restore-banner" data-testid="save-notice-banner" role="status">
+      <Icon name="alert-circle" size={14} />
+      <span>
+        {#if saveNotice.kind === 'channel'}
+          You're now reviewing <strong>{channelLabel(fileRow, activeChannel)}</strong>, which has its own review.
+          {#if saveNotice.backup}
+            Your review on <strong>{channelLabel(fileRow, saveNotice.previousChannel ?? '')}</strong>
+            ({saveNotice.dropped.toLocaleString()} reviewed {saveNotice.dropped === 1 ? 'beat' : 'beats'}) is kept as a
+            backup until <strong>{formatDate(saveNotice.backup.expires_at)}</strong>: switch back and use
+            <em>Restore backup</em> in the top bar to continue it.
+          {/if}
+          {#if saveNotice.earlier}
+            You have a backup of your earlier review of this channel from
+            <strong>{formatEditTime(saveNotice.earlier.created_at)}</strong>
+            ({saveNotice.earlier.decided.toLocaleString()} with a decision).
+          {/if}
+        {:else if saveNotice.kind === 'dropped'}
+          Beats were detected again. {saveNotice.carried.toLocaleString()} reviewed
+          {saveNotice.carried === 1 ? 'beat kept its' : 'beats kept their'} review, but
+          {saveNotice.dropped.toLocaleString()} {saveNotice.dropped === 1 ? 'was' : 'were'} not found among the new
+          beats. Your review from before is kept as a backup{#if saveNotice.backup}&nbsp;until
+            <strong>{formatDate(saveNotice.backup.expires_at)}</strong>{/if} (<em>Restore backup</em> in the top bar).
+        {:else}
+          Started fresh. Your earlier review is kept as a backup{#if saveNotice.backup}&nbsp;until
+            <strong>{formatDate(saveNotice.backup.expires_at)}</strong>{/if}: <em>Restore backup</em> in the top bar
+          brings it back.
+        {/if}
+      </span>
+      {#if saveNotice.kind === 'channel' && saveNotice.earlier}
+        {@const earlier = saveNotice.earlier}
+        <button
+          type="button"
+          class="btn btn-sm btn-primary"
+          data-testid="restore-channel-backup-button"
+          title="Bring back your earlier review of this channel (the new one is kept as a backup in its place)"
+          disabled={restoringBackup}
+          onclick={() => void handleRestoreBackup(earlier.days, earlier.id)}
+        >
+          {restoringBackup ? 'Restoring…' : `Restore my review of ${channelLabel(fileRow, activeChannel)}`}
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="dismiss-save-notice"
+        aria-label="Dismiss"
+        onclick={() => (saveNotice = null)}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
+
+  {#if pendingConfirm}
+    {@const saved = pendingConfirm.saved}
+    {#if pendingConfirm.kind === 'channel'}
+      <ConfirmDialog
+        title={`Switch to ${channelLabel(fileRow, pendingConfirm.toChannel ?? '')}?`}
+        confirmLabel="Switch channel"
+        testid="confirm-channel-switch"
+        onConfirm={() => void confirmPending()}
+        onCancel={() => (pendingConfirm = null)}
+      >
+        {#snippet body()}
+          <p>
+            Each channel has its own review. Your review on <strong>{channelLabel(fileRow, saved.channel ?? '')}</strong>
+            ({saved.reviewed.toLocaleString()} reviewed beats, {saved.decided.toLocaleString()} with a decision) will be
+            kept as a backup for 7 days.
+          </p>
+          <p>
+            To go on with it later, switch back and use <em>Restore backup</em> in the top bar. Bad-data marks stay with
+            the recording.
+          </p>
+        {/snippet}
+      </ConfirmDialog>
+    {:else if pendingConfirm.kind === 'redetect'}
+      <ConfirmDialog
+        title="Run beat detection again?"
+        confirmLabel="Run detection"
+        testid="confirm-redetect"
+        onConfirm={() => void confirmPending()}
+        onCancel={() => (pendingConfirm = null)}
+      >
+        {#snippet body()}
+          <p>
+            Beats are detected again with the current settings. Your review of
+            {saved.reviewed.toLocaleString()} {saved.reviewed === 1 ? 'beat moves' : 'beats moves'} to the same beats in
+            the new detection (a beat may move by up to 10 ms); Arrhythmia beats keep their categories.
+          </p>
+          <p>
+            If a reviewed beat is not found again, your review from before is kept as a backup and you'll be told.
+            Beats you added or deleted by hand and bad-data marks are kept.
+          </p>
+          {#if reviewSource.sourceReport}
+            <p>
+              Your review came from report <strong>{fileNameOf(reviewSource.sourceReport)}</strong>: afterwards, beats
+              without a decision get this app's arrhythmia flags instead of the report's.
+            </p>
+          {/if}
+        {/snippet}
+      </ConfirmDialog>
+    {:else}
+      <ConfirmDialog
+        title="Start fresh?"
+        confirmLabel="Start fresh"
+        danger
+        testid="confirm-start-fresh"
+        onConfirm={() => void confirmPending()}
+        onCancel={() => (pendingConfirm = null)}
+      >
+        {#snippet body()}
+          <p>
+            This removes the saved review of this recording ({saved.beats.toLocaleString()} beats,
+            {saved.reviewed.toLocaleString()} reviewed, {saved.bad_data_marks} bad-data
+            {saved.bad_data_marks === 1 ? 'range' : 'ranges'}) and detects beats again from scratch.
+          </p>
+          <p>A backup is kept for 7 days: <em>Restore backup</em> in the top bar brings it back.</p>
+        {/snippet}
+      </ConfirmDialog>
+    {/if}
+  {/if}
+
   {#if replaceNotice}
-    <!-- Right after a report replaced the review: says what came in, and
-         offers the backup straight away. -->
+    <!-- Right after a report replaced the review: what came in, and whether
+         (and until when) the review before it is kept. -->
     <div class="restore-banner" data-testid="review-replaced-banner" role="status">
       <Icon name="check-circle" size={14} />
       <span>
-        Review replaced with <strong>{replaceNotice.reportName}</strong> —
-        <strong>{replaceNotice.beats.toLocaleString()}</strong> beats,
-        <strong>{replaceNotice.reviewed.toLocaleString()}</strong> reviewed,
-        <strong>{replaceNotice.badDataMarks}</strong> bad-data {replaceNotice.badDataMarks === 1 ? 'range' : 'ranges'}.
+        Your review now comes from <strong>{replaceNotice.reportName}</strong>:
+        {plural(replaceNotice.beats, 'beat')}, {replaceNotice.reviewed.toLocaleString()} reviewed,
+        {plural(replaceNotice.badDataMarks, 'bad-data range')}.
         {#if replaceNotice.skippedOutside > 0}
-          {replaceNotice.skippedOutside.toLocaleString()} report beats outside the recording were left out.
+          {plural(replaceNotice.skippedOutside, 'report beat')} outside the recording were left out.
+        {/if}
+        {#if replaceNotice.backup}
+          Your earlier review is kept as a backup until <strong>{formatDate(replaceNotice.backup.expires_at)}</strong>
+          ({plural(replaceNotice.backup.days, 'day')}); restore it any time with <em>Restore backup</em> in the top bar.
+        {:else}
+          No backup of your earlier review was kept.
         {/if}
       </span>
-      {#if replaceNotice.backupExpiresAt}
+      {#if replaceNotice.backup && reviewSource.backup}
         <button
           type="button"
           class="btn btn-sm"
           data-testid="undo-replace-button"
-          title={`Put back the review you had before (backup kept until ${formatDate(replaceNotice.backupExpiresAt)})`}
+          title="Put your earlier review back now (the report's review is kept as a backup in its place)"
           disabled={restoringBackup}
-          onclick={handleRestoreBackup}
+          onclick={() => void handleRestoreBackup(replaceNotice?.backup?.days ?? 7)}
         >
-          {restoringBackup ? 'Restoring…' : 'Undo'}
+          {restoringBackup ? 'Restoring…' : 'Undo: restore my earlier review'}
         </button>
       {/if}
       {#if restoreError}<span class="text-danger" data-testid="restore-error">{restoreError}</span>{/if}
@@ -1705,58 +2095,51 @@
         <Icon name="x" size={12} />
       </button>
     </div>
+  {:else if restoreNotice}
+    <!-- Right after a backup was restored: what came back, and where the
+         review it replaced went. -->
+    <div class="restore-banner" data-testid="backup-restored-banner" role="status">
+      <Icon name="check-circle" size={14} />
+      <span>
+        Backup restored: your review from <strong>{formatEditTime(restoreNotice.restored.created_at)}</strong> is back
+        ({plural(restoreNotice.restored.beats, 'beat')}, {restoreNotice.restored.reviewed.toLocaleString()} reviewed,
+        {plural(restoreNotice.restored.bad_data_marks, 'bad-data range')}).
+        {#if restoreNotice.kept}
+          The review it replaced is now the backup, kept until
+          <strong>{formatDate(restoreNotice.kept.expires_at)}</strong> ({plural(restoreNotice.kept.days, 'day')}).
+        {/if}
+      </span>
+      <button
+        type="button"
+        class="btn btn-sm"
+        data-testid="dismiss-restored-backup-banner"
+        aria-label="Dismiss"
+        onclick={() => {
+          restoreNotice = null
+          restored = null
+        }}
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
   {:else if restored}
     <div class="restore-banner" data-testid="restored-session-banner">
       <Icon name="check-circle" size={14} />
       <span>
-        Picked up where you left off —
-        {#if restored.sourceReport}
-          review imported from <strong title={restored.sourceReport}>{fileNameOf(restored.sourceReport)}</strong
-          >{#if restored.sourceReportAt}&nbsp;on {formatDate(restored.sourceReportAt)}{/if},
-        {/if}
-        <strong>{restored.totalBeats}</strong> saved beats,
-        <strong>{restored.reviewedBeats}</strong> already reviewed, and
+        Picked up where you left off:
+        <strong>{restored.totalBeats.toLocaleString()}</strong> saved beats,
+        <strong>{restored.reviewedBeats.toLocaleString()}</strong> reviewed and
         <strong>{restored.marks}</strong> bad-data {restored.marks === 1 ? 'range' : 'ranges'}.
-      </span>
-      {#if restored.backupExpiresAt}
-        {#if confirmingRestore}
-          <!-- Asked first: the review on screen is swapped out (and kept as a
-               backup), which is easy to do by accident from a banner. -->
-          <span class="restore-confirm" data-testid="restore-backup-confirm-text">
-            Switch to the review backed up on {formatDate(restored.backupCreatedAt ?? restored.backupExpiresAt)}?
-            The current one is kept as a backup.
-          </span>
-          <button
-            type="button"
-            class="btn btn-sm btn-primary"
-            data-testid="restore-backup-confirm"
-            disabled={restoringBackup || discarding}
-            onclick={handleRestoreBackup}
-          >
-            {restoringBackup ? 'Restoring…' : 'Switch'}
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            data-testid="restore-backup-cancel"
-            disabled={restoringBackup}
-            onclick={() => (confirmingRestore = false)}
-          >
-            Cancel
-          </button>
-        {:else}
-          <button
-            type="button"
-            class="btn btn-sm"
-            data-testid="restore-backup-button"
-            title={`Put back the review saved before a report replaced it (backup kept until ${formatDate(restored.backupExpiresAt)})`}
-            disabled={restoringBackup || discarding}
-            onclick={() => (confirmingRestore = true)}
-          >
-            Restore previous review…
-          </button>
+        {#if restored.sourceReport}
+          This review was taken from report
+          <strong title={restored.sourceReport}>{fileNameOf(restored.sourceReport)}</strong
+          >{#if restored.sourceReportAt}&nbsp;on {formatDate(restored.sourceReportAt)}{/if}.
         {/if}
-      {/if}
+        {#if reviewSource.backup}
+          A backup of your earlier review is kept ({formatTimeLeft(reviewSource.backup.expires_at)}): see
+          <em>Restore backup</em> in the top bar.
+        {/if}
+      </span>
       {#if restoreError}<span class="text-danger" data-testid="restore-error">{restoreError}</span>{/if}
       <button
         type="button"
@@ -1764,7 +2147,7 @@
         data-testid="start-fresh-button"
         title="Discard the saved review for this file and detect again from scratch"
         disabled={discarding || restoringBackup}
-        onclick={handleStartFresh}
+        onclick={() => void requestStartFresh()}
       >
         {discarding ? 'Starting fresh…' : 'Start fresh'}
       </button>
@@ -2074,11 +2457,6 @@
 
   .restore-banner span {
     flex: 1;
-  }
-
-  .restore-banner .restore-confirm {
-    flex-basis: 100%;
-    font-weight: 500;
   }
 
   /* Named size container: the toolbar (and ArrhythmiaControls inside it)

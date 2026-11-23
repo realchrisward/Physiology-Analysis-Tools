@@ -1,6 +1,7 @@
 import { afterReviewChange } from '../reviewChanges'
 import { apiGet, apiPost } from './http'
 import type {
+  AdoptPreviousResult,
   BadDataAddResult,
   BadDataDeleteResult,
   BadDataUpdateResult,
@@ -30,8 +31,19 @@ export function getFileStateSummary(path: string): Promise<FileStateSummaryResul
 }
 
 // Puts back the review a report replaced (the newest unexpired backup).
-export function restoreReviewBackup(path: string): Promise<RestoreBackupResult> {
-  return afterReviewChange(apiPost('/files/state/restore-backup', 'POST', { path }), path)
+// The review it swaps out is kept as a backup in turn, for `days`. Restores
+// the newest backup unless `backupId` names another.
+export function restoreReviewBackup(path: string, days: number = 7, backupId?: number): Promise<RestoreBackupResult> {
+  return afterReviewChange(
+    apiPost('/files/state/restore-backup', 'POST', { path, days, backup_id: backupId }),
+    path,
+  )
+}
+
+// Continues the review saved for an earlier version of the file (it was
+// saved again on disk since) as the review of the file as it is now.
+export function adoptPreviousReview(path: string): Promise<AdoptPreviousResult> {
+  return afterReviewChange(apiPost('/files/state/adopt-previous', 'POST', { path }), path)
 }
 
 export function putChannel(path: string, channel: string): Promise<ChannelPersistResult> {

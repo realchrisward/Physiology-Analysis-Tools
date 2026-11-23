@@ -9,8 +9,14 @@
   import Icon from '../shared/Icon.svelte'
   import { getFileStateSummary } from '../../lib/api/persistence'
   import type { FileStateSummaryResult } from '../../lib/api/types'
-  import { formatDate } from '../../lib/format'
-  import { REPORT_LABEL_COLOR_VAR, REPORT_LABEL_NAME, REPORT_LABELS, reportMatch } from '../../lib/reports'
+  import { fileNameOf, formatDate, formatTimeLeft } from '../../lib/format'
+  import {
+    BACKUP_DAY_OPTIONS,
+    REPORT_LABEL_COLOR_VAR,
+    REPORT_LABEL_NAME,
+    REPORT_LABELS,
+    reportMatch,
+  } from '../../lib/reports'
   import { channelLabel, fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import { getReportSession } from '../../lib/stores/reports.svelte'
 
@@ -44,11 +50,11 @@
     onCompare: () => void
     onCancel: () => void
     // Resolves to an error to show, or null once the review was replaced.
-    onReplace: (channel: string, backup: BackupMode) => Promise<string | null>
+    // `backupDays`: how long a backup ('keep') is kept.
+    onReplace: (channel: string, backup: BackupMode, backupDays: number) => Promise<string | null>
   } = $props()
 
   const uid = $props.id()
-  const BACKUP_DAYS = 7
 
   let session = $derived(getReportSession(path))
   let summary = $derived(session.summary)
@@ -61,6 +67,7 @@
   // svelte-ignore state_referenced_locally
   let channel: string = $state(activeChannel)
   let backup = $state<BackupMode>('keep')
+  let backupDays = $state(7)
   let busy = $state(false)
   let error = $state<string | null>(null)
 
@@ -151,7 +158,7 @@
       // Without the choice on screen (nothing was saved when asked) a backup
       // is still asked for: something may have been saved since, and the
       // backend skips backing up an empty review.
-      error = await onReplace(channel, hasSaved ? backup : 'keep')
+      error = await onReplace(channel, hasSaved ? backup : 'keep', backupDays)
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
     } finally {
@@ -160,17 +167,21 @@
   }
 
   function backupUntil(): string {
-    return formatDate(new Date(Date.now() + BACKUP_DAYS * 86400000).toISOString())
+    return formatDate(new Date(Date.now() + backupDays * 86400000).toISOString())
+  }
+
+  function plural(n: number, one: string, many = `${one}s`): string {
+    return `${n.toLocaleString()} ${n === 1 ? one : many}`
   }
 
   let replaceLabel = $derived(
     !hasSaved
       ? 'Use as my review'
       : backup === 'export'
-        ? 'Export, then replace'
+        ? 'Save a copy, then replace'
         : backup === 'none'
-          ? 'Replace without backup'
-          : 'Replace review',
+          ? 'Replace without a copy'
+          : 'Keep a backup and replace',
   )
 </script>
 
@@ -263,8 +274,8 @@
           <span class="choice-body">
             <span class="choice-title">Replace my review with this report</span>
             <span class="choice-desc">
-              Use the report's beats, decisions and bad-data marks as this recording's review, for example to carry
-              on an earlier review here.
+              The report's beats, decisions and bad-data marks become this recording's review, for example to carry
+              on an earlier review here. You can keep a backup of your review first.
             </span>
           </span>
         </label>
@@ -293,34 +304,55 @@
             {savedError} Nothing can be replaced until this is known.
           </p>
           <button type="button" class="btn btn-sm retry" onclick={() => void loadSaved()}>Try again</button>
-        {:else if hasSaved && saved}
-          <div class="change-row">
-            <span class="change-label">Your saved review</span>
-            <span>
-              <strong>{saved.beats.toLocaleString()}</strong> beats ·
-              <strong>{saved.reviewed.toLocaleString()}</strong> reviewed ·
-              <strong>{saved.bad_data_marks}</strong> bad-data {saved.bad_data_marks === 1 ? 'range' : 'ranges'}
-            </span>
-          </div>
-          <div class="change-arrow" aria-hidden="true"><Icon name="chevron-down" size={14} /></div>
         {:else}
-          <p class="text-muted nothing">This recording has no saved review yet, so nothing will be lost.</p>
+          <table class="compare" data-testid="report-use-compare-table">
+            <thead>
+              <tr>
+                <th scope="col"><span class="sr-only">What</span></th>
+                <th scope="col">Your review now</th>
+                <th scope="col">After replacing</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Beats</th>
+                <td>{hasSaved && saved ? saved.beats.toLocaleString() : '—'}</td>
+                <td><strong>{summary.total_beats.toLocaleString()}</strong></td>
+              </tr>
+              <tr>
+                <th scope="row" title="Beats marked Arrhythmia or Not arrhythmia">Decisions</th>
+                <td>{hasSaved && saved ? saved.decided.toLocaleString() : '—'}</td>
+                <td><strong>{decisions.toLocaleString()}</strong></td>
+              </tr>
+              <tr>
+                <th scope="row">Bad-data ranges</th>
+                <td>{hasSaved && saved ? saved.bad_data_marks : '—'}</td>
+                <td><strong>{summary.bad_data_marks.length}</strong></td>
+              </tr>
+              <tr>
+                <th scope="row">Comes from</th>
+                <td>
+                  {#if !hasSaved}
+                    nothing saved yet
+                  {:else if saved?.source_report}
+                    <span title={saved.source_report}>report {fileNameOf(saved.source_report)}</span>
+                  {:else}
+                    this app
+                  {/if}
+                </td>
+                <td><span title={summary.report_path}>report {summary.filename}</span></td>
+              </tr>
+            </tbody>
+          </table>
+          {#if !hasSaved}
+            <p class="text-muted nothing">This recording has no saved review yet, so nothing will be lost.</p>
+          {/if}
         {/if}
-        <div class="change-row">
-          <span class="change-label">From the report</span>
-          <span>
-            <strong>{summary.total_beats.toLocaleString()}</strong> beats ·
-            <strong>{decisions.toLocaleString()}</strong> decisions ·
-            <strong>{summary.bad_data_marks.length}</strong> bad-data {summary.bad_data_marks.length === 1
-              ? 'range'
-              : 'ranges'}
-          </span>
-        </div>
       </section>
 
       {#if channels.length > 1}
         <label class="field">
-          Save the report's beats on channel
+          Put the report's beats on channel
           <select bind:value={channel} data-testid="report-use-channel" disabled={busy}>
             {#each channels as option (option)}
               {@const label = channelLabel(fileRow, option)}
@@ -339,37 +371,58 @@
 
       {#if hasSaved}
         <fieldset class="backup">
-          <legend>Before replacing</legend>
+          <legend>Keep a copy of your review now?</legend>
           <label class="backup-option">
             <input type="radio" name={`${uid}-backup`} value="keep" bind:group={backup} disabled={busy}
               data-testid="report-use-backup-keep" />
             <span>
-              <span class="backup-title">Keep a backup for {BACKUP_DAYS} days</span>
-              <span class="backup-desc">Restore it from this recording's banner until {backupUntil()}.</span>
+              <span class="backup-title backup-title-row">
+                Keep a backup in the app for
+                <select
+                  bind:value={backupDays}
+                  disabled={busy}
+                  data-testid="report-use-backup-days"
+                  aria-label="Keep the backup for"
+                  onchange={() => (backup = 'keep')}
+                >
+                  {#each BACKUP_DAY_OPTIONS as option (option)}
+                    <option value={option}>{option} days</option>
+                  {/each}
+                </select>
+              </span>
+              <span class="backup-desc">
+                Restore it any time until <strong>{backupUntil()}</strong> with <em>Restore backup</em> in the top bar.
+              </span>
             </span>
           </label>
           <label class="backup-option">
             <input type="radio" name={`${uid}-backup`} value="export" bind:group={backup} disabled={busy}
               data-testid="report-use-backup-export" />
             <span>
-              <span class="backup-title">Export my current review to an .xlsx file</span>
-              <span class="backup-desc">Choose where to save it; the review is replaced once it is written.</span>
+              <span class="backup-title">Save a copy as an .xlsx file</span>
+              <span class="backup-desc">You choose where to save it; your review is replaced only once the file is written.</span>
             </span>
           </label>
           <label class="backup-option">
             <input type="radio" name={`${uid}-backup`} value="none" bind:group={backup} disabled={busy}
               data-testid="report-use-backup-none" />
             <span>
-              <span class="backup-title">Replace without a backup</span>
-              <span class="backup-desc">Your current review can't be brought back.</span>
+              <span class="backup-title">Don't keep a copy</span>
+              <span class="backup-desc">Your review now can't be brought back.</span>
             </span>
           </label>
+          {#if saved?.backup}
+            <p class="hint text-muted" data-testid="report-use-existing-backup">
+              The backup you already have (made {formatDate(saved.backup.created_at)},
+              {formatTimeLeft(saved.backup.expires_at)}) is kept too.
+            </p>
+          {/if}
         </fieldset>
       {/if}
 
       <p class="hint text-muted">
-        Re-running beat detection later replaces these beats with newly detected ones; decisions are kept where the
-        times match.
+        Running beat detection again later replaces the report's beats with newly detected ones; decisions are kept
+        where the times match.
       </p>
 
       {#if blockedReason}
@@ -611,23 +664,53 @@
     align-self: flex-start;
   }
 
-  .change-row {
-    display: flex;
+  .compare {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .compare th,
+  .compare td {
+    padding: 3px var(--space-2);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .compare thead th {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .compare tbody th {
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .compare tbody td {
+    overflow-wrap: anywhere;
+  }
+
+  .backup-title-row {
+    display: inline-flex;
     flex-wrap: wrap;
-    gap: var(--space-1) var(--space-3);
-    align-items: baseline;
+    align-items: center;
+    gap: var(--space-2);
   }
 
-  .change-label {
-    min-width: 120px;
-    color: var(--color-text-muted);
+  .backup-title-row select {
+    padding: 1px var(--space-1);
+    font-size: var(--font-size-sm);
+    font-weight: 400;
   }
 
-  .change-arrow {
-    display: flex;
-    padding-left: 120px;
-    color: var(--color-text-muted);
-  }
+
+
 
   .backup legend {
     padding: 0;

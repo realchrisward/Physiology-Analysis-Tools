@@ -95,7 +95,9 @@ def detect_beats(payload: BeatDetectRequest, request: Request) -> BeatDetectionR
                         # the same beats even where a timestamp coincides.
                         if file_row["channel"] == payload.channel:
                             df = db.with_review_state(
-                                df, db.load_review_state(conn, file_row["id"])
+                                df,
+                                db.load_review_state(conn, file_row["id"]),
+                                db.load_confirmed_categories(conn, file_row["id"]),
                             )
                 finally:
                     conn.close()

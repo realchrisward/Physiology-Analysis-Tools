@@ -213,10 +213,46 @@ class ReviewBackupInfo(BaseModel):
     """A saved review copied aside before a report replaced it (see
     db.create_backup); restorable until `expires_at`."""
 
+    # Which backup (to restore one other than the newest).
+    id: int = 0
     created_at: str
     expires_at: str
-    # The report that replaced the review this backup holds.
+    # How many days it is kept for (from created_at to expires_at).
+    days: int = 7
+    # The report that replaced the review this backup holds; None when the
+    # backup was made by restoring an earlier one (`made_by_restore`).
     replaced_by: str | None = None
+    made_by_restore: bool = False
+    # Why it was made: 'report' (a report replaced the review), 'restore' (an
+    # earlier backup was restored over it), 'redetect' (beats were detected
+    # again and some reviewed beats were not found), 'channel' (another
+    # channel's beats replaced it), 'fresh' (Start fresh) or 'earlier' (the
+    # review of an earlier version of the file was continued instead).
+    reason: str = "report"
+    # What the backed-up review holds.
+    beats: int = 0
+    reviewed: int = 0
+    # Confirmed (Arrhythmia) or rejected (Not arrhythmia).
+    decided: int = 0
+    bad_data_marks: int = 0
+    channel: str | None = None
+    # The report that review itself came from, if it did.
+    source_report: str | None = None
+    # Older unexpired backups of the same recording kept besides this one.
+    older_backups: int = 0
+
+
+class PreviousVersionInfo(BaseModel):
+    """A review saved while the recording had another size or modification
+    time (it was saved again on disk since), which the file as it is now
+    does not open with on its own."""
+
+    saved_at: str
+    beats: int = 0
+    reviewed: int = 0
+    decided: int = 0
+    bad_data_marks: int = 0
+    channel: str | None = None
 
 
 class FileStateResult(BaseModel):
@@ -231,8 +267,12 @@ class FileStateResult(BaseModel):
     # review with this report"), and when (ISO, UTC).
     source_report: str | None = None
     source_report_at: str | None = None
-    # The newest unexpired backup of the review before a report replaced it.
+    # The newest unexpired backup of an earlier review, if any, and all of
+    # them (newest first).
     backup: ReviewBackupInfo | None = None
+    backups: list[ReviewBackupInfo] = []
+    # Not found: a review saved for an earlier version of the file, if any.
+    previous_version: PreviousVersionInfo | None = None
     error: str | None = None
 
 
@@ -245,7 +285,10 @@ class FileStateSummaryResult(BaseModel):
     beats: int = 0
     reviewed: int = 0
     bad_data_marks: int = 0
+    # Confirmed (Arrhythmia) or rejected (Not arrhythmia).
+    decided: int = 0
     source_report: str | None = None
+    source_report_at: str | None = None
     backup: ReviewBackupInfo | None = None
     error: str | None = None
 
@@ -289,6 +332,10 @@ class FileSummariesResult(BaseModel):
 
 class RestoreBackupRequest(BaseModel):
     path: str
+    # The backup to restore; the newest when left out.
+    backup_id: int | None = None
+    # How long the review being swapped out is kept as a backup, in days.
+    days: int = 7
 
 
 class RestoreBackupResult(BaseModel):
@@ -317,6 +364,16 @@ class PersistBeatsRequest(BaseModel):
 class PersistBeatsResult(BaseModel):
     status: str
     count: int = 0
+    # Beats that were looked at or decided before and kept their review on
+    # the new beats, and those that found no beat (backed up first, see
+    # `backup`).
+    review_carried: int = 0
+    review_dropped: int = 0
+    # The saved review was another channel's (now backed up, not carried).
+    previous_channel: str | None = None
+    # The backup made of the review before this save, when something of it
+    # could not be carried over.
+    backup: ReviewBackupInfo | None = None
     error: str | None = None
 
 
@@ -397,6 +454,17 @@ class DiscardStateRequest(BaseModel):
 
 
 class DiscardStateResult(BaseModel):
+    status: str
+    # The backup made of the discarded review, if it had anything.
+    backup: ReviewBackupInfo | None = None
+    error: str | None = None
+
+
+class AdoptPreviousRequest(BaseModel):
+    path: str
+
+
+class AdoptPreviousResult(BaseModel):
     status: str
     error: str | None = None
 
@@ -634,9 +702,11 @@ class ReportApplyRequest(BaseModel):
     report_path: str
     # The channel the report's beats are saved against.
     channel: str
-    # 'keep': copy the current saved review aside first (restorable for
-    # db.BACKUP_RETENTION_DAYS days); 'none': replace it outright.
+    # 'keep': copy the current saved review aside first, restorable for
+    # `backup_days` days (1 to 90; the app offers 7, 14 or 30); 'none':
+    # replace it outright.
     backup: Literal["keep", "none"] = "keep"
+    backup_days: int = 7
 
 
 class ReportApplyResult(BaseModel):

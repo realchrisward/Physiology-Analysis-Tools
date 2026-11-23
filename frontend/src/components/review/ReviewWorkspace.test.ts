@@ -145,6 +145,12 @@ function mockFetch(beatsResponse: { ok: boolean; json: () => Promise<unknown> })
   })
 }
 
+// Fetches other than the quick look at the saved review a channel switch takes
+// first (to ask before replacing a review with reviewed beats).
+function callsBesidesSavedReviewCheck(fetchMock: { mock: { calls: unknown[][] } }): number {
+  return fetchMock.mock.calls.filter((call) => !String(call[0]).includes('/files/state/summary')).length
+}
+
 describe('ReviewWorkspace', () => {
   it('defaults the channel select to the file default channel', () => {
     // EcgGraph fetches `/channels/window` unconditionally on mount; stub it
@@ -380,7 +386,7 @@ describe('ReviewWorkspace', () => {
     // doesn't race the assertion below.
     await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
-    const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
+    const fetchCallsBeforeSwitch = callsBesidesSavedReviewCheck(fetchMock)
 
     const select = screen.getByTestId('channel-select') as HTMLSelectElement
     await fireEvent.change(select, { target: { value: 'channel 2' } })
@@ -395,7 +401,7 @@ describe('ReviewWorkspace', () => {
     // previous channel, and no new fetch has fired for the new one
     // (detectBeats is the only call so far; EcgGraph hasn't remounted).
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
-    expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 1)
+    expect(callsBesidesSavedReviewCheck(fetchMock)).toBe(fetchCallsBeforeSwitch + 1)
 
     // Now let detectBeats resolve successfully for channel 2.
     resolveDetect!(beatsOkResponse({ count: 10, mean_hr: 80, duration: 30 }))
@@ -408,7 +414,7 @@ describe('ReviewWorkspace', () => {
     // that now follows a successful channel switch (see
     // `handleChannelChange`'s `putChannel` call).
     await waitFor(() => {
-      expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 4)
+      expect(callsBesidesSavedReviewCheck(fetchMock)).toBe(fetchCallsBeforeSwitch + 4)
     })
   })
 
@@ -432,7 +438,7 @@ describe('ReviewWorkspace', () => {
 
     await waitFor(() => expect(fetchMock.mock.calls.length).toBe(MOUNT_FETCH_COUNT))
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
-    const fetchCallsBeforeSwitch = fetchMock.mock.calls.length
+    const fetchCallsBeforeSwitch = callsBesidesSavedReviewCheck(fetchMock)
 
     const select = screen.getByTestId('channel-select') as HTMLSelectElement
     await fireEvent.change(select, { target: { value: 'channel 2' } })
@@ -459,7 +465,7 @@ describe('ReviewWorkspace', () => {
     // the one detection just failed for — and no new window/beats fetches
     // for channel 2 should have fired.
     expect(screen.getByTestId('ecg-graph')).toHaveAttribute('data-channel', 'channel 1')
-    expect(fetchMock.mock.calls.length).toBe(fetchCallsBeforeSwitch + 1)
+    expect(callsBesidesSavedReviewCheck(fetchMock)).toBe(fetchCallsBeforeSwitch + 1)
   })
 
   // Confirms EcgGraph's `onBeatSelect` prop is actually wired to

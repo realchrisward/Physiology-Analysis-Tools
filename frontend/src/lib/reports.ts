@@ -51,6 +51,9 @@ export const REPORT_AGREEMENT_ROWS: readonly { key: ReportAgreement; name: strin
 
 export const REPORT_LABELS: readonly ReportLabel[] = [2, 1, 0, -1]
 
+// How long a backup of a review can be kept, in days (the choices offered).
+export const BACKUP_DAY_OPTIONS: readonly number[] = [7, 14, 30]
+
 export const REPORT_LABEL_NAME: Record<ReportLabel, string> = {
   2: 'Confirmed arrhythmia',
   1: 'Detected, not reviewed',

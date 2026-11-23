@@ -215,7 +215,7 @@
     <span class="report-loading text-muted" data-testid="report-choosing" title={summary.report_path}>
       <Icon name="file-text" size={14} />
       <span class="chip-name">{summary.filename}</span>
-      — choose how to use it
+      — choose Compare or Replace
     </span>
   {:else if session.status === 'ready' && summary}
     <div class="chip-wrap">
@@ -349,28 +349,29 @@
                 type="button"
                 class="btn btn-sm use-as-review"
                 data-testid="report-use-as-review-button"
-                title="Replace this recording's review with the report's beats, decisions and bad-data marks"
+                title="Make the report's beats, decisions and bad-data marks this recording's review (you can keep a backup of your review first)"
                 onclick={useAsReview}
               >
-                Use as my review…
+                Replace my review with this report…
               </button>
             {/if}
             <button
               type="button"
               class="btn btn-sm"
               data-testid="report-replace-button"
-              title="Pick a different report to compare with"
+              title="Pick a different report file to compare with"
               onclick={choose}
             >
-              Change report…
+              Compare with another report…
             </button>
             <button
               type="button"
               class="btn btn-sm btn-danger-text"
               data-testid="report-remove-button"
+              title="Stop showing this report's labels. Your review is not changed."
               onclick={remove}
             >
-              Remove
+              Stop comparing
             </button>
           </div>
         </div>
@@ -396,15 +397,21 @@
     <div class="report-chip report-chip-error" data-testid="report-load-error" data-status={session.status}>
       <Icon name="alert-circle" size={14} />
       <span class="error-text" title={session.error ?? undefined}>
-        {session.status === 'missing' ? 'Linked report unavailable' : 'Report not loaded'}:
+        {session.status === 'missing' ? 'Report file not found' : 'Could not read the report'}:
         {session.error ?? 'unknown error'}
       </span>
       <button type="button" class="btn btn-sm" data-testid="report-retry-button" onclick={retry}>Retry</button>
       <button type="button" class="btn btn-sm" data-testid="report-choose-button" onclick={choose}>
         Choose file…
       </button>
-      <button type="button" class="btn btn-sm btn-danger-text" data-testid="report-remove-button" onclick={remove}>
-        {link ? 'Remove link' : 'Dismiss'}
+      <button
+        type="button"
+        class="btn btn-sm btn-danger-text"
+        data-testid="report-remove-button"
+        title={link ? 'Stop opening this report with the recording. Your review is not changed.' : undefined}
+        onclick={remove}
+      >
+        {link ? 'Forget this report' : 'Dismiss'}
       </button>
     </div>
   {:else}

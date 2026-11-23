@@ -25,6 +25,8 @@ export function applyReport(
   reportPath: string,
   channel: string,
   backup: ReportBackupChoice,
+  // How long a backup ('keep') is kept, in days.
+  backupDays: number = 7,
 ): Promise<ReportApplyResult> {
   return afterReviewChange(
     apiPost('/reports/apply', 'POST', {
@@ -32,6 +34,7 @@ export function applyReport(
       report_path: reportPath,
       channel,
       backup,
+      backup_days: backupDays,
     }),
     recordingPath,
   )

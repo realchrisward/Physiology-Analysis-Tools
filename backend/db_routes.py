@@ -33,8 +33,11 @@ from backend.models import (
     ChannelLabelResult,
     ChannelPersistRequest,
     ChannelPersistResult,
+    AdoptPreviousRequest,
+    AdoptPreviousResult,
     DiscardStateRequest,
     DiscardStateResult,
+    PreviousVersionInfo,
     FileStateResult,
     FileStateSummaryResult,
     FileSummariesRequest,
@@ -65,7 +68,19 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
     try:
         row = db.get_file_row(conn, path, imported.size, imported.modified_time)
         if row is None:
-            return FileStateResult(status="ok", found=False)
+            # Nothing saved for the file as it is now. Say so if there is a
+            # review of an earlier version of it (the file was saved again on
+            # disk), and a backup (Start fresh keeps one).
+            backups = _backups(conn, path, imported)
+            return FileStateResult(
+                status="ok",
+                found=False,
+                backup=backups[0] if backups else None,
+                backups=backups,
+                previous_version=_previous_version(
+                    conn, db.previous_version_row(conn, path, imported.size, imported.modified_time)
+                ),
+            )
 
         # The cache restore below replaces beat_cache[path] with what SQLite
         # held when it was read, so the read and the swap must be one step
@@ -94,13 +109,14 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
                         request.app.state.beat_cache[path] = _cache_frame(beat_rows)
                         # The frame is the saved one again, not a detection.
                         getattr(request.app.state, "fresh_beats", set()).discard(path)
-                        # A review taken from a report is not what the detector
-                        # finds: a detection still running from the import must
-                        # not replace it in memory when it lands (see
-                        # locks.beat_epoch). An ordinary saved review is the
-                        # detector's own beats, and keeps the old behaviour.
-                        if row["source_report"]:
-                            bump_beat_epoch(request.app.state, path)
+                        # The saved review is what the technician continues: a
+                        # detection still running from the import must not
+                        # replace it in memory when it lands (see
+                        # locks.beat_epoch). That held for a review taken from
+                        # a report, and holds as much for any other: one made
+                        # with other detection settings would otherwise be
+                        # swapped for new beats behind the technician's back.
+                        bump_beat_epoch(request.app.state, path)
                 except Exception:
                     pass
         finally:
@@ -150,6 +166,7 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             else None
         )
 
+        backups = _backups(conn, path, imported)
         return FileStateResult(
             status="ok",
             found=True,
@@ -160,9 +177,8 @@ def get_file_state(path: str, request: Request) -> FileStateResult:
             arrhythmia_settings=arrhythmia_settings,
             source_report=row["source_report"],
             source_report_at=row["source_report_at"],
-            backup=_backup_info(
-                db.latest_backup(conn, path, imported.size, imported.modified_time)
-            ),
+            backup=backups[0] if backups else None,
+            backups=backups,
         )
     except Exception as e:
         return FileStateResult(status="error", error=str(e))
@@ -197,14 +213,64 @@ def _cache_frame(beat_rows) -> pd.DataFrame:
     return cache_df
 
 
-def _backup_info(row) -> ReviewBackupInfo | None:
+def _backup_info(conn, row) -> ReviewBackupInfo | None:
+    details = db.backup_details(conn, row)
+    return ReviewBackupInfo(**details) if details else None
+
+
+def _backups(conn, path, imported) -> list[ReviewBackupInfo]:
+    return [
+        _backup_info(conn, row)
+        for row in db.list_backups(conn, path, imported.size, imported.modified_time)
+    ]
+
+
+def _previous_version(conn, row) -> PreviousVersionInfo | None:
     if row is None:
         return None
-    return ReviewBackupInfo(
-        created_at=row["created_at"],
-        expires_at=row["expires_at"],
-        replaced_by=row["replaced_by"],
+    counts = db.review_counts(conn, row["id"])
+    decided = conn.execute(
+        "SELECT COUNT(*) FROM beats WHERE file_id=? AND review_state IN ('confirmed', 'rejected')",
+        (row["id"],),
+    ).fetchone()[0]
+    reviewed = conn.execute(
+        "SELECT COUNT(*) FROM beats WHERE file_id=? AND review_state != 'unreviewed'",
+        (row["id"],),
+    ).fetchone()[0]
+    return PreviousVersionInfo(
+        saved_at=row["updated_at"],
+        beats=counts["beats"],
+        reviewed=reviewed,
+        decided=decided,
+        bad_data_marks=counts["bad_data_marks"],
+        channel=row["channel"],
     )
+
+
+@router.post("/state/adopt-previous", response_model=AdoptPreviousResult)
+def adopt_previous_version(payload: AdoptPreviousRequest, request: Request) -> AdoptPreviousResult:
+    """Continue the review saved for an earlier version of the file (it was
+    saved again on disk since): it becomes the review of the file as it is
+    now, with its backups. The screen then reloads it like any saved review."""
+    with path_lock(payload.path):
+        imported = request.app.state.imported_files.get(payload.path)
+        if imported is None or imported.status != "ok":
+            return AdoptPreviousResult(status="error", error=f"File not imported: {payload.path}")
+        conn = db.connect(request.app.state.db_path)
+        try:
+            row = db.previous_version_row(
+                conn, payload.path, imported.size, imported.modified_time
+            )
+            if row is None:
+                return AdoptPreviousResult(
+                    status="error", error="There is no earlier review of this recording."
+                )
+            db.adopt_previous_version(conn, row, imported.size, imported.modified_time)
+            return AdoptPreviousResult(status="ok")
+        except Exception as e:
+            return AdoptPreviousResult(status="error", error=str(e))
+        finally:
+            conn.close()
 
 
 @router.get("/state/summary", response_model=FileStateSummaryResult)
@@ -217,14 +283,15 @@ def get_file_state_summary(path: str, request: Request) -> FileStateSummaryResul
     conn = db.connect(request.app.state.db_path)
     try:
         backup = _backup_info(
-            db.latest_backup(conn, path, imported.size, imported.modified_time)
+            conn, db.latest_backup(conn, path, imported.size, imported.modified_time)
         )
         row = db.get_file_row(conn, path, imported.size, imported.modified_time)
         if row is None:
             return FileStateSummaryResult(status="ok", found=False, backup=backup)
         counts = conn.execute(
             "SELECT COUNT(*) AS beats, "
-            "COALESCE(SUM(review_state != 'unreviewed'), 0) AS reviewed "
+            "COALESCE(SUM(review_state != 'unreviewed'), 0) AS reviewed, "
+            "COALESCE(SUM(review_state IN ('confirmed', 'rejected')), 0) AS decided "
             "FROM beats WHERE file_id=?",
             (row["id"],),
         ).fetchone()
@@ -237,8 +304,10 @@ def get_file_state_summary(path: str, request: Request) -> FileStateSummaryResul
             channel=row["channel"],
             beats=counts["beats"],
             reviewed=counts["reviewed"],
+            decided=counts["decided"],
             bad_data_marks=marks,
             source_report=row["source_report"],
+            source_report_at=row["source_report_at"],
             backup=backup,
         )
     except Exception as e:
@@ -322,12 +391,24 @@ def restore_backup(payload: RestoreBackupRequest, request: Request) -> RestoreBa
             backup = db.latest_backup(
                 conn, payload.path, imported.size, imported.modified_time
             )
+            if payload.backup_id is not None:
+                backup = next(
+                    (
+                        row
+                        for row in db.list_backups(
+                            conn, payload.path, imported.size, imported.modified_time
+                        )
+                        if row["id"] == payload.backup_id
+                    ),
+                    None,
+                )
             if backup is None:
                 return RestoreBackupResult(
                     status="error",
                     error="There is no backup to restore (it may have expired).",
                 )
-            file_id, kept = db.restore_backup(conn, backup)
+            file_id, kept = db.restore_backup(conn, backup, db.backup_days(payload.days))
+            kept_info = _backup_info(conn, kept)
             beat_rows = conn.execute(
                 "SELECT * FROM beats WHERE file_id=? ORDER BY ts", (file_id,)
             ).fetchall()
@@ -344,7 +425,7 @@ def restore_backup(payload: RestoreBackupRequest, request: Request) -> RestoreBa
         state.typical_rr_cache.pop(payload.path, None)
         getattr(state, "fresh_beats", set()).discard(payload.path)
         bump_beat_epoch(state, payload.path)
-        return RestoreBackupResult(status="ok", kept=_backup_info(kept))
+        return RestoreBackupResult(status="ok", kept=kept_info)
 
 
 def _to_bool(value: int | None) -> bool | None:
@@ -484,6 +565,30 @@ def _persist_beats_locked(
     try:
         existing = db.get_file_row(conn, payload.path, imported.size, imported.modified_time)
         from_report = existing is not None and bool(existing["source_report"])
+        # The saved review belongs to the beats of the channel it was made on:
+        # another channel's beats start a review of their own.
+        switching = (
+            existing is not None
+            and existing["channel"] is not None
+            and existing["channel"] != payload.channel
+        )
+        # Anything of the saved review these beats can't carry (a reviewed beat
+        # no longer found, or a whole other channel's review) is backed up
+        # first and reported, never dropped silently.
+        backup = None
+        if existing is not None:
+            saved_review = db.load_review_state(conn, existing["id"])
+            lost = (
+                len(saved_review)
+                if switching
+                else len(db.carry_review(beat_df, saved_review).dropped)
+            )
+            if lost > 0:
+                backup = db.create_backup(
+                    conn,
+                    existing,
+                    db.BACKUP_REASON_CHANNEL if switching else db.BACKUP_REASON_REDETECT,
+                )
         provenance = {}
         if not from_report or fresh:
             # The beats are this channel's detection: it and the settings that
@@ -507,9 +612,12 @@ def _persist_beats_locked(
             commit=False,
             **provenance,
         )
-        preserved_state = db.replace_beats(conn, file_id, beat_df, commit=False)
+        carried = db.replace_beats(
+            conn, file_id, beat_df, commit=False, carry=not switching
+        )
         conn.commit()
         fresh_beats.discard(payload.path)
+        backup_info = _backup_info(conn, backup)
 
         # Sync review_state/reassigned_category/uncertain onto the
         # beat_cache[path] DataFrame `/beats/window` reads from —
@@ -522,10 +630,17 @@ def _persist_beats_locked(
         # frame while this runs, and columns appearing under them
         # mid-iteration made them fail.
         request.app.state.beat_cache[payload.path] = db.with_review_state(
-            beat_df, preserved_state
+            beat_df, carried.state, carried.confirmed_categories
         )
 
-        return PersistBeatsResult(status="ok", count=len(beat_df))
+        return PersistBeatsResult(
+            status="ok",
+            count=len(beat_df),
+            review_carried=len(carried.state),
+            review_dropped=len(carried.dropped),
+            previous_channel=existing["channel"] if switching else None,
+            backup=backup_info,
+        )
     except Exception as e:
         conn.rollback()
         return PersistBeatsResult(status="error", error=str(e))
@@ -762,14 +877,20 @@ def _discard_file_state_locked(
         file_row = db.get_file_row(
             conn, payload.path, imported.size, imported.modified_time
         )
+        backup = None
         if file_row is not None:
+            # Starting fresh is undoable: the discarded review is backed up
+            # (Restore backup brings it back) when it had anything in it.
+            if db.has_saved_review(conn, file_row["id"]):
+                backup = db.create_backup(conn, file_row, db.BACKUP_REASON_FRESH)
             db.delete_file_state(conn, file_row["id"])
+        backup_info = _backup_info(conn, backup)
 
         request.app.state.beat_cache.pop(payload.path, None)
 
         # Nothing persisted in the first place is a successful no-op, not an
         # error: the caller's intent ("leave me with a clean slate") holds.
-        return DiscardStateResult(status="ok")
+        return DiscardStateResult(status="ok", backup=backup_info)
     except Exception as e:
         return DiscardStateResult(status="error", error=str(e))
     finally:

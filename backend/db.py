@@ -1,8 +1,10 @@
+import bisect
 import itertools
 import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 import pandas as pd
 
@@ -257,6 +259,59 @@ def get_file_row(
         (path, size, mtime),
     )
     return cursor.fetchone()
+
+
+def previous_version_row(
+    conn: sqlite3.Connection, path: str, size: int, mtime: float
+) -> sqlite3.Row | None:
+    """The newest saved review of `path` made while the file had another size
+    or modification time (it was saved again on disk since), if there is one
+    with any beats or bad-data marks."""
+    for row in conn.execute(
+        "SELECT * FROM files WHERE path=? AND NOT (size=? AND mtime=?) "
+        "ORDER BY updated_at DESC",
+        (path, size, mtime),
+    ).fetchall():
+        if has_saved_review(conn, row["id"]):
+            return row
+    return None
+
+
+def adopt_previous_version(
+    conn: sqlite3.Connection, row: sqlite3.Row, size: int, mtime: float
+) -> sqlite3.Row | None:
+    """Make the saved review in `row` (an earlier version of the file) the
+    review of the file as it is now (`size`, `mtime`), with its backups.
+
+    A review the file as it is now already has (the one started since it was
+    opened) makes way: it is backed up first when there is anything in it
+    (`BACKUP_REASON_EARLIER`), then removed. Returns that backup, if any."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        backup = None
+        current = get_file_row(conn, row["path"], size, mtime)
+        if current is not None:
+            # Only review work is worth a backup, not beats merely detected.
+            worked = conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM beats WHERE file_id=:id AND review_state != 'unreviewed') "
+                "OR EXISTS(SELECT 1 FROM bad_data_marks WHERE file_id=:id) "
+                "OR EXISTS(SELECT 1 FROM manual_beat_edits WHERE file_id=:id)",
+                {"id": current["id"]},
+            ).fetchone()[0]
+            if worked:
+                backup = create_backup(conn, current, BACKUP_REASON_EARLIER)
+            clear_file_rows(conn, current["id"])
+            conn.execute("DELETE FROM files WHERE id=?", (current["id"],))
+        conn.execute("UPDATE files SET size=?, mtime=? WHERE id=?", (size, mtime, row["id"]))
+        conn.execute(
+            "UPDATE review_backups SET size=?, mtime=? WHERE path=? AND size=? AND mtime=?",
+            (size, mtime, row["path"], row["size"], row["mtime"]),
+        )
+        conn.commit()
+        return backup
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def latest_file_row(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
@@ -742,9 +797,10 @@ def load_review_state(
     conn: sqlite3.Connection, file_id: int
 ) -> dict[float, tuple[str, str | None, bool]]:
     """`ts -> (review_state, reassigned_category, uncertain)` for every beat of
-    the file that has been confirmed/rejected/reassigned. Unreviewed beats are
-    absent, so they fall back to the unreviewed default with `uncertain`
-    cleared: the mark only means something next to a decision."""
+    the file that has been looked at or decided (anything but unreviewed).
+    Unreviewed beats are absent, so they fall back to the unreviewed default
+    with `uncertain` cleared: the mark only means something next to a
+    decision."""
     return {
         row["ts"]: (
             row["review_state"],
@@ -759,13 +815,95 @@ def load_review_state(
     }
 
 
+def load_confirmed_categories(conn: sqlite3.Connection, file_id: int) -> dict[float, list[str]]:
+    """`ts -> categories` for every confirmed (Arrhythmia) beat whose
+    categories the reviewer did not choose by hand: the ones it was flagged
+    with when it was confirmed. They are part of the decision, so a re-run of
+    detection (beats or arrhythmia) keeps them instead of re-flagging the
+    beat. (Reviewer-chosen categories travel in `reassigned_category`.)"""
+    out: dict[float, list[str]] = {}
+    for row in conn.execute(
+        "SELECT ts, reassigned_category, " + ", ".join(CATEGORY_COLUMNS) + " FROM beats "
+        "WHERE file_id=? AND review_state='confirmed'",
+        (file_id,),
+    ).fetchall():
+        if parse_categories(row["reassigned_category"]):
+            continue
+        names = [col for col in CATEGORY_COLUMNS if row[col]]
+        if names:
+            out[row["ts"]] = names
+    return out
+
+
+# How far apart a saved beat and a newly detected one may be and still be
+# the same beat, for carrying a review over (the report matching uses the
+# same window). A re-detection with other settings can move a peak by a
+# sample or two; a different heartbeat is ~100 ms away even in a mouse.
+REVIEW_MATCH_TOLERANCE_S = 0.010
+
+
+def match_beats(new_ts, old_ts, tolerance: float = REVIEW_MATCH_TOLERANCE_S) -> dict[float, float]:
+    """`old ts -> new ts`: each saved beat paired with the nearest new beat
+    within `tolerance`, one to one, closest pairs first (so an exact match
+    always wins). Saved beats with no new beat near them are left out."""
+    new = sorted(set(float(t) for t in new_ts))
+    if not new:
+        return {}
+    pairs = []
+    for t in old_ts:
+        t = float(t)
+        i = bisect.bisect_left(new, t)
+        for j in (i - 1, i):
+            if 0 <= j < len(new):
+                gap = abs(new[j] - t)
+                if gap <= tolerance:
+                    pairs.append((gap, t, new[j]))
+    pairs.sort()
+    used_new: set[float] = set()
+    out: dict[float, float] = {}
+    for _, t, n in pairs:
+        if t in out or n in used_new:
+            continue
+        out[t] = n
+        used_new.add(n)
+    return out
+
+
+class CarriedReview(NamedTuple):
+    """A saved review moved onto a new set of beats (see `carry_review`)."""
+
+    # new ts -> (review_state, reassigned_category, uncertain)
+    state: dict
+    # new ts -> categories of a confirmed beat (see load_confirmed_categories)
+    confirmed_categories: dict
+    # saved beats that were looked at or decided but have no new beat
+    dropped: list
+
+
+def carry_review(beat_df: pd.DataFrame, review_state: dict, confirmed_categories: dict | None = None) -> CarriedReview:
+    """The saved review (`review_state`, `confirmed_categories`, keyed by the
+    saved beats' ts) moved onto `beat_df`'s beats: each saved beat to the
+    same beat in `beat_df` (match_beats). What could not be carried is listed
+    in `dropped`, so the caller can keep a backup and say so."""
+    pairs = match_beats(beat_df["ts"].tolist() if len(beat_df) else [], review_state.keys())
+    state = {pairs[ts]: value for ts, value in review_state.items() if ts in pairs}
+    categories = {
+        pairs[ts]: names for ts, names in (confirmed_categories or {}).items() if ts in pairs
+    }
+    dropped = [ts for ts in review_state if ts not in pairs]
+    return CarriedReview(state, categories, dropped)
+
+
 def with_reviewer_categories(
-    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None, bool]]
+    beat_df: pd.DataFrame,
+    review_state: dict[float, tuple[str, str | None, bool]],
+    confirmed_categories: dict[float, list[str]] | None = None,
 ) -> pd.DataFrame:
     """`beat_df` with the categories reviewers chose (`reassigned_category`
-    in `review_state`, by exact ts) written over the detector's flags, so a
-    re-run of detection does not undo them. A confirmed beat the new flags
-    leave with no category at all gets 'other_arrhythmia': an arrhythmia
+    in `review_state`) and those confirmed beats were confirmed with
+    (`confirmed_categories`), both by exact ts, written over the detector's
+    flags, so a re-run of detection does not undo them. A confirmed beat
+    left with no category at all gets 'other_arrhythmia': an arrhythmia
     always has one. A NEW frame when anything changes; `beat_df` itself is
     never touched."""
     chosen = {
@@ -774,6 +912,10 @@ def with_reviewer_categories(
         if category
     }
     chosen = {ts: names for ts, names in chosen.items() if names}
+    for ts, names in (confirmed_categories or {}).items():
+        state = review_state.get(ts)
+        if names and state is not None and state[0] == "confirmed" and ts not in chosen:
+            chosen[ts] = list(names)
     confirmed = {
         ts for ts, (state, _, _) in review_state.items() if state == "confirmed" and ts not in chosen
     }
@@ -805,7 +947,9 @@ def with_reviewer_categories(
 
 
 def with_review_state(
-    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None, bool]]
+    beat_df: pd.DataFrame,
+    review_state: dict[float, tuple[str, str | None, bool]],
+    confirmed_categories: dict[float, list[str]] | None = None,
 ) -> pd.DataFrame:
     """A NEW frame with `review_state`/`reassigned_category`/`uncertain` filled
     in from `review_state` by exact `ts` (default unreviewed/None/False), same
@@ -813,7 +957,10 @@ def with_review_state(
     frame other requests are reading from `beat_cache` right now.
     """
     default = ("unreviewed", None, False)
-    beat_df = with_reviewer_categories(beat_df, review_state)
+    # Saved beats are matched to these within a few ms, not only exactly.
+    carried = carry_review(beat_df, review_state, confirmed_categories)
+    review_state = carried.state
+    beat_df = with_reviewer_categories(beat_df, review_state, carried.confirmed_categories)
     return beat_df.assign(
         review_state=beat_df["ts"].map(lambda ts: review_state.get(ts, default)[0]),
         reassigned_category=beat_df["ts"].map(
@@ -836,58 +983,57 @@ def _nullable_bools(beat_df: pd.DataFrame, column: str) -> list:
 
 
 def replace_beats(
-    conn: sqlite3.Connection, file_id: int, beat_df, *, commit: bool = True
-) -> dict[float, tuple[str, str | None, bool]]:
+    conn: sqlite3.Connection,
+    file_id: int,
+    beat_df,
+    *,
+    commit: bool = True,
+    carry: bool = True,
+) -> CarriedReview:
     """Delete-then-reinsert every beat for `file_id` from `beat_df`.
 
     Wholesale-replacing (rather than merging) keeps repeated persists
     idempotent: calling this twice for the same detection result leaves
     exactly one row per beat, not duplicates.
 
-    Prior review state is preserved across a re-persist: any beat that had
-    already been confirmed/rejected/reassigned (i.e. `review_state !=
-    'unreviewed'`) keeps its `review_state`/`reassigned_category`/`uncertain`
-    if a beat with the same `ts` is still present in `beat_df`. This makes it
-    safe to call this again after new detection output arrives (e.g. an
-    arrhythmia re-run) without silently discarding a technician's prior review
-    work.
-    Matching is by exact float equality on `ts`, mirroring the precedent
-    already set by `update_beat_category`'s `WHERE ts=?` lookup — `ts`
-    always round-trips through the same detection pipeline rather than
-    being user-typed, so exact equality is safe here. A beat with no prior
-    review, or whose `ts` no longer appears in `beat_df`, still gets the
-    default `'unreviewed'`/`NULL`/not uncertain.
+    The saved review is carried over (`carry`): every beat that was looked at
+    or decided keeps its `review_state`/`reassigned_category`/`uncertain` on
+    the same beat in `beat_df` (matched within REVIEW_MATCH_TOLERANCE_S, so a
+    peak a sample away after a re-detection is still the same beat), and a
+    confirmed beat keeps its categories. What found no beat is returned in
+    `dropped`: the caller backs it up first and tells the technician. With
+    `carry=False` (the beats are another channel's) nothing is carried and
+    every reviewed beat counts as dropped.
 
     `commit` defaults to True (standalone-call behavior). Pass
     `commit=False` when this call is one half of a larger transaction the
     caller will commit (or roll back) itself.
 
-    Returns the SAME `preserved_state` mapping (`ts -> (review_state,
-    reassigned_category, uncertain)`) this function computed to do its own
-    preserving — the caller (`persist_beats` in db_routes.py) uses it to sync
-    those three columns back onto `beat_cache[path]` (the live, in-memory
-    `beat_df` this function was handed), which never gets that write
-    otherwise: only `update_beat_category` (a single-beat action) syncs the
-    cache today, so without this, a beat reviewed before a redetect+re-persist
-    would keep showing as "unreviewed" in the graph even though SQLite
-    correctly preserved it.
+    The returned `state` / `confirmed_categories` are keyed by `beat_df`'s ts:
+    the caller (`persist_beats` in db_routes.py) uses them to sync the review
+    back onto `beat_cache[path]` (the live frame this was handed), which never
+    gets that write otherwise.
     """
-    preserved_state = load_review_state(conn, file_id)
-    # Categories a reviewer chose win over the fresh detection's flags.
-    beat_df = with_reviewer_categories(beat_df, preserved_state)
+    saved = load_review_state(conn, file_id)
+    if carry:
+        carried = carry_review(beat_df, saved, load_confirmed_categories(conn, file_id))
+    else:
+        carried = CarriedReview({}, {}, list(saved.keys()))
+    # Categories a reviewer chose, or confirmed, win over the fresh flags.
+    beat_df = with_reviewer_categories(beat_df, carried.state, carried.confirmed_categories)
 
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 
     default_review = ("unreviewed", None, False)
     review_values = [
-        preserved_state.get(ts, default_review) for ts in beat_df["ts"].tolist()
+        carried.state.get(ts, default_review) for ts in beat_df["ts"].tolist()
     ]
     write_beats(conn, file_id, beat_df, review_values)
 
     if commit:
         conn.commit()
 
-    return preserved_state
+    return carried
 
 
 def write_beats(
@@ -940,6 +1086,19 @@ def write_beats(
 # ---------------------------------------------------------------------------
 
 BACKUP_RETENTION_DAYS = 7
+# How long a backup can be kept for, in days (what the app offers is 7, 14 or
+# 30; anything in between is accepted).
+BACKUP_MIN_DAYS = 1
+BACKUP_MAX_DAYS = 90
+
+
+def backup_days(days) -> int:
+    """`days` as a backup retention the app accepts (the default when unset)."""
+    try:
+        value = int(days)
+    except (TypeError, ValueError):
+        return BACKUP_RETENTION_DAYS
+    return min(max(value, BACKUP_MIN_DAYS), BACKUP_MAX_DAYS)
 # Backups kept per recording; replacing more often than this drops the oldest.
 MAX_BACKUPS_PER_FILE = 5
 
@@ -1044,6 +1203,54 @@ def create_backup(
     ).fetchone()
 
 
+def backup_details(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict | None:
+    """What the app shows about a backup: when it was made and until when it
+    is kept (and for how many days), what it holds (beats, reviewed beats,
+    decisions, bad-data ranges, channel, the report its review came from),
+    why it was made (`reason`: report, restore, redetect, channel, fresh or
+    earlier), and how many older backups of the same recording are
+    kept besides it. None for no backup."""
+    if row is None:
+        return None
+    counts = conn.execute(
+        "SELECT COUNT(*) AS beats, "
+        "COALESCE(SUM(review_state != 'unreviewed'), 0) AS reviewed, "
+        "COALESCE(SUM(review_state IN ('confirmed', 'rejected')), 0) AS decided "
+        "FROM backup_beats WHERE backup_id=?",
+        (row["id"],),
+    ).fetchone()
+    marks = conn.execute(
+        "SELECT COUNT(*) FROM backup_bad_data_marks WHERE backup_id=?", (row["id"],)
+    ).fetchone()[0]
+    older = conn.execute(
+        "SELECT COUNT(*) FROM review_backups WHERE path=? AND size=? AND mtime=? "
+        "AND id < ? AND expires_at > ?",
+        (row["path"], row["size"], row["mtime"], row["id"], _now_iso()),
+    ).fetchone()[0]
+    try:
+        span = datetime.fromisoformat(row["expires_at"]) - datetime.fromisoformat(row["created_at"])
+        days = max(1, round(span.total_seconds() / 86400))
+    except (TypeError, ValueError):
+        days = BACKUP_RETENTION_DAYS
+    reason = _BACKUP_REASONS.get(row["replaced_by"], "report")
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "days": days,
+        "replaced_by": row["replaced_by"] if reason == "report" else None,
+        "made_by_restore": reason == "restore",
+        "reason": reason,
+        "beats": counts["beats"],
+        "reviewed": counts["reviewed"],
+        "decided": counts["decided"],
+        "bad_data_marks": marks,
+        "channel": row["channel"],
+        "source_report": row["source_report"],
+        "older_backups": older,
+    }
+
+
 def latest_backup(
     conn: sqlite3.Connection, path: str, size: int, mtime: float
 ) -> sqlite3.Row | None:
@@ -1053,6 +1260,17 @@ def latest_backup(
         "AND expires_at > ? ORDER BY id DESC LIMIT 1",
         (path, size, mtime, _now_iso()),
     ).fetchone()
+
+
+def list_backups(
+    conn: sqlite3.Connection, path: str, size: int, mtime: float
+) -> list[sqlite3.Row]:
+    """Every unexpired backup of this file's review, newest first."""
+    return conn.execute(
+        "SELECT * FROM review_backups WHERE path=? AND size=? AND mtime=? "
+        "AND expires_at > ? ORDER BY id DESC",
+        (path, size, mtime, _now_iso()),
+    ).fetchall()
 
 
 def has_saved_review(conn: sqlite3.Connection, file_id: int) -> bool:
@@ -1072,15 +1290,28 @@ def clear_file_rows(conn: sqlite3.Connection, file_id: int) -> None:
 
 
 RESTORED_FROM_BACKUP = "(restored an earlier review)"
+# Why a backup was made when no report replaced the review (`replaced_by`).
+BACKUP_REASON_REDETECT = "(beat detection was run again)"
+BACKUP_REASON_CHANNEL = "(switched channel)"
+BACKUP_REASON_FRESH = "(started fresh)"
+BACKUP_REASON_EARLIER = "(continued the review of an earlier version)"
+_BACKUP_REASONS = {
+    BACKUP_REASON_EARLIER: "earlier",
+    RESTORED_FROM_BACKUP: "restore",
+    BACKUP_REASON_REDETECT: "redetect",
+    BACKUP_REASON_CHANNEL: "channel",
+    BACKUP_REASON_FRESH: "fresh",
+}
 
 
 def restore_backup(
-    conn: sqlite3.Connection, backup: sqlite3.Row
+    conn: sqlite3.Connection, backup: sqlite3.Row, days: int = BACKUP_RETENTION_DAYS
 ) -> tuple[int, sqlite3.Row | None]:
     """Put a backup back as the file's saved review and delete that backup,
     in one transaction. The review saved now is not thrown away: it is backed
-    up first (when there is any), so restoring is a swap that can itself be
-    undone. Returns (the file's id, the backup of the review it replaced).
+    up first (when there is any) and kept for `days`, so restoring is a swap
+    that can itself be undone. Returns (the file's id, the backup of the
+    review it replaced).
     Raises LookupError if the backup was deleted (expired and purged) after
     it was read."""
     try:
@@ -1099,7 +1330,7 @@ def restore_backup(
         kept = None
         if current is not None:
             if has_saved_review(conn, current["id"]):
-                kept = create_backup(conn, current, RESTORED_FROM_BACKUP)
+                kept = create_backup(conn, current, RESTORED_FROM_BACKUP, days)
             clear_file_rows(conn, current["id"])
         file_id = upsert_file(
             conn,

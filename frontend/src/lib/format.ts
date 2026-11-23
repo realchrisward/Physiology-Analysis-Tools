@@ -15,6 +15,16 @@ export function formatEditTime(iso: string): string {
   })
 }
 
+/** How long until `iso` ("5 days left", "less than a day left", "expired"). */
+export function formatTimeLeft(iso: string, now: number = Date.now()): string {
+  const ms = new Date(iso).getTime() - now
+  if (!Number.isFinite(ms)) return ''
+  if (ms <= 0) return 'expired'
+  const days = Math.floor(ms / 86400000)
+  if (days === 0) return 'less than a day left'
+  return `${days} ${days === 1 ? 'day' : 'days'} left`
+}
+
 function startOfDay(ms: number): number {
   const date = new Date(ms)
   date.setHours(0, 0, 0, 0)

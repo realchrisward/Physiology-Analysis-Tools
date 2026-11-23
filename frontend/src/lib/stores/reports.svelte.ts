@@ -48,6 +48,7 @@ import {
 import type {
   ReportApplyResult,
   ReportBackupChoice,
+  ReviewBackupInfo,
   ReportLoadResult,
   ReportNavigationResult,
   ReportSummary,
@@ -190,11 +191,33 @@ export interface ReplaceNotice {
   reviewed: number
   badDataMarks: number
   skippedOutside: number
-  // ISO time the backup of the previous review expires, when one was kept.
-  backupExpiresAt: string | null
+  // The backup kept of the review it replaced, if one was.
+  backup: ReviewBackupInfo | null
 }
 
 const replaceNotices: Record<string, ReplaceNotice> = $state({})
+
+/** What the last "restore backup" brought back and kept, for the banner that says so. */
+export interface RestoreNotice {
+  // The backup that is the review now.
+  restored: ReviewBackupInfo
+  // The backup made of the review it swapped out, if there was any.
+  kept: ReviewBackupInfo | null
+}
+
+const restoreNotices: Record<string, RestoreNotice> = $state({})
+
+export function setRestoreNotice(path: string, notice: RestoreNotice): void {
+  restoreNotices[path] = notice
+}
+
+export function getRestoreNotice(path: string): RestoreNotice | null {
+  return restoreNotices[path] ?? null
+}
+
+export function dismissRestoreNotice(path: string): void {
+  delete restoreNotices[path]
+}
 
 let generation = 0
 const opGen = new Map<string, number>()
@@ -520,6 +543,7 @@ export async function replaceWithReport(
   recordingPath: string,
   channel: string,
   backup: ReportBackupChoice,
+  backupDays: number = 7,
 ): Promise<ReportApplyResult> {
   const session = reportSessions[recordingPath]
   if (!session || (session.status !== 'choosing' && session.status !== 'ready') || !session.summary) {
@@ -529,7 +553,7 @@ export async function replaceWithReport(
   const op = bump(opGen, recordingPath)
   const result = await enqueue(recordingPath, async () => {
     if (!isCurrent(recordingPath, op)) return null
-    return applyReport(recordingPath, summary.report_path, channel, backup)
+    return applyReport(recordingPath, summary.report_path, channel, backup, backupDays)
   })
   if (result === null) return { status: 'error', error: 'Something else happened to this report first.' }
   if (result.status !== 'ok' || result.error) return result
@@ -547,7 +571,7 @@ export async function replaceWithReport(
     reviewed: result.reviewed ?? 0,
     badDataMarks: result.bad_data_marks ?? 0,
     skippedOutside: result.skipped_outside ?? 0,
-    backupExpiresAt: result.backup?.expires_at ?? null,
+    backup: result.backup ?? null,
   }
   return result
 }
@@ -706,6 +730,7 @@ export function forgetReportSessions(paths: string[]): void {
     delete suggestions[path]
     delete unloadErrors[path]
     delete replaceNotices[path]
+    delete restoreNotices[path]
   }
 }
 
@@ -799,6 +824,7 @@ export function resetForTesting(): void {
   for (const key of Object.keys(suggestions)) delete suggestions[key]
   for (const key of Object.keys(unloadErrors)) delete unloadErrors[key]
   for (const key of Object.keys(replaceNotices)) delete replaceNotices[key]
+  for (const key of Object.keys(restoreNotices)) delete restoreNotices[key]
   pendingUnload.clear()
   reportFolders.length = 0
   opGen.clear()
