@@ -37,6 +37,9 @@ from backend.models import (
     DiscardStateResult,
     FileStateResult,
     FileStateSummaryResult,
+    FileSummariesRequest,
+    FileSummariesResult,
+    FileSummary,
     PersistBeatsRequest,
     PersistBeatsResult,
     PersistedBeat,
@@ -240,6 +243,64 @@ def get_file_state_summary(path: str, request: Request) -> FileStateSummaryResul
         )
     except Exception as e:
         return FileStateSummaryResult(status="error", error=str(e))
+    finally:
+        conn.close()
+
+
+# More would only be a slow request: the lists hold at most a few hundred.
+MAX_SUMMARY_PATHS = 2000
+
+
+def _file_summary(conn, path: str, labels: dict[str, str]) -> FileSummary:
+    summary = FileSummary(path=path, channel_labels=labels)
+    try:
+        stat = os.stat(path)
+    except OSError:
+        stat = None
+    if stat is not None:
+        summary.exists = True
+        summary.size = stat.st_size
+        summary.modified_at = stat.st_mtime
+        # A file changed on disk since its review was saved opens without it.
+        row = db.get_file_row(conn, path, stat.st_size, stat.st_mtime)
+    else:
+        row = db.latest_file_row(conn, path)
+    if row is None:
+        return summary
+    counts = db.review_counts(conn, row["id"])
+    summary.found = True
+    summary.channel = row["channel"]
+    summary.beats = counts["beats"]
+    mean_hr = counts["mean_hr"]
+    summary.mean_hr = float(mean_hr) if mean_hr is not None and np.isfinite(mean_hr) else None
+    summary.arrhythmia_beats = counts["arrhythmia_beats"]
+    summary.to_review = counts["to_review"]
+    summary.reviewed = counts["reviewed"]
+    summary.uncertain = counts["uncertain"]
+    summary.bad_data_marks = counts["bad_data_marks"]
+    summary.last_saved_at = row["updated_at"]
+    summary.source_report = row["source_report"]
+    return summary
+
+
+@router.post("/summaries", response_model=FileSummariesResult)
+def get_file_summaries(
+    payload: FileSummariesRequest, request: Request
+) -> FileSummariesResult:
+    """What the file lists (Home's recordings, the sidebar) sort and filter by,
+    for many files at once: whether each is on disk, its saved review's counts
+    and its renamed channels. Read-only; the files need not be imported. A
+    file that is gone shows its latest saved review."""
+    paths = list(dict.fromkeys(payload.paths))[:MAX_SUMMARY_PATHS]
+    conn = db.connect(request.app.state.db_path)
+    try:
+        labels = db.get_channel_labels(conn, paths)
+        return FileSummariesResult(
+            status="ok",
+            summaries=[_file_summary(conn, path, labels.get(path, {})) for path in paths],
+        )
+    except Exception as e:
+        return FileSummariesResult(status="error", error=str(e))
     finally:
         conn.close()
 

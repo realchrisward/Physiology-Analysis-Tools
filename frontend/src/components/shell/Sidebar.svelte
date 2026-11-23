@@ -1,14 +1,36 @@
 <script module lang="ts">
-  // The sidebar's filter, kept for the session (not across restarts): it
-  // survives the sidebar collapsing and the screen changing under it.
-  export type StatusFilter = 'all' | 'ready' | 'progress' | 'problems'
-  export const sidebarFilter: { query: string; status: StatusFilter } = $state({ query: '', status: 'all' })
+  import { emptyFacets, readSortPref, type FileFilter, type SortChoice, type SortKey } from '../../lib/fileFacts'
+
+  // The sidebar's sort and filter. The filter is kept for the session (not
+  // across restarts): it survives the sidebar collapsing and the screen
+  // changing under it. The sort is remembered across restarts.
+  const SORT_KEYS: SortKey[] = ['added', 'name', 'opened', 'beats', 'hr', 'arrhythmias', 'toReview', 'progress', 'size', 'saved']
+  const DEFAULT_SORT: SortChoice = { key: 'added', dir: 'asc' }
+  const SORT_STORAGE_KEY = 'pat.sidebar.sort'
+  export const sidebarFilter: FileFilter = $state({
+    query: '',
+    sort: readSortPref(SORT_STORAGE_KEY, SORT_KEYS, DEFAULT_SORT),
+    ...emptyFacets(),
+  })
 </script>
 
 <script lang="ts">
-  import { onMount, tick } from 'svelte'
+  import { onMount, tick, untrack } from 'svelte'
+  import {
+    activeFacetCount,
+    buildFacts,
+    clearFacets,
+    compareFacts,
+    matchesFacets,
+    matchesFileQuery,
+    needsSummaries,
+    sortValueLabel,
+    writeSortPref,
+    type FileFacts,
+  } from '../../lib/fileFacts'
   import { formatRelativeTime } from '../../lib/format'
   import { matchesQuery } from '../../lib/search'
+  import { fileSummaries, loadSummaries, summaryLoading } from '../../lib/stores/fileSummaries.svelte'
   import {
     clearFileRegistry,
     fileRegistry,
@@ -34,10 +56,12 @@
     type FlagProjectAnimal,
   } from '../../lib/stores/flagProjects.svelte'
   import { recentFiles } from '../../lib/stores/recentFiles.svelte'
+  import ActiveFilterChips from '../shared/ActiveFilterChips.svelte'
   import Icon from '../shared/Icon.svelte'
   import ImportProgress from '../shared/ImportProgress.svelte'
   import MenuButton, { type MenuItem } from '../shared/MenuButton.svelte'
   import SearchField from '../shared/SearchField.svelte'
+  import SortFilterPanel from '../shared/SortFilterPanel.svelte'
   import SidebarProjectTree from './SidebarProjectTree.svelte'
   import SidebarRowStatus from './SidebarRowStatus.svelte'
   import SidebarStatusDot from './SidebarStatusDot.svelte'
@@ -141,39 +165,83 @@
   let fileRows = $derived(fileRegistry.filter((row) => !projectPaths.has(row.path)))
   let hasAnything = $derived(fileRegistry.length > 0 || projects.length > 0)
 
-  // ---- Filter -------------------------------------------------------------
-  // Text (file name or path; for FP/FN reviews also the project and animal
-  // IDs) and a status group. Both narrow the files and the project trees.
-  const STATUS_GROUPS: Record<Exclude<StatusFilter, 'all'>, FileRow['status'][]> = {
-    ready: ['ready', 'detected'],
-    progress: ['queued', 'detecting'],
-    problems: ['error', 'detection-error'],
+  // ---- Sort and filter --------------------------------------------------------
+  // The search words (file name, path, channel names; for FP/FN reviews also
+  // the project and animal IDs) and the panel's facets narrow the files and
+  // the project trees; the sort orders the plain file list (a project keeps
+  // its recordings in its own order).
+  const STATUS_GROUP: Record<FileRow['status'], string> = {
+    ready: 'ready',
+    detected: 'ready',
+    queued: 'progress',
+    detecting: 'progress',
+    error: 'problems',
+    'detection-error': 'problems',
   }
-  const STATUS_FILTER_LABEL: Record<StatusFilter, string> = {
-    all: 'All files',
+  const STATUS_LABELS: Record<string, string> = {
     ready: 'Ready to review',
     progress: 'In progress',
     problems: 'Problems',
   }
 
-  let filtering = $derived(sidebarFilter.query.trim() !== '' || sidebarFilter.status !== 'all')
+  let panelOpen = $state(false)
+  let facetCount = $derived(activeFacetCount(sidebarFilter))
+  let filtering = $derived(sidebarFilter.query.trim() !== '' || facetCount > 0)
   let rowsByPath = $derived(new Map(fileRegistry.map((row) => [row.path, row])))
+  let openedAtByPath = $derived(new Map(recentFiles.map((file) => [file.path, file.openedAt])))
 
-  function statusMatches(status: FileRow['status'] | undefined): boolean {
-    if (sidebarFilter.status === 'all') return true
-    return status !== undefined && STATUS_GROUPS[sidebarFilter.status].includes(status)
+  let factsByPath: Map<string, FileFacts> = $derived(
+    new Map(
+      fileRegistry.map((row, index) => [
+        row.path,
+        buildFacts({
+          path: row.path,
+          filename: row.filename,
+          addedIndex: index,
+          openedAt: openedAtByPath.get(row.path) ?? null,
+          status: STATUS_GROUP[row.status],
+          beats: row.beatCount,
+          meanHr: row.meanHr,
+          sizeBytes: row.size,
+          channels: row.channels,
+          channelLabels: row.channelLabels,
+          summary: fileSummaries[row.path],
+        }),
+      ]),
+    ),
+  )
+
+  function factsOf(row: FileRow): FileFacts {
+    return (
+      factsByPath.get(row.path) ??
+      buildFacts({ path: row.path, filename: row.filename, status: STATUS_GROUP[row.status], channels: row.channels })
+    )
   }
+
+  // The saved-review counts (beats, left to review...) come from the backend,
+  // fetched only while the panel is open or the sort/filter uses them.
+  $effect(() => {
+    if (!(panelOpen || needsSummaries(sidebarFilter))) return
+    const paths = fileRegistry.map((row) => row.path)
+    untrack(() => void loadSummaries(paths))
+  })
+
+  $effect(() => {
+    writeSortPref(SORT_STORAGE_KEY, sidebarFilter.sort)
+  })
 
   function rowMatches(row: FileRow): boolean {
-    return statusMatches(row.status) && matchesQuery(sidebarFilter.query, row.filename, row.path)
+    const facts = factsOf(row)
+    return matchesFacets(facts, sidebarFilter) && matchesFileQuery(facts, sidebarFilter.query)
   }
 
-  // A recording of a project shows when its status fits and the words are
-  // found in the project's name or in the recording itself (so a project's
-  // name shows all its recordings, an animal ID just that one).
+  // A recording of a project shows when it passes the facets and the words
+  // are found in the project's name or in the recording itself (so a
+  // project's name shows all its recordings, an animal ID just that one).
   function animalMatches(project: FlagProject, animal: FlagProjectAnimal): boolean {
     const row = rowsByPath.get(animal.filePath ?? '')
-    if (!statusMatches(row?.status)) return false
+    const facts = row ? factsOf(row) : null
+    if (facetCount > 0 && (facts === null || !matchesFacets(facts, sidebarFilter))) return false
     return matchesQuery(
       sidebarFilter.query,
       project.name,
@@ -181,21 +249,41 @@
       animal.animalId,
       row?.filename,
       animal.filePath,
+      ...(facts?.channels ?? []),
     )
   }
 
-  let visibleFileRows = $derived(filtering ? fileRows.filter(rowMatches) : fileRows)
+  let visibleFileRows = $derived.by(() => {
+    const rows = filtering ? fileRows.filter(rowMatches) : fileRows
+    const sort = sidebarFilter.sort
+    if (sort.key === 'added' && sort.dir === 'asc') return rows
+    return [...rows].sort((a, b) => compareFacts(factsOf(a), factsOf(b), sort))
+  })
   let visibleProjects = $derived(
     filtering
       ? projects.filter(
           (project) =>
             projectRecordings(project).some((animal) => animalMatches(project, animal)) ||
             // A project with no recordings found yet still answers to its name.
-            (sidebarFilter.status === 'all' && matchesQuery(sidebarFilter.query, project.name, project.csvPath)),
+            (facetCount === 0 && matchesQuery(sidebarFilter.query, project.name, project.csvPath)),
         )
       : projects,
   )
   let nothingMatches = $derived(filtering && hasAnything && visibleFileRows.length === 0 && visibleProjects.length === 0)
+
+  // What the panel counts over: every loaded file the search words find.
+  let panelFacts = $derived(fileRegistry.map(factsOf).filter((facts) => matchesFileQuery(facts, sidebarFilter.query)))
+  // Loaded files on screen (plain rows and project recordings), for the panel's footer.
+  let shownCount = $derived.by(() => {
+    const shown = new Set(visibleFileRows.map((row) => row.path))
+    for (const project of visibleProjects) {
+      for (const animal of projectRecordings(project)) {
+        const path = animal.filePath ?? ''
+        if (rowsByPath.has(path) && (!filtering || animalMatches(project, animal))) shown.add(path)
+      }
+    }
+    return shown.size
+  })
 
   // The "Files" label heads the list unless only projects are shown, in which
   // case "FP/FN reviews" takes the top spot (and carries the Clear button).
@@ -203,18 +291,20 @@
 
   function clearFilter() {
     sidebarFilter.query = ''
-    sidebarFilter.status = 'all'
+    clearFacets(sidebarFilter)
   }
 
-  let statusItems: MenuItem[] = $derived(
-    (Object.keys(STATUS_FILTER_LABEL) as StatusFilter[]).map((status) => ({
-      id: status,
-      label: STATUS_FILTER_LABEL[status],
-      checked: sidebarFilter.status === status,
-      testid: `sidebar-status-filter-${status}`,
-      onSelect: () => (sidebarFilter.status = status),
-    })),
-  )
+  // A row's second line: the value the list is sorted by when the row would
+  // not show it otherwise (beats, left to review...), else when it was opened.
+  function rowHint(row: FileRow): { text: string; sorted: boolean } | null {
+    const key = sidebarFilter.sort.key
+    // A detected row's status line already says its beats and mean HR.
+    const repeats = row.status === 'detected' && (key === 'beats' || key === 'hr')
+    const sorted = repeats ? null : sortValueLabel(factsOf(row), key, now)
+    if (sorted) return { text: sorted, sorted: true }
+    const opened = openedLabel(row.path)
+    return opened ? { text: opened, sorted: false } : null
+  }
 
   let importItems: MenuItem[] = $derived([
     {
@@ -344,19 +434,27 @@
           testid="sidebar-filter-input"
           size="sm"
         />
-        <span class="sidebar-filter-status" class:active={sidebarFilter.status !== 'all'}>
-          <MenuButton
-            items={statusItems}
-            label={`Show: ${STATUS_FILTER_LABEL[sidebarFilter.status]}`}
-            testid="sidebar-status-filter-button"
-            triggerClass="icon-btn sidebar-filter-btn"
-          >
-            {#snippet trigger()}
-              <Icon name="filter" size={14} />
-            {/snippet}
-          </MenuButton>
-        </span>
+        <SortFilterPanel
+          filter={sidebarFilter}
+          facts={panelFacts}
+          sortKeys={SORT_KEYS}
+          defaultSort={DEFAULT_SORT}
+          facets={['review', 'status', 'channels', 'types', 'folders']}
+          statusLabels={STATUS_LABELS}
+          shown={shownCount}
+          total={fileRegistry.length}
+          loading={summaryLoading.count > 0}
+          testid="sidebar-sort-filter"
+          onOpenChange={(open) => (panelOpen = open)}
+        />
       </div>
+      <ActiveFilterChips
+        filter={sidebarFilter}
+        defaultSort={DEFAULT_SORT}
+        statusLabels={STATUS_LABELS}
+        testid="sidebar-active-filters"
+        compact
+      />
     {:else}
       <!-- Highlighted while a filter narrows the rail below it. -->
       <button
@@ -423,11 +521,14 @@
       >
         <SidebarStatusDot status={row.status} />
         {#if !collapsed}
+          {@const hint = rowHint(row)}
           <span class="sidebar-row-body">
             <span class="sidebar-row-name">{row.filename}</span>
             <SidebarRowStatus {row} />
-            {#if openedLabel(row.path)}
-              <span class="sidebar-row-opened text-muted" data-testid="file-row-opened">{openedLabel(row.path)}</span>
+            {#if hint}
+              <span class="sidebar-row-opened text-muted" data-testid={hint.sorted ? 'file-row-sort-value' : 'file-row-opened'}
+                >{hint.text}</span
+              >
             {/if}
           </span>
           <button
@@ -461,9 +562,7 @@
     {#if nothingMatches && !collapsed}
       <div class="sidebar-empty text-muted" data-testid="sidebar-no-matches">
         <p>
-          {sidebarFilter.query.trim()
-            ? `No files match “${sidebarFilter.query.trim()}”`
-            : `No files are ${STATUS_FILTER_LABEL[sidebarFilter.status].toLowerCase()}`}
+          {sidebarFilter.query.trim() ? `No files match “${sidebarFilter.query.trim()}”` : 'No files match these filters'}
         </p>
         <button type="button" class="btn btn-sm" data-testid="sidebar-clear-filter-button" onclick={clearFilter}>
           Clear filter
@@ -612,34 +711,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-  }
-
-  .sidebar-filter-status {
-    position: relative;
-    display: inline-flex;
-  }
-
-  .sidebar-filter-status :global(.sidebar-filter-btn) {
-    width: 30px;
-    height: 30px;
-  }
-
-  /* A status filter is on: mark the button so a short list isn't a mystery. */
-  .sidebar-filter-status.active :global(.sidebar-filter-btn) {
-    background: var(--color-accent-soft);
-    color: var(--color-accent);
-  }
-
-  .sidebar-filter-status.active::after {
-    content: '';
-    position: absolute;
-    top: 3px;
-    right: 3px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-accent);
-    pointer-events: none;
   }
 
   .sidebar-import .sidebar-filter-on {

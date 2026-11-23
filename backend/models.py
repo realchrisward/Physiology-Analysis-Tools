@@ -250,6 +250,43 @@ class FileStateSummaryResult(BaseModel):
     error: str | None = None
 
 
+class FileSummariesRequest(BaseModel):
+    paths: list[str]
+
+
+class FileSummary(BaseModel):
+    """What the file lists sort and filter by, for one recording: whether it is
+    on disk, and the counts of its saved review (`found` false: none)."""
+
+    path: str
+    exists: bool = False
+    size: int | None = None
+    modified_at: float | None = None
+    found: bool = False
+    # The channel the saved review is on.
+    channel: str | None = None
+    beats: int = 0
+    mean_hr: float | None = None
+    # Flagged and not rejected, or confirmed.
+    arrhythmia_beats: int = 0
+    # Flagged, neither confirmed nor rejected yet.
+    to_review: int = 0
+    # Confirmed or rejected.
+    reviewed: int = 0
+    uncertain: int = 0
+    bad_data_marks: int = 0
+    last_saved_at: str | None = None
+    source_report: str | None = None
+    # {channel: display name} for channels the technician renamed.
+    channel_labels: dict[str, str] = {}
+
+
+class FileSummariesResult(BaseModel):
+    status: str
+    summaries: list[FileSummary] = []
+    error: str | None = None
+
+
 class RestoreBackupRequest(BaseModel):
     path: str
 

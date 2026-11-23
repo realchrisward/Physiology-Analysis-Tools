@@ -7,6 +7,9 @@ export interface RecentFile {
   path: string
   filename: string
   openedAt: number
+  // The recording's channel names, so Home can filter by channel without
+  // loading it. Missing for entries saved before this was remembered.
+  channels?: string[]
 }
 
 const STORAGE_KEY = 'pat.recentFiles'
@@ -34,11 +37,13 @@ function persist(): void {
   }
 }
 
-/** Record (or bump) a file as recently opened, capped and deduplicated by path. */
-export function recordRecentFile(path: string, filename: string): void {
+/** Record (or bump) a file as recently opened, capped and deduplicated by path.
+ * `channels` (when known) is remembered with it; left out keeps what was. */
+export function recordRecentFile(path: string, filename: string, channels?: string[]): void {
   const existingIndex = recentFiles.findIndex((f) => f.path === path)
+  const known = channels && channels.length > 0 ? [...channels] : recentFiles[existingIndex]?.channels
   if (existingIndex !== -1) recentFiles.splice(existingIndex, 1)
-  recentFiles.unshift({ path, filename, openedAt: Date.now() })
+  recentFiles.unshift({ path, filename, openedAt: Date.now(), ...(known ? { channels: known } : {}) })
   if (recentFiles.length > MAX_RECENT) recentFiles.length = MAX_RECENT
   persist()
 }

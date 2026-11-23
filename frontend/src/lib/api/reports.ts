@@ -1,3 +1,4 @@
+import { afterReviewChange } from '../reviewChanges'
 import { apiGet, apiPost } from './http'
 import type {
   ReportApplyResult,
@@ -25,12 +26,15 @@ export function applyReport(
   channel: string,
   backup: ReportBackupChoice,
 ): Promise<ReportApplyResult> {
-  return apiPost('/reports/apply', 'POST', {
-    recording_path: recordingPath,
-    report_path: reportPath,
-    channel,
-    backup,
-  })
+  return afterReviewChange(
+    apiPost('/reports/apply', 'POST', {
+      recording_path: recordingPath,
+      report_path: reportPath,
+      channel,
+      backup,
+    }),
+    recordingPath,
+  )
 }
 
 /** Detaches the recording's report. */

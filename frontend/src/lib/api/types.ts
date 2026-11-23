@@ -241,6 +241,36 @@ export interface FileStateSummaryResult {
   error: string | null
 }
 
+// What the file lists sort and filter by, for one recording (POST
+// /files/summaries): whether it is on disk, and its saved review's counts
+// (`found` false: nothing saved for the file as it is on disk now).
+export interface FileSummary {
+  path: string
+  exists: boolean
+  size: number | null
+  modified_at: number | null
+  found: boolean
+  channel: string | null
+  beats: number
+  mean_hr: number | null
+  // Flagged and not rejected, or confirmed.
+  arrhythmia_beats: number
+  // Flagged, neither confirmed nor rejected yet.
+  to_review: number
+  reviewed: number
+  uncertain: number
+  bad_data_marks: number
+  last_saved_at: string | null
+  source_report: string | null
+  channel_labels: Record<string, string>
+}
+
+export interface FileSummariesResult {
+  status: string
+  summaries?: FileSummary[]
+  error?: string | null
+}
+
 export interface RestoreBackupResult {
   status: string
   error: string | null

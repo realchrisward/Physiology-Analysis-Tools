@@ -1,15 +1,37 @@
 <script module lang="ts">
+  import { emptyFacets, readSortPref, type FileFilter, type SortChoice, type SortKey } from '../../lib/fileFacts'
+
   // What the Home screen is narrowed to. Module state: it survives opening a
   // recording and coming back, but not a restart (the sort is remembered).
   export type HomeType = 'all' | 'recordings' | 'reviews'
-  export type HomeSort = 'recent' | 'name'
-  export const homeFilter: { query: string; type: HomeType } = $state({ query: '', type: 'all' })
+  const SORT_KEYS: SortKey[] = ['opened', 'name', 'beats', 'hr', 'arrhythmias', 'toReview', 'progress', 'size', 'saved']
+  const DEFAULT_SORT: SortChoice = { key: 'opened', dir: 'desc' }
+  const SORT_STORAGE_KEY = 'pat.home.sort'
+  export const homeFilter: FileFilter & { type: HomeType } = $state({
+    query: '',
+    type: 'all',
+    sort: readSortPref(SORT_STORAGE_KEY, SORT_KEYS, DEFAULT_SORT),
+    ...emptyFacets(),
+  })
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
+  import {
+    activeFacetCount,
+    buildFacts,
+    clearFacets,
+    compareFacts,
+    matchesFacets,
+    matchesFileQuery,
+    needsSummaries,
+    sortValueLabel,
+    writeSortPref,
+    type FileFacts,
+  } from '../../lib/fileFacts'
   import { formatRelativeTime, recencyGroup, shortFolder, type RecencyGroup } from '../../lib/format'
   import { matchesQuery } from '../../lib/search'
+  import { fileSummaries, loadSummaries, summaryLoading } from '../../lib/stores/fileSummaries.svelte'
   import { clearFlagProjects, flagProjects, flagStorage, startFlagListImport } from '../../lib/stores/flagProjects.svelte'
   import { fileRegistry } from '../../lib/stores/fileRegistry.svelte'
   import {
@@ -22,9 +44,11 @@
   } from '../../lib/stores/importQueue.svelte'
   import { clearRecentFiles, recentFiles, removeRecentFiles, type RecentFile } from '../../lib/stores/recentFiles.svelte'
   import FlagProjectList from '../flags/FlagProjectList.svelte'
+  import ActiveFilterChips from '../shared/ActiveFilterChips.svelte'
   import Icon from '../shared/Icon.svelte'
   import ImportProgress from '../shared/ImportProgress.svelte'
   import SearchField from '../shared/SearchField.svelte'
+  import SortFilterPanel from '../shared/SortFilterPanel.svelte'
 
   // Keeps "Opened 5 minutes ago" (and the Today / Yesterday groups) honest
   // while the screen stays open.
@@ -38,7 +62,6 @@
   // means the choice isn't remembered.
   const FLAG_PROJECTS_OPEN_KEY = 'pat.home.flagProjectsOpen'
   const RECENT_FILES_OPEN_KEY = 'pat.home.recentFilesOpen'
-  const SORT_KEY = 'pat.home.sort'
 
   function load(key: string): string | null {
     try {
@@ -58,7 +81,6 @@
 
   let flagProjectsOpen: boolean = $state(load(FLAG_PROJECTS_OPEN_KEY) !== 'false')
   let recentFilesOpen: boolean = $state(load(RECENT_FILES_OPEN_KEY) !== 'false')
-  let sort: HomeSort = $state(load(SORT_KEY) === 'name' ? 'name' : 'recent')
 
   function toggleFlagProjects() {
     flagProjectsOpen = !flagProjectsOpen
@@ -70,20 +92,69 @@
     save(RECENT_FILES_OPEN_KEY, String(recentFilesOpen))
   }
 
-  function setSort(value: HomeSort) {
-    sort = value
-    save(SORT_KEY, value)
-  }
-
   // Nothing to come back to yet: the screen is a welcome instead of a list.
   let firstRun = $derived(recentFiles.length === 0 && flagProjects.length === 0)
 
-  // ---- Search, type and sort ------------------------------------------------
+  // ---- Search, type, filters and sort --------------------------------------------
+  // Where a recording is: loaded in the sidebar, only listed here, or gone
+  // from disk (known once the saved counts are fetched).
+  const STATUS_LABELS: Record<string, string> = {
+    loaded: 'In sidebar',
+    'not-loaded': 'Not loaded',
+    missing: 'File not found',
+  }
+
+  let panelOpen = $state(false)
+  let facetsOn = $derived(activeFacetCount(homeFilter) > 0)
   let searching = $derived(homeFilter.query.trim() !== '')
 
   const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 
-  let matchingRecents = $derived(recentFiles.filter((file) => matchesQuery(homeFilter.query, file.filename, file.path)))
+  let registryByPath = $derived(new Map(fileRegistry.map((row) => [row.path, row])))
+
+  interface RecentItem {
+    file: RecentFile
+    facts: FileFacts
+  }
+
+  let recentItems: RecentItem[] = $derived(
+    recentFiles.map((file) => {
+      const row = registryByPath.get(file.path)
+      const summary = fileSummaries[file.path]
+      return {
+        file,
+        facts: buildFacts({
+          path: file.path,
+          filename: file.filename,
+          openedAt: file.openedAt,
+          status: row ? 'loaded' : summary ? (summary.exists ? 'not-loaded' : 'missing') : null,
+          beats: row?.beatCount ?? null,
+          meanHr: row?.meanHr ?? null,
+          sizeBytes: row?.size ?? null,
+          channels: row?.channels ?? file.channels ?? null,
+          channelLabels: row?.channelLabels ?? null,
+          summary,
+        }),
+      }
+    }),
+  )
+
+  // The saved-review counts come from the backend, fetched only while the
+  // panel is open or the sort/filter uses them.
+  $effect(() => {
+    if (!(panelOpen || needsSummaries(homeFilter))) return
+    const paths = recentFiles.map((file) => file.path)
+    untrack(() => void loadSummaries(paths))
+  })
+
+  $effect(() => {
+    writeSortPref(SORT_STORAGE_KEY, homeFilter.sort)
+  })
+
+  let matchingRecents = $derived(recentItems.filter((item) => matchesFileQuery(item.facts, homeFilter.query)))
+  let filteredRecents = $derived(
+    facetsOn ? matchingRecents.filter((item) => matchesFacets(item.facts, homeFilter)) : matchingRecents,
+  )
   let matchingProjects = $derived(
     flagProjects.filter((project) =>
       matchesQuery(
@@ -94,55 +165,81 @@
       ),
     ),
   )
+  // The panel's filters are about recordings: FP/FN reviews step aside
+  // while one is on (and the toolbar says so).
+  let projectsHidden = $derived(facetsOn && homeFilter.type !== 'recordings' && matchingProjects.length > 0)
 
-  let shownRecents = $derived.by(() => {
+  let shownRecents: RecentItem[] = $derived.by(() => {
     if (homeFilter.type === 'reviews') return []
-    // `recentFiles` is newest first already.
-    return sort === 'name' ? [...matchingRecents].sort((a, b) => byName(a.filename, b.filename)) : matchingRecents
+    const sort = homeFilter.sort
+    // The list is kept newest first already (and two files opened in the
+    // same instant keep the order they were opened in).
+    if (sort.key === 'opened') return sort.dir === 'desc' ? filteredRecents : [...filteredRecents].reverse()
+    return [...filteredRecents].sort((a, b) => compareFacts(a.facts, b.facts, sort))
   })
+  // FP/FN reviews sort by name or by when they were opened; for the
+  // recordings-only fields they stay newest first.
   let shownProjects = $derived.by(() => {
-    if (homeFilter.type === 'recordings') return []
-    return sort === 'name'
-      ? [...matchingProjects].sort((a, b) => byName(a.name, b.name))
-      : [...matchingProjects].sort((a, b) => b.openedAt - a.openedAt)
+    if (homeFilter.type === 'recordings' || facetsOn) return []
+    const { key, dir } = homeFilter.sort
+    const sign = dir === 'asc' ? 1 : -1
+    if (key === 'name') return [...matchingProjects].sort((a, b) => sign * byName(a.name, b.name))
+    if (key === 'opened') return [...matchingProjects].sort((a, b) => sign * (a.openedAt - b.openedAt))
+    return [...matchingProjects].sort((a, b) => b.openedAt - a.openedAt)
   })
 
   // Rows under Today / Yesterday / Earlier this week / Older headings when
-  // sorted by when they were opened; one plain list when sorted by name.
+  // sorted by when they were opened; one plain list otherwise.
   let recentGroups = $derived.by(() => {
-    if (sort === 'name') return [{ label: null as RecencyGroup | null, files: shownRecents }]
-    const groups: { label: RecencyGroup | null; files: RecentFile[] }[] = []
-    for (const file of shownRecents) {
-      const label = recencyGroup(file.openedAt, now)
+    if (homeFilter.sort.key !== 'opened') return [{ label: null as RecencyGroup | null, items: shownRecents }]
+    const groups: { label: RecencyGroup | null; items: RecentItem[] }[] = []
+    for (const item of shownRecents) {
+      const label = recencyGroup(item.file.openedAt, now)
       const last = groups[groups.length - 1]
-      if (last && last.label === label) last.files.push(file)
-      else groups.push({ label, files: [file] })
+      if (last && last.label === label) last.items.push(item)
+      else groups.push({ label, items: [item] })
     }
     return groups
   })
 
   let typeOptions = $derived([
-    { id: 'all' as HomeType, label: 'All', count: matchingRecents.length + matchingProjects.length },
-    { id: 'recordings' as HomeType, label: 'Recordings', count: matchingRecents.length },
-    { id: 'reviews' as HomeType, label: 'FP/FN reviews', count: matchingProjects.length },
+    {
+      id: 'all' as HomeType,
+      label: 'All',
+      count: filteredRecents.length + (facetsOn ? 0 : matchingProjects.length),
+    },
+    { id: 'recordings' as HomeType, label: 'Recordings', count: filteredRecents.length },
+    { id: 'reviews' as HomeType, label: 'FP/FN reviews', count: facetsOn ? 0 : matchingProjects.length },
   ])
 
   let nothingShown = $derived(!firstRun && shownRecents.length === 0 && shownProjects.length === 0)
 
-  // While searching, a folded section would hide its matches: both show.
-  let projectsExpanded = $derived(flagProjectsOpen || searching)
-  let recentsExpanded = $derived(recentFilesOpen || searching)
+  // While searching or filtering, a folded section would hide its matches: both show.
+  let narrowing = $derived(searching || facetsOn)
+  let projectsExpanded = $derived(flagProjectsOpen || narrowing)
+  let recentsExpanded = $derived(recentFilesOpen || narrowing)
 
   function clearSearch() {
     homeFilter.query = ''
     homeFilter.type = 'all'
+    clearFacets(homeFilter)
+  }
+
+  // The right-hand column: when the row was opened, or the value the list is
+  // sorted by when that is something else (beats, left to review...).
+  function rowValue(item: RecentItem): { text: string; sorted: boolean } {
+    const key = homeFilter.sort.key
+    if (key === 'opened' || key === 'name') {
+      return { text: `Opened ${formatRelativeTime(item.file.openedAt, now)}`, sorted: false }
+    }
+    return { text: sortValueLabel(item.facts, key, now) ?? '—', sorted: true }
   }
 
   // ---- Selection --------------------------------------------------------------
   // Kept as paths and always read against what is shown, so a file that was
   // filtered out or dropped off the list can never be acted on by a stale tick.
   let ticked: string[] = $state([])
-  let selectedPaths = $derived(shownRecents.map((f) => f.path).filter((p) => ticked.includes(p)))
+  let selectedPaths = $derived(shownRecents.map((item) => item.file.path).filter((p) => ticked.includes(p)))
   let allSelected = $derived(shownRecents.length > 0 && selectedPaths.length === shownRecents.length)
   let someSelected = $derived(selectedPaths.length > 0 && !allSelected)
 
@@ -151,7 +248,7 @@
   }
 
   function toggleAll() {
-    const shown = shownRecents.map((f) => f.path)
+    const shown = shownRecents.map((item) => item.file.path)
     ticked = allSelected ? ticked.filter((p) => !shown.includes(p)) : [...new Set([...ticked, ...shown])]
   }
 
@@ -318,18 +415,32 @@
             </button>
           {/each}
         </div>
-        <label class="sort">
-          Sort
-          <select
-            data-testid="home-sort-select"
-            value={sort}
-            onchange={(event) => setSort((event.currentTarget as HTMLSelectElement).value as HomeSort)}
-          >
-            <option value="recent">Last opened</option>
-            <option value="name">Name</option>
-          </select>
-        </label>
+        <SortFilterPanel
+          filter={homeFilter}
+          facts={matchingRecents.map((item) => item.facts)}
+          sortKeys={SORT_KEYS}
+          defaultSort={DEFAULT_SORT}
+          facets={['review', 'status', 'channels', 'types', 'folders']}
+          statusLabels={STATUS_LABELS}
+          shown={homeFilter.type === 'reviews' ? 0 : shownRecents.length}
+          total={recentFiles.length}
+          loading={summaryLoading.count > 0}
+          variant="button"
+          testid="home-sort-filter"
+          onOpenChange={(open) => (panelOpen = open)}
+        />
       </div>
+      <ActiveFilterChips
+        filter={homeFilter}
+        defaultSort={DEFAULT_SORT}
+        statusLabels={STATUS_LABELS}
+        testid="home-active-filters"
+      />
+      {#if projectsHidden}
+        <p class="toolbar-note text-muted" data-testid="home-projects-hidden-note">
+          FP/FN reviews are hidden while recording filters are on.
+        </p>
+      {/if}
     </div>
   {/if}
 
@@ -350,7 +461,7 @@
             <span class="section-count" data-testid="flag-projects-count">{shownProjects.length}</span>
           </button>
         </h2>
-        {#if projectsExpanded && !searching}
+        {#if projectsExpanded && !narrowing}
           <button
             type="button"
             class="btn btn-sm btn-ghost btn-danger-text"
@@ -399,9 +510,9 @@
               }}
               onchange={toggleAll}
             />
-            Select all{searching ? ' shown' : ''}
+            Select all{narrowing ? ' shown' : ''}
           </label>
-          {#if !searching}
+          {#if !narrowing}
             <button
               type="button"
               class="btn btn-sm btn-ghost btn-danger-text"
@@ -420,8 +531,10 @@
           {#each recentGroups as group (group.label ?? 'all')}
             {#if group.label}<h3 class="group-label">{group.label}</h3>{/if}
             <ul class="recent-list">
-              {#each group.files as file (file.path)}
+              {#each group.items as item (item.file.path)}
+                {@const file = item.file}
                 {@const selected = ticked.includes(file.path)}
+                {@const value = rowValue(item)}
                 <li class="recent-row" class:selected>
                   <input
                     type="checkbox"
@@ -442,11 +555,18 @@
                     <Icon name="file-text" size={16} />
                     <span class="recent-name">{file.filename}</span>
                     <span class="recent-folder text-muted">{shortFolder(file.path)}</span>
-                    {#if inSession(file.path)}
+                    {#if item.facts.status === 'missing'}
+                      <span
+                        class="recent-badge recent-badge-missing"
+                        data-testid="recent-file-missing"
+                        title="This file is no longer at this location">File not found</span
+                      >
+                    {:else if inSession(file.path)}
                       <span class="recent-badge" title="Already loaded: it opens straight away">In sidebar</span>
                     {/if}
-                    <span class="recent-time text-muted" data-testid="recent-file-opened"
-                      >Opened {formatRelativeTime(file.openedAt, now)}</span
+                    <span
+                      class="recent-time text-muted"
+                      data-testid={value.sorted ? 'recent-file-sort-value' : 'recent-file-opened'}>{value.text}</span
                     >
                   </button>
                   <button
@@ -499,7 +619,9 @@
       <Icon name="search" size={20} />
       <p>
         {#if searching}
-          Nothing matches “{homeFilter.query.trim()}”{homeFilter.type !== 'all' ? ' here' : ''}.
+          Nothing matches “{homeFilter.query.trim()}”{homeFilter.type !== 'all' || facetsOn ? ' here' : ''}.
+        {:else if facetsOn}
+          No recordings match these filters.
         {:else if homeFilter.type === 'recordings'}
           No recent recordings.
         {:else}
@@ -719,17 +841,9 @@
     color: var(--color-text-muted);
   }
 
-  .sort {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 0.8125rem;
-    color: var(--color-text-muted);
-  }
-
-  .sort select {
-    padding: 3px var(--space-2);
-    font-size: 0.8125rem;
+  .toolbar-note {
+    margin: 0;
+    font-size: 0.75rem;
   }
 
   /* Sections (FP/FN reviews, Recordings) share one header look. */
@@ -894,6 +1008,11 @@
     font-size: 0.7rem;
     font-weight: 600;
     white-space: nowrap;
+  }
+
+  .recent-badge-missing {
+    background: var(--color-danger-soft, var(--color-surface-hover));
+    color: var(--color-danger);
   }
 
   .recent-remove {

@@ -213,7 +213,8 @@ async function importPaths(
         // holding onto the plain object literal above) so mutations made later
         // in the detection queue are tracked by Svelte's state proxy.
         added.push(fileRegistry[fileRegistry.length - 1])
-        if (fileResult.status === 'ok' && recordRecent) recordRecentFile(fileResult.path, fileResult.filename)
+        if (fileResult.status === 'ok' && recordRecent)
+          recordRecentFile(fileResult.path, fileResult.filename, fileResult.channels)
       }
       newRows.push(...added)
       openFirstShowable(false)

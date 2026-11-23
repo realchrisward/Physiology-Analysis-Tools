@@ -70,7 +70,7 @@
     // Every way of opening a file lands here, so this is the one place that
     // keeps its "last opened" time current. FP/FN project recordings stay out
     // of Recent files — the project itself is the thing to reopen.
-    if (!row.projectId) recordRecentFile(row.path, fileNameOf(row.path))
+    if (!row.projectId) recordRecentFile(row.path, fileNameOf(row.path), row.channels)
   }
 
   // Only while that project is still open: a recording another open project

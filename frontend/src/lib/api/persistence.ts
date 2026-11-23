@@ -1,3 +1,4 @@
+import { afterReviewChange } from '../reviewChanges'
 import { apiGet, apiPost } from './http'
 import type {
   BadDataAddResult,
@@ -12,6 +13,7 @@ import type {
   DiscardStateResult,
   FileStateResult,
   FileStateSummaryResult,
+  FileSummariesResult,
   PersistBeatsResult,
   ReportResult,
   RestoreBackupResult,
@@ -29,22 +31,22 @@ export function getFileStateSummary(path: string): Promise<FileStateSummaryResul
 
 // Puts back the review a report replaced (the newest unexpired backup).
 export function restoreReviewBackup(path: string): Promise<RestoreBackupResult> {
-  return apiPost('/files/state/restore-backup', 'POST', { path })
+  return afterReviewChange(apiPost('/files/state/restore-backup', 'POST', { path }), path)
 }
 
 export function putChannel(path: string, channel: string): Promise<ChannelPersistResult> {
-  return apiPost('/files/channel', 'PUT', { path, channel })
+  return afterReviewChange(apiPost('/files/channel', 'PUT', { path, channel }), path)
 }
 
 // Gives `channel` a display name in each of `paths`; `null` (or a blank name)
 // goes back to the original. Only the shown name changes — the channel keeps
 // its own name as its key everywhere else.
 export function putChannelLabel(paths: string[], channel: string, label: string | null): Promise<ChannelLabelResult> {
-  return apiPost('/files/channel-label', 'PUT', { paths, channel, label })
+  return afterReviewChange(apiPost('/files/channel-label', 'PUT', { paths, channel, label }), ...paths)
 }
 
 export function persistBeats(path: string, channel: string): Promise<PersistBeatsResult> {
-  return apiPost('/files/beats', 'POST', { path, channel })
+  return afterReviewChange(apiPost('/files/beats', 'POST', { path, channel }), path)
 }
 
 // `uncertain` rides along with confirm / reject / reassign (saved together with
@@ -57,7 +59,7 @@ export function updateBeatCategory(
   category?: string,
   uncertain?: boolean | null,
 ): Promise<CategoryUpdateResult> {
-  return apiPost('/files/beats/category', 'PATCH', { path, ts, action, category, uncertain })
+  return afterReviewChange(apiPost('/files/beats/category', 'PATCH', { path, ts, action, category, uncertain }), path)
 }
 
 export function addBadData(path: string, start: number, stop: number): Promise<BadDataAddResult> {
@@ -86,19 +88,25 @@ export function snapBeat(path: string, channel: string, ts: number, slack?: numb
 
 // Adds a beat the detector missed, at the sample nearest `ts`.
 export function addBeat(path: string, channel: string, ts: number): Promise<BeatAddResult> {
-  return apiPost('/files/beats/one', 'POST', { path, channel, ts })
+  return afterReviewChange(apiPost('/files/beats/one', 'POST', { path, channel, ts }), path)
 }
 
 // Removes a beat that isn't really a beat (a detection false positive) —
 // distinct from rejecting it, which keeps the beat and only clears its
 // arrhythmia flags.
 export function deleteBeat(path: string, ts: number): Promise<BeatDeleteResult> {
-  return apiPost('/files/beats/one', 'DELETE', { path, ts })
+  return afterReviewChange(apiPost('/files/beats/one', 'DELETE', { path, ts }), path)
 }
 
 // Throws away everything saved for a file so detection can start clean.
 export function discardFileState(path: string): Promise<DiscardStateResult> {
-  return apiPost('/files/state', 'DELETE', { path })
+  return afterReviewChange(apiPost('/files/state', 'DELETE', { path }), path)
+}
+
+// Saved-review counts for many recordings at once (they need not be imported):
+// what the sidebar and Home sort and filter by.
+export function getFileSummaries(paths: string[]): Promise<FileSummariesResult> {
+  return apiPost('/files/summaries', 'POST', { paths })
 }
 
 export function generateReport(path: string, outputPath: string): Promise<ReportResult> {

@@ -259,6 +259,31 @@ def get_file_row(
     return cursor.fetchone()
 
 
+def latest_file_row(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
+    """The most recently saved review of `path`, whichever version of the file
+    it belongs to (for a file that is no longer on disk)."""
+    return conn.execute(
+        "SELECT * FROM files WHERE path=? ORDER BY updated_at DESC LIMIT 1", (path,)
+    ).fetchone()
+
+
+def review_counts(conn: sqlite3.Connection, file_id: int) -> sqlite3.Row:
+    """Counts over a file's saved beats: beats, mean HR, arrhythmia beats
+    (flagged and not rejected, or confirmed), flagged beats still to review,
+    reviewed (confirmed or rejected) and uncertain beats, plus bad-data marks."""
+    return conn.execute(
+        "SELECT COUNT(*) AS beats, AVG(hr) AS mean_hr, "
+        "COALESCE(SUM((any_arrhythmia = 1 AND review_state != 'rejected') "
+        "OR review_state = 'confirmed'), 0) AS arrhythmia_beats, "
+        "COALESCE(SUM(any_arrhythmia = 1 AND review_state = 'unreviewed'), 0) AS to_review, "
+        "COALESCE(SUM(review_state IN ('confirmed', 'rejected')), 0) AS reviewed, "
+        "COALESCE(SUM(uncertain = 1), 0) AS uncertain, "
+        "(SELECT COUNT(*) FROM bad_data_marks WHERE file_id = :id) AS bad_data_marks "
+        "FROM beats WHERE file_id = :id",
+        {"id": file_id},
+    ).fetchone()
+
+
 def upsert_file(
     conn: sqlite3.Connection,
     path: str,
