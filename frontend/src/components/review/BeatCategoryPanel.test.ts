@@ -119,41 +119,48 @@ describe('BeatCategoryPanel', () => {
     expect(onUpdated).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok', review_state: 'rejected' }))
   })
 
-  it('offers exactly the 6 reassignable categories (not any_arrhythmia) and reassigns to the chosen one', async () => {
-    const beat = makeBeat({ prem_beat: true })
+  it('offers exactly the 6 categories (not any_arrhythmia) as checkboxes, the current one ticked, and adds a ticked one', async () => {
+    const beat = makeBeat({ prem_beat: true, any_arrhythmia: true })
     const fetchMock = mockCategoryResponse({
       ts: beat.ts,
-      review_state: 'reassigned',
-      reassigned_category: 'prem_beat',
+      review_state: 'reviewed',
+      reassigned_category: 'skipped_beat,prem_beat',
     })
     vi.stubGlobal('fetch', fetchMock)
     const onUpdated = vi.fn()
 
     render(BeatCategoryPanel, { props: { path: '/data/57.txt', beat, onUpdated } })
+    await fireEvent.click(screen.getByTestId('categories-picker-toggle'))
 
-    const select = screen.getByTestId('reassign-select') as HTMLSelectElement
-    const optionValues = Array.from(select.options).map((o) => o.value).filter((v) => v !== '')
-    expect(optionValues.sort()).toEqual(
+    const boxes = screen.getAllByRole('checkbox').filter((box) => box.dataset.testid?.startsWith('categories-option-'))
+    expect(boxes.map((box) => box.dataset.testid?.replace('categories-option-', '')).sort()).toEqual(
       ['abn_cluster', 'bradycardia_absolute', 'other_arrhythmia', 'prem_beat', 'skipped_beat', 'tachycardia_absolute'].sort(),
     )
-    expect(optionValues).not.toContain('any_arrhythmia')
+    expect(screen.getByTestId('categories-option-prem_beat')).toBeChecked()
+    expect(screen.getByTestId('categories-option-skipped_beat')).not.toBeChecked()
 
-    await fireEvent.change(select, { target: { value: 'prem_beat' } })
-    await fireEvent.click(screen.getByTestId('reassign-button'))
+    await fireEvent.click(screen.getByTestId('categories-option-skipped_beat'))
 
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:8000/files/beats/category',
       expect.objectContaining({
         method: 'PATCH',
-        body: JSON.stringify({ path: '/data/57.txt', ts: beat.ts, action: 'reassign', category: 'prem_beat' }),
+        body: JSON.stringify({
+          path: '/data/57.txt',
+          ts: beat.ts,
+          action: 'set_categories',
+          categories: ['skipped_beat', 'prem_beat'],
+        }),
       }),
     )
-    expect(onUpdated).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'ok', review_state: 'reassigned', reassigned_category: 'prem_beat' }),
-    )
+    await waitFor(() => {
+      expect(onUpdated).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }))
+    })
+    expect(screen.getByTestId('category-skipped_beat')).toBeInTheDocument()
+    expect(screen.getByTestId('category-prem_beat')).toBeInTheDocument()
   })
 
-  it('removes an auto-assigned label via its × button, calling updateBeatCategory with remove_flag', async () => {
+  it('removes an auto-assigned label via its × button, saving the remaining categories', async () => {
     const beat = makeBeat({ tachycardia_absolute: true, prem_beat: true })
     const fetchMock = mockCategoryResponse({ ts: beat.ts, review_state: 'unreviewed' })
     vi.stubGlobal('fetch', fetchMock)
@@ -176,8 +183,8 @@ describe('BeatCategoryPanel', () => {
         body: JSON.stringify({
           path: '/data/57.txt',
           ts: beat.ts,
-          action: 'remove_flag',
-          category: 'tachycardia_absolute',
+          action: 'set_categories',
+          categories: ['prem_beat'],
         }),
       }),
     )
@@ -198,28 +205,43 @@ describe('BeatCategoryPanel', () => {
     expect(await screen.findByTestId('no-categories')).toBeInTheDocument()
   })
 
-  it('shows a reassigned category as a label in the same list immediately, alongside the review-state text', async () => {
-    const beat = makeBeat({ tachycardia_absolute: true })
+  it('asks for a category before marking a beat with none Arrhythmia, and saves it with the decision', async () => {
+    const beat = makeBeat() // no category flagged
     const fetchMock = mockCategoryResponse({
       ts: beat.ts,
-      review_state: 'reassigned',
-      reassigned_category: 'prem_beat',
+      review_state: 'confirmed',
+      reassigned_category: 'other_arrhythmia',
     })
     vi.stubGlobal('fetch', fetchMock)
 
     render(BeatCategoryPanel, { props: { path: '/data/57.txt', beat, onUpdated: vi.fn() } })
 
-    await fireEvent.change(screen.getByTestId('reassign-select'), { target: { value: 'prem_beat' } })
-    await fireEvent.click(screen.getByTestId('reassign-button'))
+    // Arrhythmia alone saves nothing yet: the picker asks for a category.
+    await fireEvent.click(screen.getByTestId('confirm-button'))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByTestId('categories-needed')).toBeInTheDocument()
 
-    // The old auto-detected label is gone (the backend clears every other
-    // column on reassign — see backend/db.py), replaced by the new one,
-    // shown immediately as its own label rather than only as text.
+    await fireEvent.click(screen.getByTestId('categories-option-other_arrhythmia'))
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/files/beats/category',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          path: '/data/57.txt',
+          ts: beat.ts,
+          action: 'confirm',
+          categories: ['other_arrhythmia'],
+        }),
+      }),
+    )
     await waitFor(() => {
-      expect(screen.getByTestId('review-state')).toHaveTextContent('Reassigned to Premature beat')
+      expect(screen.getByTestId('review-state')).toHaveTextContent('Arrhythmia')
     })
-    expect(screen.queryByTestId('category-tachycardia_absolute')).not.toBeInTheDocument()
-    expect(screen.getByTestId('category-prem_beat')).toBeInTheDocument()
+    expect(screen.getByTestId('category-other_arrhythmia')).toBeInTheDocument()
+    expect(screen.queryByTestId('categories-needed')).not.toBeInTheDocument()
+    // Its only category can't be unticked: an arrhythmia keeps one.
+    expect(screen.getByTestId('categories-option-other_arrhythmia')).toBeDisabled()
   })
 
   it('shows a clean, retryable error state for the "no persisted data" backend error, distinct from a validation error', async () => {

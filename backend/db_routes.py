@@ -556,6 +556,7 @@ def _update_beat_category_locked(
         "seen",
         "clear_decision",
         "unreview",
+        "set_categories",
     }:
         return CategoryUpdateResult(
             status="error",
@@ -567,6 +568,17 @@ def _update_beat_category_locked(
             status="error",
             error="uncertain is required for a set_uncertain action",
         )
+
+    if payload.action == "set_categories" and payload.categories is None:
+        return CategoryUpdateResult(
+            status="error", error="categories is required for a set_categories action"
+        )
+    if payload.categories is not None:
+        unknown = [c for c in payload.categories if c not in REASSIGNABLE_CATEGORIES]
+        if unknown:
+            return CategoryUpdateResult(
+                status="error", error=f"Invalid category: {unknown[0]!r}"
+            )
 
     if payload.action in {"reassign", "remove_flag"}:
         if payload.category is None:
@@ -605,8 +617,9 @@ def _update_beat_category_locked(
                 payload.action,
                 payload.category,
                 payload.uncertain,
+                payload.categories,
             )
-        except db.UncertainNeedsDecisionError as e:
+        except db.ReviewRuleError as e:
             return CategoryUpdateResult(status="error", error=str(e))
         if updated is None:
             return CategoryUpdateResult(
@@ -652,6 +665,7 @@ def _update_beat_category_locked(
             review_state=updated["review_state"],
             reassigned_category=updated["reassigned_category"],
             uncertain=bool(updated["uncertain"]),
+            categories=[c for c in categories.REASSIGNABLE_CATEGORIES if updated[c]],
         )
     except Exception as e:
         return CategoryUpdateResult(status="error", error=str(e))
@@ -1068,6 +1082,11 @@ def _report_metadata(
             "review_state_legend",
             "unreviewed = not looked at, reviewed = looked at without a decision, "
             "confirmed = arrhythmia, rejected = not arrhythmia",
+        ),
+        (
+            "reassigned_category_legend",
+            "the categories the reviewer chose for the beat, comma-separated "
+            "(blank: as detected); the category flag columns match them",
         ),
         (
             "uncertain_legend",

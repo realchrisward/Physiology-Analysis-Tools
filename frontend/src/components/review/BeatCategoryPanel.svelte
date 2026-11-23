@@ -6,6 +6,7 @@
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
   import Icon from '../shared/Icon.svelte'
   import { formatEditTime } from '../../lib/format'
+  import { CATEGORY_COLOR_VAR } from '../../lib/categories'
 
   // The 6 reassignable categories, exactly per `backend/categories.py`'s
   // `REASSIGNABLE_CATEGORIES` (documented in BACKEND_OVERVIEW.md).
@@ -120,8 +121,14 @@
   let pendingUncertain = $derived(!hasStatus && isPendingUncertain(path, beat.ts))
   let uncertain = $derived(hasStatus ? savedUncertain : pendingUncertain)
 
-  let reassignCategory: string = $state('')
   let submitting: boolean = $state(false)
+
+  // The category picker: a checkbox per category, the beat's own ticked;
+  // ticking or unticking saves at once. `needCategory`: Arrhythmia was chosen
+  // for a beat with no category, so the picker asks for one, and the first
+  // tick marks the beat Arrhythmia with it.
+  let pickerOpen: boolean = $state(false)
+  let needCategory: boolean = $state(false)
 
   // Arrhythmia and Not arrhythmia work as a pair: pressing the other one
   // changes the decision, pressing the chosen one again takes it off (the
@@ -133,9 +140,71 @@
     return action === 'confirm' ? reviewState === 'confirmed' : reviewState === 'rejected'
   }
 
+  // An arrhythmia beat always has at least one category.
+  // - Choosing Arrhythmia for a beat with none asks for one first.
+  // - An arrhythmia beat with none (older data) asks too.
+  // - Its last category can't be removed.
+  // A beat marked Not arrhythmia has none to edit.
+  let missingCategory = $derived(reviewState === 'confirmed' && flaggedCategories.length === 0)
+  let pickerShown = $derived(needCategory || (reviewState !== 'rejected' && (pickerOpen || missingCategory)))
+  let lastCategoryLocked = $derived(reviewState === 'confirmed' && flaggedCategories.length === 1)
+
+  function chooseArrhythmia() {
+    if (reviewState !== 'confirmed' && detectedCategories.length === 0) {
+      // The list stays open after the first tick, for adding more.
+      needCategory = true
+      pickerOpen = true
+      return
+    }
+    void submit('confirm')
+  }
+
   function decide(action: 'confirm' | 'reject') {
-    if (!isChosen(action)) void submit(action)
-    else if (!decisionLocked) void submit('clear_decision')
+    if (!isChosen(action)) {
+      if (action === 'confirm') chooseArrhythmia()
+      else void submit(action)
+    } else if (!decisionLocked) void submit('clear_decision')
+  }
+
+  // Saves `next` as the beat's categories (with Arrhythmia, when that is
+  // what the picker was asked for).
+  function setCategories(next: ReassignableCategory[]) {
+    const ordered = REASSIGNABLE_CATEGORIES.filter((cat) => next.includes(cat))
+    if (needCategory) {
+      if (ordered.length > 0) void submit('confirm', undefined, undefined, ordered)
+      return
+    }
+    if (reviewState === 'confirmed' && ordered.length === 0) return
+    void submit('set_categories', undefined, undefined, ordered)
+  }
+
+  function toggleCategory(cat: ReassignableCategory, checked: boolean) {
+    setCategories(checked ? [...flaggedCategories, cat] : flaggedCategories.filter((c) => c !== cat))
+  }
+
+  function removeCategory(cat: ReassignableCategory) {
+    setCategories(flaggedCategories.filter((c) => c !== cat))
+  }
+
+  function togglePicker() {
+    if (pickerShown) {
+      pickerOpen = false
+      needCategory = false
+    } else {
+      pickerOpen = true
+    }
+  }
+
+  function pickerTitle(): string {
+    if (reviewState === 'rejected' && !needCategory) {
+      return 'A beat marked Not arrhythmia has no categories — mark it Arrhythmia to choose them'
+    }
+    return 'Choose this beat’s arrhythmia categories (one or several)'
+  }
+
+  function optionTitle(cat: ReassignableCategory, checked: boolean): string {
+    if (checked && lastCategoryLocked) return 'An arrhythmia beat needs at least one category — tick another one first'
+    return checked ? `Untick to remove "${CATEGORY_LABELS[cat]}"` : `Tick to add "${CATEGORY_LABELS[cat]}"`
   }
 
   function decisionTitle(action: 'confirm' | 'reject'): string {
@@ -151,7 +220,12 @@
   // produced it (so "Retry" can replay the exact same call rather than
   // requiring the technician to re-pick a category first).
   let errorMessage: string | null = $state(null)
-  let lastAttempt: { action: CategoryAction; category?: string; uncertain?: boolean } | null = $state(null)
+  let lastAttempt: {
+    action: CategoryAction
+    category?: string
+    uncertain?: boolean
+    categories?: ReassignableCategory[]
+  } | null = $state(null)
 
   // The backend's specific "category isn't persisted yet" error (see
   // BACKEND_OVERVIEW.md / `backend/db_routes.py`) gets a distinct, retryable
@@ -161,7 +235,12 @@
   // would just fail again the same way.
   let isPersistRequiredError = $derived((errorMessage ?? '').includes('No persisted data for this file'))
 
-  async function submit(action: CategoryAction, category?: string, newMark?: boolean) {
+  async function submit(
+    action: CategoryAction,
+    category?: string,
+    newMark?: boolean,
+    categories?: ReassignableCategory[],
+  ) {
     const decides = action === 'confirm' || action === 'reject' || action === 'reassign'
     // A mark ticked before deciding goes with the decision; with none pending
     // the beat's current mark is left as it is. `newMark` is the value a
@@ -170,9 +249,9 @@
 
     submitting = true
     errorMessage = null
-    lastAttempt = { action, category, uncertain: newMark }
+    lastAttempt = { action, category, uncertain: newMark, categories }
 
-    const result = await updateBeatCategory(path, beat.ts, action, category, sentUncertain)
+    const result = await updateBeatCategory(path, beat.ts, action, category, sentUncertain, categories)
     submitting = false
 
     if (result.status === 'ok' && !result.error) {
@@ -187,11 +266,20 @@
       // Mirrors exactly what `backend/db.py`'s `update_beat_category` just
       // did server-side, so the chip list updates immediately without a
       // re-fetch — see `categoryOverride`'s own comment above.
-      if (action === 'remove_flag' && category) {
+      const saved = result.categories?.filter((cat): cat is ReassignableCategory =>
+        (REASSIGNABLE_CATEGORIES as readonly string[]).includes(cat),
+      )
+      if (saved) {
+        categoryOverride = saved
+      } else if (action === 'set_categories' || (action === 'confirm' && categories)) {
+        categoryOverride = categories ?? []
+      } else if (action === 'remove_flag' && category) {
         categoryOverride = detectedCategories.filter((cat) => cat !== category)
       } else if (action === 'reassign' && category) {
         categoryOverride = [category as ReassignableCategory]
       }
+      if (action === 'confirm' || action === 'reject') needCategory = false
+      if (action === 'reject') pickerOpen = false
     } else {
       errorMessage = result.error ?? 'Category update failed'
     }
@@ -256,7 +344,7 @@
       if (shouldIgnoreShortcut(event) || submitting) return
       if (event.key === 'c' || event.key === 'C') {
         event.preventDefault()
-        void submit('confirm')
+        chooseArrhythmia()
       } else if (event.key === 'r' || event.key === 'R') {
         event.preventDefault()
         void submit('reject')
@@ -271,11 +359,7 @@
 
   function retry() {
     if (lastAttempt === null) return
-    void submit(lastAttempt.action, lastAttempt.category, lastAttempt.uncertain)
-  }
-
-  function removeFlag(cat: ReassignableCategory) {
-    void submit('remove_flag', cat)
+    void submit(lastAttempt.action, lastAttempt.category, lastAttempt.uncertain, lastAttempt.categories)
   }
 </script>
 
@@ -289,21 +373,39 @@
   {/if}
 
   <div class="beat-categories" data-testid="beat-categories">
+    <div class="categories-head">
+      <span class="categories-title">Categories</span>
+      <button
+        type="button"
+        class="btn btn-sm category-picker-toggle"
+        data-testid="categories-picker-toggle"
+        aria-expanded={pickerShown}
+        aria-controls={`category-picker-${beat.ts}`}
+        disabled={submitting || (reviewState === 'rejected' && !needCategory)}
+        title={pickerTitle()}
+        onclick={togglePicker}
+      >
+        Choose categories <Icon name={pickerShown ? 'chevron-up' : 'chevron-down'} size={12} />
+      </button>
+    </div>
     {#if flaggedCategories.length === 0}
-      <p class="text-muted" data-testid="no-categories">No arrhythmia categories flagged for this beat.</p>
+      <p class="text-muted" data-testid="no-categories">
+        {reviewState === 'rejected' ? 'No categories: this beat is marked Not arrhythmia.' : 'No arrhythmia categories flagged for this beat.'}
+      </p>
     {:else}
       <ul class="category-list">
         {#each flaggedCategories as cat (cat)}
           <li class="category-chip" data-testid={`category-${cat}`}>
+            <span class="category-swatch" style={`background: var(${CATEGORY_COLOR_VAR[cat]})`} aria-hidden="true"></span>
             {CATEGORY_LABELS[cat]}
             <button
               type="button"
               class="category-chip-remove"
               data-testid={`remove-category-${cat}`}
-              disabled={submitting}
-              title={`Remove "${CATEGORY_LABELS[cat]}"`}
+              disabled={submitting || lastCategoryLocked}
+              title={lastCategoryLocked ? optionTitle(cat, true) : `Remove "${CATEGORY_LABELS[cat]}"`}
               aria-label={`Remove ${CATEGORY_LABELS[cat]}`}
-              onclick={() => removeFlag(cat)}
+              onclick={() => removeCategory(cat)}
             >
               <Icon name="x" size={10} />
             </button>
@@ -311,20 +413,43 @@
         {/each}
       </ul>
     {/if}
+    {#if needCategory || missingCategory}
+      <p class="category-prompt" data-testid="categories-needed" role="status">
+        {needCategory
+          ? 'Choose at least one category to mark this beat Arrhythmia.'
+          : 'This arrhythmia beat has no category — choose at least one.'}
+      </p>
+    {/if}
+    {#if pickerShown}
+      <fieldset class="category-picker" id={`category-picker-${beat.ts}`} data-testid="categories-picker">
+        <legend class="visually-hidden">Arrhythmia categories</legend>
+        {#each REASSIGNABLE_CATEGORIES as cat (cat)}
+          {@const checked = !needCategory && flaggedCategories.includes(cat)}
+          <label class="category-option" title={optionTitle(cat, checked)}>
+            <input
+              type="checkbox"
+              data-testid={`categories-option-${cat}`}
+              {checked}
+              disabled={submitting || (checked && lastCategoryLocked)}
+              onchange={(event) => toggleCategory(cat, (event.currentTarget as HTMLInputElement).checked)}
+            />
+            <span class="category-swatch" style={`background: var(${CATEGORY_COLOR_VAR[cat]})`} aria-hidden="true"></span>
+            {CATEGORY_LABELS[cat]}
+          </label>
+        {/each}
+      </fieldset>
+    {/if}
   </div>
 
   <div class="judged-status" data-testid="review-state-row">
     <p
       data-testid="review-state"
       class="review-state"
-      class:review-state--confirmed={reviewState === 'confirmed' && !isReassigned}
+      class:review-state--confirmed={reviewState === 'confirmed' || isReassigned}
       class:review-state--rejected={reviewState === 'rejected'}
-      class:review-state--reassigned={isReassigned}
       class:review-state--open={!hasStatus && !isReassigned}
     >
-      {#if isReassigned}
-        Reassigned to {CATEGORY_LABELS[reassignedCategory as ReassignableCategory] ?? reassignedCategory}
-      {:else if reviewState === 'confirmed'}
+      {#if reviewState === 'confirmed' || isReassigned}
         Arrhythmia
       {:else if reviewState === 'rejected'}
         Not arrhythmia
@@ -414,24 +539,6 @@
       </button>
     </div>
 
-    <label class="field">
-      Reassign to:
-      <select data-testid="reassign-select" bind:value={reassignCategory} disabled={submitting}>
-        <option value="" disabled>Select category…</option>
-        {#each REASSIGNABLE_CATEGORIES as cat}
-          <option value={cat}>{CATEGORY_LABELS[cat]}</option>
-        {/each}
-      </select>
-    </label>
-    <button
-      type="button"
-      class="btn"
-      data-testid="reassign-button"
-      disabled={submitting || reassignCategory === ''}
-      onclick={() => submit('reassign', reassignCategory)}
-    >
-      Reassign
-    </button>
   </div>
 
   <div class="danger-zone">
@@ -562,11 +669,77 @@
   .review-state--rejected {
     color: var(--color-danger, #b91c1c);
   }
-  .review-state--reassigned {
-    color: var(--color-warning, #b45309);
-  }
   .review-state--open {
     color: var(--color-text-muted);
+  }
+
+  .categories-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+
+  .categories-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+  }
+
+  .category-picker-toggle {
+    gap: var(--space-1);
+  }
+
+  .category-swatch {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 50%;
+  }
+
+  .category-prompt {
+    margin: var(--space-1) 0 0;
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--color-warning, #b45309);
+  }
+
+  .category-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 2px var(--space-3);
+    margin: var(--space-2) 0 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+  }
+
+  .category-option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px 0;
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+  }
+
+  .category-option:has(input:disabled) {
+    cursor: default;
+    opacity: 0.7;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .decision {

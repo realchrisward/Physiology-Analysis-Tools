@@ -1599,13 +1599,14 @@ def _beat_frame_from_report(
     reassigned = np.full(n, None, dtype=object)
     if values.reassigned_category is not None:
         theirs = values.reassigned_category[idx]
-        for i in np.flatnonzero(agrees & (review_state == "confirmed")):
-            category = theirs[i]
-            if category in names:
-                reassigned[i] = category
-                # A reassigned beat is flagged as that category alone.
+        # Categories a reviewer chose (one, or several comma-separated) on a
+        # beat the label calls detected: the beat has exactly those.
+        for i in np.flatnonzero(agrees & (labels != 0)):
+            chosen = db.parse_categories(theirs[i])
+            if chosen:
+                reassigned[i] = db.join_categories(chosen)
                 for name in names:
-                    flags[name][i] = name == category
+                    flags[name][i] = name in chosen
 
     uncertain = np.zeros(n, dtype=bool)
     if values.uncertain is not None:

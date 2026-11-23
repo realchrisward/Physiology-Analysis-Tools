@@ -65,6 +65,7 @@ export type BeatReviewAction =
   | 'seen'
   | 'clear_decision'
   | 'unreview'
+  | 'set_categories'
 
 export function updateBeatCategory(
   path: string,
@@ -72,8 +73,14 @@ export function updateBeatCategory(
   action: BeatReviewAction,
   category?: string,
   uncertain?: boolean | null,
+  // set_categories: the beat's categories, exactly; confirm: categories to
+  // set with the decision. An arrhythmia beat needs at least one.
+  categories?: string[],
 ): Promise<CategoryUpdateResult> {
-  return afterReviewChange(apiPost('/files/beats/category', 'PATCH', { path, ts, action, category, uncertain }), path)
+  return afterReviewChange(
+    apiPost('/files/beats/category', 'PATCH', { path, ts, action, category, uncertain, categories }),
+    path,
+  )
 }
 
 export function addBadData(path: string, start: number, stop: number): Promise<BadDataAddResult> {

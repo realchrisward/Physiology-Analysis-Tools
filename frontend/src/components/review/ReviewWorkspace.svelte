@@ -3,6 +3,7 @@
   import { detectBeats } from '../../lib/api/beats'
   import { detectArrhythmias, type ArrhythmiaMethod } from '../../lib/api/arrhythmia'
   import { formatDate, formatDuration, formatHeartRate } from '../../lib/format'
+  import { REASSIGNABLE_CATEGORIES } from '../../lib/categories'
   import { getBeatsOfInterest } from '../../lib/api/windowing'
   import {
     discardFileState,
@@ -1112,11 +1113,20 @@
       // the one fetched when it was selected. Keep that current with what was
       // just saved (decision and uncertain mark).
       if (selectedBeat && result.ts === selectedBeat.ts) {
+        // The categories too, when the answer has them, so the panel shows
+        // them again after moving between the side panel and the overlay.
+        const saved = result.categories
         selectedBeat = {
           ...selectedBeat,
           review_state: result.review_state ?? selectedBeat.review_state,
           reassigned_category: result.reassigned_category,
           uncertain: result.uncertain ?? selectedBeat.uncertain,
+          ...(saved
+            ? {
+                ...Object.fromEntries(REASSIGNABLE_CATEGORIES.map((cat) => [cat, saved.includes(cat)])),
+                any_arrhythmia: saved.length > 0,
+              }
+            : {}),
         }
       }
       refreshGraphBeats()

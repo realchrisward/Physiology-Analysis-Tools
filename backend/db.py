@@ -357,9 +357,43 @@ UNCERTAIN_KEEPS_DECISION = (
 )
 
 
-class UncertainNeedsDecisionError(Exception):
+ARRHYTHMIA_NEEDS_CATEGORY = (
+    "An arrhythmia beat needs at least one category — tick another one before removing this one."
+)
+
+NOT_ARRHYTHMIA_HAS_NO_CATEGORIES = (
+    "A beat marked Not arrhythmia has no categories — mark it Arrhythmia to choose them."
+)
+
+
+class ReviewRuleError(Exception):
+    """A review action the beat's current review does not allow (the message
+    says why, for the reviewer)."""
+
+
+class UncertainNeedsDecisionError(ReviewRuleError):
     """`set_uncertain` on a beat that is not confirmed or rejected, or taking
     the decision off a beat that is marked uncertain."""
+
+
+def parse_categories(text) -> list[str]:
+    """The categories in a `reassigned_category` value: one name, or several
+    separated by commas (or semicolons), in the usual category order. Unknown
+    names and blanks are left out."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    names = {part.strip() for part in text.replace(";", ",").split(",")}
+    return [name for name in CATEGORY_COLUMNS if name in names]
+
+
+def join_categories(names) -> str | None:
+    """The `reassigned_category` value for `names` (None for none)."""
+    chosen = [name for name in CATEGORY_COLUMNS if name in set(names or [])]
+    return ",".join(chosen) if chosen else None
+
+
+def _set_categories_sql(chosen: list[str]) -> str:
+    return ", ".join(f"{col}={1 if col in chosen else 0}" for col in CATEGORY_COLUMNS)
 
 
 def update_beat_category(
@@ -369,9 +403,21 @@ def update_beat_category(
     action: str,
     category: str | None = None,
     uncertain: bool | None = None,
+    categories: list[str] | None = None,
 ) -> sqlite3.Row | None:
     """Apply a review `action` to the beat at (file_id, ts) and return the
     updated row, or None if no beat exists at that timestamp.
+
+    Categories: an arrhythmia (confirmed) beat always has at least one.
+    `"set_categories"` sets the beat's categories to exactly `categories`
+    (validated by the caller) and records them as the reviewer's choice in
+    `reassigned_category` (comma-separated), so a re-run of detection keeps
+    them. It is refused (ReviewRuleError) with none on a confirmed beat, and
+    on a rejected beat at all; on an unreviewed beat it also marks it
+    reviewed (it was looked at). `"confirm"` may carry `categories` to set in
+    the same step; without them, a beat that has no category gets
+    'other_arrhythmia'. `"remove_flag"` is refused for a confirmed beat's last
+    category.
 
     `uncertain` is the reviewer's "not sure" mark. `"confirm"`, `"reject"` and
     `"reassign"` store it in the same statement as the decision (None keeps
@@ -379,7 +425,7 @@ def update_beat_category(
     refused (UncertainNeedsDecisionError) unless the beat is already confirmed
     or rejected, so the mark never exists on a beat without a decision.
 
-    `"reject"` leaves the category flags as the detector set them, as the
+    `"reject"` leaves the category flags as they are (the detector's), as the
     original desktop app did: the decision lives in `review_state`, and the
     report still shows what was detected next to label -1. Everything that
     shows or navigates flagged beats treats a rejected beat as normal.
@@ -389,7 +435,8 @@ def update_beat_category(
     `"seen"` marks an unreviewed beat reviewed (selecting it does this) and
     leaves any other state alone. `"clear_decision"` takes the decision off a
     confirmed/rejected beat, leaving it reviewed; `"unreview"` puts any beat
-    back to unreviewed. Both drop a reassigned category, and both are refused
+    back to unreviewed (dropping the reviewer's categories as a saved choice;
+    the flags stay). Both are refused
     (UncertainNeedsDecisionError) while the beat is marked uncertain: that
     mark only exists next to a decision.
 
@@ -417,15 +464,57 @@ def update_beat_category(
     )
 
     if action == "confirm":
+        chosen = parse_categories(join_categories(categories))
+        if chosen:
+            conn.execute(
+                "UPDATE beats SET "
+                + _set_categories_sql(chosen)
+                + ", any_arrhythmia=1, reassigned_category=?, review_state='confirmed'"
+                + uncertain_set
+                + " WHERE id=?",
+                (join_categories(chosen), *uncertain_args, beat_id),
+            )
+        else:
+            current = conn.execute(
+                "SELECT " + ", ".join(CATEGORY_COLUMNS) + " FROM beats WHERE id=?",
+                (beat_id,),
+            ).fetchone()
+            # An arrhythmia always has a category: 'other' when none is known,
+            # (with_reviewer_categories gives it back if a re-run drops it).
+            fallback = (
+                ", other_arrhythmia=1, any_arrhythmia=1"
+                if not any(current[col] for col in CATEGORY_COLUMNS)
+                else ""
+            )
+            conn.execute(
+                "UPDATE beats SET review_state='confirmed'"
+                + fallback
+                + uncertain_set
+                + " WHERE id=?",
+                (*uncertain_args, beat_id),
+            )
+    elif action == "reject":
+        # The categories (the detector's, or the reviewer's) stay with the beat.
         conn.execute(
-            "UPDATE beats SET review_state='confirmed'" + uncertain_set + " WHERE id=?",
+            "UPDATE beats SET review_state='rejected'" + uncertain_set + " WHERE id=?",
             (*uncertain_args, beat_id),
         )
-    elif action == "reject":
+    elif action == "set_categories":
+        current = conn.execute(
+            "SELECT review_state FROM beats WHERE id=?", (beat_id,)
+        ).fetchone()
+        chosen = parse_categories(join_categories(categories))
+        if current["review_state"] == "rejected":
+            raise ReviewRuleError(NOT_ARRHYTHMIA_HAS_NO_CATEGORIES)
+        if current["review_state"] == "confirmed" and not chosen:
+            raise ReviewRuleError(ARRHYTHMIA_NEEDS_CATEGORY)
         conn.execute(
-            "UPDATE beats SET review_state='rejected', "
-            "reassigned_category=NULL" + uncertain_set + " WHERE id=?",
-            (*uncertain_args, beat_id),
+            "UPDATE beats SET "
+            + _set_categories_sql(chosen)
+            + ", any_arrhythmia=?, reassigned_category=?, review_state=CASE "
+            "WHEN review_state='unreviewed' THEN 'reviewed' ELSE review_state END "
+            "WHERE id=?",
+            (1 if chosen else 0, join_categories(chosen), beat_id),
         )
     elif action == "reassign":
         set_clauses = [
@@ -468,12 +557,20 @@ def update_beat_category(
                 (beat_id,),
             )
         elif current["review_state"] in ("confirmed", "rejected"):
+            # Only the decision goes: categories the reviewer chose stay.
             conn.execute(
-                "UPDATE beats SET review_state='reviewed', reassigned_category=NULL "
-                "WHERE id=?",
+                "UPDATE beats SET review_state='reviewed' WHERE id=?",
                 (beat_id,),
             )
     elif action == "remove_flag":
+        before = conn.execute(
+            "SELECT review_state, " + ", ".join(CATEGORY_COLUMNS) + " FROM beats WHERE id=?",
+            (beat_id,),
+        ).fetchone()
+        if before["review_state"] == "confirmed" and not any(
+            before[col] for col in CATEGORY_COLUMNS if col != category
+        ):
+            raise ReviewRuleError(ARRHYTHMIA_NEEDS_CATEGORY)
         conn.execute(f"UPDATE beats SET {category}=0 WHERE id=?", (beat_id,))
         remaining = conn.execute(
             "SELECT " + ", ".join(CATEGORY_COLUMNS) + " FROM beats WHERE id=?",
@@ -662,6 +759,51 @@ def load_review_state(
     }
 
 
+def with_reviewer_categories(
+    beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None, bool]]
+) -> pd.DataFrame:
+    """`beat_df` with the categories reviewers chose (`reassigned_category`
+    in `review_state`, by exact ts) written over the detector's flags, so a
+    re-run of detection does not undo them. A confirmed beat the new flags
+    leave with no category at all gets 'other_arrhythmia': an arrhythmia
+    always has one. A NEW frame when anything changes; `beat_df` itself is
+    never touched."""
+    chosen = {
+        ts: parse_categories(category)
+        for ts, (_, category, _) in review_state.items()
+        if category
+    }
+    chosen = {ts: names for ts, names in chosen.items() if names}
+    confirmed = {
+        ts for ts, (state, _, _) in review_state.items() if state == "confirmed" and ts not in chosen
+    }
+    if not chosen and not confirmed:
+        return beat_df
+    positions = {ts: i for i, ts in enumerate(beat_df["ts"].tolist())}
+    rows = [(positions[ts], names) for ts, names in chosen.items() if ts in positions]
+    present = [col for col in CATEGORY_COLUMNS if col in beat_df.columns]
+    if confirmed and present:
+        flagged = beat_df[present].fillna(False).astype(bool).any(axis=1).tolist()
+        rows += [
+            (positions[ts], ["other_arrhythmia"])
+            for ts in confirmed
+            if ts in positions and not flagged[positions[ts]]
+        ]
+    if not rows:
+        return beat_df
+    out = beat_df.copy()
+    for column in [*CATEGORY_COLUMNS, "any_arrhythmia"]:
+        values = out[column].tolist() if column in out.columns else [None] * len(out)
+        for i, names in rows:
+            if column == "any_arrhythmia" or column in names:
+                values[i] = True
+            elif not pd.isna(values[i]):
+                # A category the detector never evaluated stays blank.
+                values[i] = False
+        out[column] = values
+    return out
+
+
 def with_review_state(
     beat_df: pd.DataFrame, review_state: dict[float, tuple[str, str | None, bool]]
 ) -> pd.DataFrame:
@@ -671,6 +813,7 @@ def with_review_state(
     frame other requests are reading from `beat_cache` right now.
     """
     default = ("unreviewed", None, False)
+    beat_df = with_reviewer_categories(beat_df, review_state)
     return beat_df.assign(
         review_state=beat_df["ts"].map(lambda ts: review_state.get(ts, default)[0]),
         reassigned_category=beat_df["ts"].map(
@@ -730,6 +873,8 @@ def replace_beats(
     correctly preserved it.
     """
     preserved_state = load_review_state(conn, file_id)
+    # Categories a reviewer chose win over the fresh detection's flags.
+    beat_df = with_reviewer_categories(beat_df, preserved_state)
 
     conn.execute("DELETE FROM beats WHERE file_id=?", (file_id,))
 

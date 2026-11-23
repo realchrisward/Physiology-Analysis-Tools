@@ -336,6 +336,8 @@ export interface CategoryUpdateResult {
   reassigned_category: string | null
   // The beat's "uncertain" mark after this call; null when the call failed.
   uncertain: boolean | null
+  // The beat's categories after this call (absent from older backends).
+  categories?: string[] | null
   error: string | null
 }
 

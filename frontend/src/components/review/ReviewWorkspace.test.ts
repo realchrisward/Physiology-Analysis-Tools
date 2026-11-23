@@ -1767,6 +1767,8 @@ describe('ReviewWorkspace', () => {
   // observable signal the arrhythmia-refresh tests above use: an additional
   // `/beats/window` fetch firing after the action succeeds.
   describe('category update refreshes graph beat markers', () => {
+    // A flagged beat has a category: Arrhythmia saves at once (a beat with
+    // none asks for one first).
     const targetBeat = {
       ts: 1,
       rr: 0.8,
@@ -1778,7 +1780,7 @@ describe('ReviewWorkspace', () => {
       prem_beat: false,
       abn_cluster: false,
       any_arrhythmia: true,
-      other_arrhythmia: false,
+      other_arrhythmia: true,
     }
 
     function clickBeatMarker() {

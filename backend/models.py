@@ -427,6 +427,9 @@ class CategoryUpdateRequest(BaseModel):
     # with the decision (None keeps the beat's current value); set_uncertain
     # requires it and only works on an already confirmed/rejected beat.
     uncertain: bool | None = None
+    # set_categories: the beat's categories, exactly (an arrhythmia beat
+    # needs at least one). confirm: categories to set with the decision.
+    categories: list[str] | None = None
 
 
 class CategoryUpdateResult(BaseModel):
@@ -436,6 +439,8 @@ class CategoryUpdateResult(BaseModel):
     reassigned_category: str | None = None
     # The beat's mark after the action.
     uncertain: bool | None = None
+    # The beat's categories after the action (the flags that are set).
+    categories: list[str] | None = None
     error: str | None = None
 
 
