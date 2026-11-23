@@ -623,7 +623,7 @@ describe('ReviewWorkspace', () => {
         })
 
         const persistCallsAfterFirstSelect = fetchMock.mock.calls.filter((call) =>
-          String(call[0]).includes('/files/beats'),
+          new URL(String(call[0])).pathname === '/files/beats',
         ).length
         expect(persistCallsAfterFirstSelect).toBe(1)
 
@@ -633,7 +633,7 @@ describe('ReviewWorkspace', () => {
         })
 
         const persistCallsAfterSecondSelect = fetchMock.mock.calls.filter((call) =>
-          String(call[0]).includes('/files/beats'),
+          new URL(String(call[0])).pathname === '/files/beats',
         ).length
         expect(persistCallsAfterSecondSelect).toBe(1)
       } finally {
@@ -1796,9 +1796,10 @@ describe('ReviewWorkspace', () => {
       if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
+          // Already looked at: selecting it saves nothing before the confirm.
           return Promise.resolve({
             ok: true,
-            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+            json: async () => ({ status: 'ok', beats: [{ ...targetBeat, review_state: 'reviewed' }], count: 1, error: null }),
           })
         }
         if (url.includes('/files/beats/category')) {
@@ -1839,7 +1840,7 @@ describe('ReviewWorkspace', () => {
         await fireEvent.click(screen.getByTestId('confirm-button'))
 
         await waitFor(() => {
-          expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
+          expect(screen.getByTestId('review-state')).toHaveTextContent('Arrhythmia')
         })
 
         await waitFor(() => {
@@ -1873,9 +1874,10 @@ describe('ReviewWorkspace', () => {
       if (url.includes('/beats/of-interest')) return Promise.resolve(beatsOfInterestResponse())
         if (url.includes('/channels/window')) return Promise.resolve(channelWindowOkResponse())
         if (url.includes('/beats/window')) {
+          // Already looked at: selecting it saves nothing before the confirm.
           return Promise.resolve({
             ok: true,
-            json: async () => ({ status: 'ok', beats: [targetBeat], count: 1, error: null }),
+            json: async () => ({ status: 'ok', beats: [{ ...targetBeat, review_state: 'reviewed' }], count: 1, error: null }),
           })
         }
         if (url.includes('/files/beats/category')) {
@@ -1914,7 +1916,7 @@ describe('ReviewWorkspace', () => {
         await fireEvent.click(screen.getByTestId('confirm-button'))
 
         await waitFor(() => {
-          expect(screen.getByTestId('review-state')).toHaveTextContent('confirmed')
+          expect(screen.getByTestId('review-state')).toHaveTextContent('Arrhythmia')
         })
 
         const persistCallsAfterConfirm = fetchMock.mock.calls.filter(

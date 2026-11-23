@@ -35,8 +35,8 @@ export const REVIEW_GROUP_LABELS: Record<ReviewGroup, string> = {
   'not-started': 'Not started',
 }
 export const REVIEW_GROUP_HINTS: Record<ReviewGroup, string> = {
-  'to-review': 'Flagged beats are still waiting for a decision',
-  reviewed: 'Every flagged beat has a decision',
+  'to-review': 'Some flagged beats have not been looked at yet',
+  reviewed: 'Every flagged beat has been looked at or decided',
   'nothing-flagged': 'Beats are detected; none is flagged as an arrhythmia',
   'not-started': 'Nothing is saved for this recording yet (it has not been opened for review)',
 }
@@ -355,7 +355,7 @@ export function sortDirLabel(key: SortKey, dir: SortDir): string {
   }
 }
 
-/** Share of flagged beats with a decision (1 when nothing is flagged). */
+/** Share of flagged beats looked at or decided (1 when nothing is flagged). */
 function progressOf(facts: FileFacts): number | null {
   if (facts.toReview === null || facts.reviewed === null) return null
   const total = facts.toReview + facts.reviewed

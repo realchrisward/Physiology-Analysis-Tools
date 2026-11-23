@@ -61,7 +61,7 @@
   const CHIP_PARTS = [
     { key: '2', label: 'arr', color: REPORT_LABEL_COLOR_VAR[2] },
     { key: '1', label: 'not reviewed', color: REPORT_LABEL_COLOR_VAR[1] },
-    { key: '-1', label: 'rejected', color: REPORT_LABEL_COLOR_VAR[-1] },
+    { key: '-1', label: 'not arrhythmia', color: REPORT_LABEL_COLOR_VAR[-1] },
   ] as const
 
   let countParts = $derived(
@@ -412,7 +412,7 @@
       type="button"
       class="btn btn-sm"
       data-testid="load-report-button"
-      title="Load an xlsx report with per-beat labels (2 arrhythmia, 1 not reviewed, 0 normal, -1 rejected) to compare with this recording's review, or to replace it"
+      title="Load an xlsx report with per-beat labels (2 arrhythmia, 1 not reviewed, 0 normal, -1 not arrhythmia) to compare with this recording's review, or to replace it"
       onclick={choose}
     >
       Load report…

@@ -1510,7 +1510,9 @@ def _beat_frame_from_report(
       1  -> unreviewed, flagged (likewise)
       0  -> unreviewed, nothing flagged
       -1 -> rejected, with the report's flags (a reject keeps the detector's)
-    A reassigned category and the uncertain mark are taken from the report
+    A 1 or 0 beat this app's own export lists as 'reviewed' (looked at, no
+    decision) stays reviewed. A reassigned category and the uncertain mark
+    are taken from the report
     (this app's own export has them) only where its review_state agrees with
     the label, so a hand-edited label is never contradicted.
     """
@@ -1581,7 +1583,11 @@ def _beat_frame_from_report(
     review_state = np.where(
         labels == 2, "confirmed", np.where(labels == -1, "rejected", "unreviewed")
     ).astype(object)
-    decided = review_state != "unreviewed"
+    if values.review_state is not None:
+        # This app's own export also says which undecided beats were looked at.
+        looked_at = np.array([t == "reviewed" for t in values.review_state[idx]], dtype=bool)
+        review_state[looked_at & (review_state == "unreviewed")] = "reviewed"
+    decided = (review_state == "confirmed") | (review_state == "rejected")
     if values.review_state is not None:
         theirs = values.review_state[idx]
         agrees = np.array(

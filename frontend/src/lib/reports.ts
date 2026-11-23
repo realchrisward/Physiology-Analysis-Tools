@@ -44,7 +44,7 @@ export const REPORT_AGREEMENT_ROWS: readonly { key: ReportAgreement; name: strin
     name: 'We say arrhythmia, report doesn’t',
     title: 'This review has an arrhythmia where the report says normal',
   },
-  { key: 'pending', name: 'Not reviewed on one side', title: 'Flagged but not yet confirmed or rejected by one side' },
+  { key: 'pending', name: 'Not reviewed on one side', title: 'Flagged, but one side has no Arrhythmia or Not arrhythmia decision yet' },
   { key: 'unmatched', name: 'No beat of ours there', title: 'No beat was detected here at the report beat’s time' },
   { key: 'unknown', name: 'Not compared yet', title: 'Our beats have no arrhythmia flags yet' },
 ]
@@ -55,14 +55,14 @@ export const REPORT_LABEL_NAME: Record<ReportLabel, string> = {
   2: 'Confirmed arrhythmia',
   1: 'Detected, not reviewed',
   0: 'Normal',
-  [-1]: 'Rejected',
+  [-1]: 'Not arrhythmia',
 }
 
 export const REPORT_LABEL_TITLE: Record<ReportLabel, string> = {
   2: 'Label 2 — confirmed arrhythmia (label = arr)',
-  1: 'Label 1 — detected but neither confirmed nor rejected (excluded from training)',
+  1: 'Label 1 — detected, with no decision either way (excluded from training)',
   0: 'Label 0 — not detected and not reviewed (label = normal)',
-  [-1]: 'Label -1 — detected, then rejected (label = normal)',
+  [-1]: 'Label -1 — detected, then marked not arrhythmia (label = normal)',
 }
 
 // CSS custom properties (tokens.css) for each label's marker color.
@@ -84,15 +84,15 @@ export const REPORT_FILTERS: readonly ReportFilter[] = [
 export const REPORT_FILTER_NAME: Record<ReportFilter, string> = {
   arrhythmia: 'Arrhythmia',
   unreviewed: 'Not reviewed',
-  rejected: 'Rejected',
+  rejected: 'Not arrhythmia',
   disagreements: 'Disagreements',
   not_detected: 'Not detected by us',
 }
 
 export const REPORT_FILTER_TITLE: Record<ReportFilter, string> = {
   arrhythmia: 'Beats the report labels as confirmed arrhythmia (2)',
-  unreviewed: 'Beats the report detected but never confirmed or rejected (1)',
-  rejected: 'Beats the report detected, then rejected (-1)',
+  unreviewed: 'Beats the report detected but never decided (1)',
+  rejected: 'Beats the report detected, then marked not arrhythmia (-1)',
   disagreements: 'Beats where the report and this review disagree about arrhythmia',
   not_detected: 'Report beats with no beat detected here (different channel or detection settings?)',
 }

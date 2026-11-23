@@ -553,6 +553,9 @@ def _update_beat_category_locked(
         "reassign",
         "remove_flag",
         "set_uncertain",
+        "seen",
+        "clear_decision",
+        "unreview",
     }:
         return CategoryUpdateResult(
             status="error",
@@ -1038,6 +1041,7 @@ def _report_metadata(
         ("beats_total", len(beats_df)),
         ("beats_confirmed", int((state == "confirmed").sum())),
         ("beats_rejected", int((state == "rejected").sum())),
+        ("beats_reviewed_no_decision", int((state == "reviewed").sum())),
         ("beats_unreviewed", int((state == "unreviewed").sum())),
         ("beats_detected_unreviewed", int((labels == 1).sum())),
         ("beats_uncertain", int(beats_df["uncertain"].sum())),
@@ -1059,6 +1063,11 @@ def _report_metadata(
             "annot_any_arrhythmia_legend",
             "2 confirmed arrhythmia, 1 detected not reviewed, 0 not detected, "
             "-1 rejected",
+        ),
+        (
+            "review_state_legend",
+            "unreviewed = not looked at, reviewed = looked at without a decision, "
+            "confirmed = arrhythmia, rejected = not arrhythmia",
         ),
         (
             "uncertain_legend",

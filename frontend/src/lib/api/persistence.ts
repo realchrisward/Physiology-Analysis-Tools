@@ -52,10 +52,24 @@ export function persistBeats(path: string, channel: string): Promise<PersistBeat
 // `uncertain` rides along with confirm / reject / reassign (saved together with
 // the decision; omitted keeps the beat's current mark). `set_uncertain` changes
 // only that mark, and only on a beat already confirmed or rejected.
+// `seen` marks an unreviewed beat reviewed (looked at, no decision);
+// `clear_decision` takes a decision off (the beat stays reviewed); `unreview`
+// puts the beat back to unreviewed. Neither of the last two works while the
+// beat is marked uncertain.
+export type BeatReviewAction =
+  | 'confirm'
+  | 'reject'
+  | 'reassign'
+  | 'remove_flag'
+  | 'set_uncertain'
+  | 'seen'
+  | 'clear_decision'
+  | 'unreview'
+
 export function updateBeatCategory(
   path: string,
   ts: number,
-  action: 'confirm' | 'reject' | 'reassign' | 'remove_flag' | 'set_uncertain',
+  action: BeatReviewAction,
   category?: string,
   uncertain?: boolean | null,
 ): Promise<CategoryUpdateResult> {

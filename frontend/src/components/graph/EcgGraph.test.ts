@@ -1376,6 +1376,10 @@ describe('EcgGraph time navigation', () => {
     vi.stubGlobal('fetch', fetchMock)
     await mountGraph(fetchMock)
 
+    // Zoom in first: the view never leaves the recording, so while all of it
+    // is on screen there is nowhere to page to.
+    await fireEvent.click(screen.getByTestId('zoom-in-button'))
+
     await fireEvent.click(screen.getByTestId('next-window-button'))
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(2))
     const forward = lastChannelWindowRange(fetchMock)
@@ -1417,7 +1421,7 @@ describe('EcgGraph time navigation', () => {
   })
 })
 
-describe('EcgGraph raw/filtered trace toggle', () => {
+describe('EcgGraph raw/filtered trace menu', () => {
   it('re-fetches the visible range as filtered, then back to raw', async () => {
     const fetchMock = routedFetch()
     vi.stubGlobal('fetch', fetchMock)
@@ -1429,6 +1433,7 @@ describe('EcgGraph raw/filtered trace toggle', () => {
     expect(fetchedUrl(fetchMock, 0).searchParams.get('filtered')).toBe('false')
 
     await fireEvent.click(screen.getByTestId('toggle-filtered-signal-button'))
+    await fireEvent.click(await screen.findByTestId('trace-option-filtered'))
 
     await waitFor(() => {
       const channelCalls = fetchMock.mock.calls
@@ -1439,6 +1444,7 @@ describe('EcgGraph raw/filtered trace toggle', () => {
     expect(screen.getByTestId('toggle-filtered-signal-button')).toHaveTextContent('Filtered')
 
     await fireEvent.click(screen.getByTestId('toggle-filtered-signal-button'))
+    await fireEvent.click(await screen.findByTestId('trace-option-raw'))
     await waitFor(() => {
       const channelCalls = fetchMock.mock.calls
         .map((_call, i) => fetchedUrl(fetchMock, i))
@@ -1471,7 +1477,7 @@ describe('EcgGraph hide-rejected filter', () => {
     const callsBefore = fetchMock.mock.calls.length
     await fireEvent.click(screen.getByTestId('hide-rejected-toggle'))
 
-    expect(screen.getByTestId('hide-rejected-toggle')).toHaveTextContent('Rejected hidden')
+    expect(screen.getByTestId('hide-rejected-toggle')).toHaveTextContent('Not arrhythmia hidden')
     // Purely a local re-merge of data already held — no network round trip.
     expect(fetchMock.mock.calls.length).toBe(callsBefore)
   })

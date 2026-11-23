@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
-  import { deleteBeat, updateBeatCategory } from '../../lib/api/persistence'
+  import { onMount, untrack } from 'svelte'
+  import { deleteBeat, updateBeatCategory, type BeatReviewAction } from '../../lib/api/persistence'
   import { clearPendingUncertain, isPendingUncertain, setPendingUncertain } from '../../lib/stores/reviewGuard.svelte'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import type { CategoryUpdateResult, WindowBeat } from '../../lib/api/types'
@@ -39,6 +39,7 @@
     beat,
     onUpdated,
     onDeleted,
+    onTouched,
   }: {
     path: string
     beat: WindowBeat
@@ -46,6 +47,9 @@
     // Fired after a beat is deleted outright (a detection false positive),
     // so the parent can refresh the graph and drop the selection.
     onDeleted?: () => void
+    // Something was done to the beat that saves nothing yet (Unsure ticked
+    // before deciding): the parent counts the beat as looked at.
+    onTouched?: () => void
   } = $props()
 
   // `beat` is a plain prop from the parent's last fetch and never updates
@@ -71,22 +75,32 @@
   // this session or a prior one — shows that judgment immediately, not a
   // blank unreviewed state), then kept current locally from each
   // `CategoryUpdateResult` this component's own actions receive, without
-  // re-fetching anything. This component is remounted per beat (see the
-  // `{#key selectedBeat.ts}` wrapper in ReviewWorkspace), so reading `beat`
-  // only at init is exactly the "one fresh read per beat" this needs.
+  // re-fetching anything, and from the parent's own changes to `beat` (see
+  // the effect below). This component is remounted per beat (see the
+  // `{#key selectedBeat.ts}` wrapper in ReviewWorkspace).
   let reviewState: string | null = $state(
     beat.review_state && beat.review_state !== 'unreviewed' ? beat.review_state : null,
   )
   let reassignedCategory: string | null = $state(beat.reassigned_category ?? null)
 
+  // The parent marks a beat reviewed as soon as it is selected, and keeps
+  // `beat` current with every saved action: follow its review state.
+  $effect.pre(() => {
+    const state = beat.review_state
+    const category = beat.reassigned_category ?? null
+    untrack(() => {
+      reviewState = state && state !== 'unreviewed' ? state : null
+      reassignedCategory = category
+    })
+  })
+
   // A rejected beat keeps the detector's flags (for the report), but none of
   // them stands: it lists no categories. Arrhythmia brings them back.
   let flaggedCategories = $derived(reviewState === 'rejected' ? [] : detectedCategories)
 
-  // A beat with a terminal judgment already (confirmed or rejected) shows
-  // that status plus a single button to switch it, instead of both Confirm
-  // and Reject — asking the technician to judge a beat twice over is just
-  // noise. `reassignedCategory` can also be set from the one existing test
+  // Review states: null (not looked at), 'reviewed' (looked at, no
+  // decision), 'confirmed' (Arrhythmia) or 'rejected' (Not arrhythmia).
+  // `reassignedCategory` can also be set from the one existing test
   // fixture that feeds this component a synthetic `review_state:
   // 'reassigned'` the backend itself never actually sends (reassign really
   // returns `review_state: 'confirmed'` — see backend/db.py) — treated the
@@ -101,13 +115,37 @@
   // guard (a store, since this panel is remounted per beat and moves between
   // the side panel and the focus overlay), sent with the next Confirm / Reject /
   // Reassign. The box shows whichever applies.
-  type CategoryAction = 'confirm' | 'reject' | 'reassign' | 'remove_flag' | 'set_uncertain'
+  type CategoryAction = BeatReviewAction
   let savedUncertain: boolean = $state(beat.uncertain === true)
   let pendingUncertain = $derived(!hasStatus && isPendingUncertain(path, beat.ts))
   let uncertain = $derived(hasStatus ? savedUncertain : pendingUncertain)
 
   let reassignCategory: string = $state('')
   let submitting: boolean = $state(false)
+
+  // Arrhythmia and Not arrhythmia work as a pair: pressing the other one
+  // changes the decision, pressing the chosen one again takes it off (the
+  // beat stays reviewed). Not while Unsure is ticked: an unsure beat keeps a
+  // decision, so the chosen one stays put until Unsure is unticked.
+  let decisionLocked = $derived(hasStatus && savedUncertain)
+
+  function isChosen(action: 'confirm' | 'reject'): boolean {
+    return action === 'confirm' ? reviewState === 'confirmed' : reviewState === 'rejected'
+  }
+
+  function decide(action: 'confirm' | 'reject') {
+    if (!isChosen(action)) void submit(action)
+    else if (!decisionLocked) void submit('clear_decision')
+  }
+
+  function decisionTitle(action: 'confirm' | 'reject'): string {
+    if (isChosen(action)) {
+      return decisionLocked
+        ? 'Untick Unsure to take this decision off: an unsure beat keeps its decision'
+        : 'Click again to take the decision off (the beat stays reviewed)'
+    }
+    return action === 'confirm' ? 'This beat is an arrhythmia (C)' : 'This beat is not an arrhythmia (R)'
+  }
 
   // The error from the most recent failed action, and the action that
   // produced it (so "Retry" can replay the exact same call rather than
@@ -188,7 +226,10 @@
   async function setUncertain(next: boolean) {
     if (submitting || next === uncertain) return
     if (hasStatus) await submit('set_uncertain', undefined, next)
-    else if (next) setPendingUncertain(path, beat.ts)
+    else if (next) {
+      setPendingUncertain(path, beat.ts)
+      onTouched?.()
+    }
     else clearPendingUncertain(path, beat.ts)
   }
 
@@ -272,51 +313,45 @@
     {/if}
   </div>
 
-  {#if reviewState}
-    <div class="judged-status" data-testid="review-state-row">
-      <p
-        data-testid="review-state"
-        class="review-state"
-        class:review-state--confirmed={reviewState === 'confirmed' && !isReassigned}
-        class:review-state--rejected={reviewState === 'rejected'}
-        class:review-state--reassigned={isReassigned}
-      >
-        {#if isReassigned}
-          Reassigned to {CATEGORY_LABELS[reassignedCategory as ReassignableCategory] ?? reassignedCategory}
-        {:else}
-          Review state: {reviewState}
-        {/if}
-        {#if hasStatus && savedUncertain}
-          <span data-testid="uncertain-state"> · uncertain</span>
-        {/if}
-      </p>
-      {#if hasStatus}
-        {#if reviewState === 'confirmed'}
-          <button
-            type="button"
-            class="btn btn-sm btn-danger-text"
-            data-testid="reject-button"
-            disabled={submitting}
-            onclick={() => submit('reject')}
-            title="Change this beat to not an arrhythmia (R)"
-          >
-            Change to not arrhythmia <kbd>R</kbd>
-          </button>
-        {:else}
-          <button
-            type="button"
-            class="btn btn-sm btn-primary"
-            data-testid="confirm-button"
-            disabled={submitting}
-            onclick={() => submit('confirm')}
-            title="Change this beat to an arrhythmia (C)"
-          >
-            Change to arrhythmia <kbd>C</kbd>
-          </button>
-        {/if}
+  <div class="judged-status" data-testid="review-state-row">
+    <p
+      data-testid="review-state"
+      class="review-state"
+      class:review-state--confirmed={reviewState === 'confirmed' && !isReassigned}
+      class:review-state--rejected={reviewState === 'rejected'}
+      class:review-state--reassigned={isReassigned}
+      class:review-state--open={!hasStatus && !isReassigned}
+    >
+      {#if isReassigned}
+        Reassigned to {CATEGORY_LABELS[reassignedCategory as ReassignableCategory] ?? reassignedCategory}
+      {:else if reviewState === 'confirmed'}
+        Arrhythmia
+      {:else if reviewState === 'rejected'}
+        Not arrhythmia
+      {:else if reviewState}
+        Reviewed · no decision
+      {:else}
+        Not reviewed yet
       {/if}
-    </div>
-  {/if}
+      {#if hasStatus && savedUncertain}
+        <span data-testid="uncertain-state"> · uncertain</span>
+      {/if}
+    </p>
+    {#if reviewState}
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost"
+        data-testid="mark-unreviewed-button"
+        disabled={submitting || decisionLocked}
+        title={decisionLocked
+          ? 'Untick Unsure first: an unsure beat keeps its decision'
+          : 'Mark this beat as not reviewed yet (takes its decision off)'}
+        onclick={() => submit('unreview')}
+      >
+        Mark as unreviewed
+      </button>
+    {/if}
+  </div>
 
   {#if errorMessage}
     {#if isPersistRequiredError}
@@ -352,28 +387,32 @@
   </div>
 
   <div class="actions">
-    {#if !hasStatus}
+    <div class="decision" role="group" aria-label="Decision">
       <button
         type="button"
-        class="btn btn-primary"
+        class="btn decision-btn decision-btn--arrhythmia"
+        class:decision-btn--on={isChosen('confirm')}
+        aria-pressed={isChosen('confirm')}
         data-testid="confirm-button"
-        disabled={submitting}
-        onclick={() => submit('confirm')}
-        title="This beat is an arrhythmia (C)"
+        disabled={submitting || (isChosen('confirm') && decisionLocked)}
+        onclick={() => decide('confirm')}
+        title={decisionTitle('confirm')}
       >
         Arrhythmia <kbd>C</kbd>
       </button>
       <button
         type="button"
-        class="btn btn-danger-text"
+        class="btn decision-btn decision-btn--not"
+        class:decision-btn--on={isChosen('reject')}
+        aria-pressed={isChosen('reject')}
         data-testid="reject-button"
-        disabled={submitting}
-        onclick={() => submit('reject')}
-        title="This beat is not an arrhythmia (R)"
+        disabled={submitting || (isChosen('reject') && decisionLocked)}
+        onclick={() => decide('reject')}
+        title={decisionTitle('reject')}
       >
         Not arrhythmia <kbd>R</kbd>
       </button>
-    {/if}
+    </div>
 
     <label class="field">
       Reassign to:
@@ -525,6 +564,37 @@
   }
   .review-state--reassigned {
     color: var(--color-warning, #b45309);
+  }
+  .review-state--open {
+    color: var(--color-text-muted);
+  }
+
+  .decision {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .decision-btn--arrhythmia.decision-btn--on {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: #ffffff;
+  }
+
+  .decision-btn--not {
+    color: var(--color-danger, #b91c1c);
+  }
+
+  .decision-btn--not.decision-btn--on {
+    background: var(--color-danger, #b91c1c);
+    border-color: var(--color-danger, #b91c1c);
+    color: #ffffff;
+  }
+
+  .decision-btn--on kbd {
+    color: inherit;
+    border-color: currentColor;
+    background: transparent;
   }
 
   .uncertain-row {

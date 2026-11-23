@@ -269,14 +269,16 @@ def latest_file_row(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
 
 def review_counts(conn: sqlite3.Connection, file_id: int) -> sqlite3.Row:
     """Counts over a file's saved beats: beats, mean HR, arrhythmia beats
-    (flagged and not rejected, or confirmed), flagged beats still to review,
-    reviewed (confirmed or rejected) and uncertain beats, plus bad-data marks."""
+    (flagged and not rejected, or confirmed), flagged beats nobody has looked
+    at yet (to review), reviewed flagged beats (a decision, or looked at), and
+    uncertain beats, plus bad-data marks."""
     return conn.execute(
         "SELECT COUNT(*) AS beats, AVG(hr) AS mean_hr, "
         "COALESCE(SUM((any_arrhythmia = 1 AND review_state != 'rejected') "
         "OR review_state = 'confirmed'), 0) AS arrhythmia_beats, "
         "COALESCE(SUM(any_arrhythmia = 1 AND review_state = 'unreviewed'), 0) AS to_review, "
-        "COALESCE(SUM(review_state IN ('confirmed', 'rejected')), 0) AS reviewed, "
+        "COALESCE(SUM(review_state IN ('confirmed', 'rejected') "
+        "OR (review_state = 'reviewed' AND any_arrhythmia = 1)), 0) AS reviewed, "
         "COALESCE(SUM(uncertain = 1), 0) AS uncertain, "
         "(SELECT COUNT(*) FROM bad_data_marks WHERE file_id = :id) AS bad_data_marks "
         "FROM beats WHERE file_id = :id",
@@ -350,8 +352,14 @@ UNCERTAIN_NEEDS_DECISION = (
 )
 
 
+UNCERTAIN_KEEPS_DECISION = (
+    "Untick Unsure first — an unsure beat keeps its Arrhythmia or Not arrhythmia decision."
+)
+
+
 class UncertainNeedsDecisionError(Exception):
-    """`set_uncertain` on a beat that is not confirmed or rejected."""
+    """`set_uncertain` on a beat that is not confirmed or rejected, or taking
+    the decision off a beat that is marked uncertain."""
 
 
 def update_beat_category(
@@ -375,6 +383,15 @@ def update_beat_category(
     original desktop app did: the decision lives in `review_state`, and the
     report still shows what was detected next to label -1. Everything that
     shows or navigates flagged beats treats a rejected beat as normal.
+
+    Review states: 'unreviewed' (not looked at), 'reviewed' (looked at, no
+    decision), 'confirmed' (Arrhythmia) and 'rejected' (Not arrhythmia).
+    `"seen"` marks an unreviewed beat reviewed (selecting it does this) and
+    leaves any other state alone. `"clear_decision"` takes the decision off a
+    confirmed/rejected beat, leaving it reviewed; `"unreview"` puts any beat
+    back to unreviewed. Both drop a reassigned category, and both are refused
+    (UncertainNeedsDecisionError) while the beat is marked uncertain: that
+    mark only exists next to a decision.
 
     `"remove_flag"` is narrower than all three: it clears exactly one
     auto-detected category column (`category`, already validated by the
@@ -432,6 +449,30 @@ def update_beat_category(
         )
         if cursor.rowcount == 0:
             raise UncertainNeedsDecisionError(UNCERTAIN_NEEDS_DECISION)
+    elif action == "seen":
+        conn.execute(
+            "UPDATE beats SET review_state='reviewed' "
+            "WHERE id=? AND review_state='unreviewed'",
+            (beat_id,),
+        )
+    elif action in ("clear_decision", "unreview"):
+        current = conn.execute(
+            "SELECT review_state, uncertain FROM beats WHERE id=?", (beat_id,)
+        ).fetchone()
+        if current["uncertain"]:
+            raise UncertainNeedsDecisionError(UNCERTAIN_KEEPS_DECISION)
+        if action == "unreview":
+            conn.execute(
+                "UPDATE beats SET review_state='unreviewed', reassigned_category=NULL "
+                "WHERE id=?",
+                (beat_id,),
+            )
+        elif current["review_state"] in ("confirmed", "rejected"):
+            conn.execute(
+                "UPDATE beats SET review_state='reviewed', reassigned_category=NULL "
+                "WHERE id=?",
+                (beat_id,),
+            )
     elif action == "remove_flag":
         conn.execute(f"UPDATE beats SET {category}=0 WHERE id=?", (beat_id,))
         remaining = conn.execute(

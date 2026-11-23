@@ -255,8 +255,9 @@ export interface FileSummary {
   mean_hr: number | null
   // Flagged and not rejected, or confirmed.
   arrhythmia_beats: number
-  // Flagged, neither confirmed nor rejected yet.
+  // Flagged and not looked at yet.
   to_review: number
+  // Flagged and looked at, or with a decision.
   reviewed: number
   uncertain: number
   bad_data_marks: number

@@ -70,6 +70,25 @@
     return Math.min(FLAG_FOCUS_MAX_SECONDS, Math.max(FLAG_FOCUS_MIN_SECONDS, FLAG_FOCUS_BEATS * typicalRr))
   }
 
+  // Keeps a visible time window [start, end] inside the recording (`extent`,
+  // the file's own range): it never starts before the data starts or ends
+  // after it ends. A window that would cross an edge slides back to sit
+  // against it at the same width, and one wider than the whole recording
+  // becomes the whole recording. Every move of the graph's x view goes
+  // through this (see `setXView` and `refetch`).
+  export function clampToExtent(
+    start: number,
+    end: number,
+    extent?: { start: number; end: number } | null,
+  ): { start: number; end: number } {
+    if (!extent || !(extent.end > extent.start)) return { start, end }
+    const width = end - start
+    if (width >= extent.end - extent.start) return { start: extent.start, end: extent.end }
+    if (start < extent.start) return { start: extent.start, end: extent.start + width }
+    if (end > extent.end) return { start: extent.end - width, end: extent.end }
+    return { start, end }
+  }
+
   // The [start, end] that centres `ts`. `maxWidth` keeps a tighter zoom the
   // technician already chose; `extent` (the file's own range) slides the view
   // back inside the recording for a flag near either end, so the same width
@@ -82,19 +101,7 @@
   ): { start: number; end: number } {
     let width = flagFocusWidth(typicalRr)
     if (maxWidth != null && Number.isFinite(maxWidth) && maxWidth > 0) width = Math.min(width, maxWidth)
-    let start = ts - width / 2
-    let end = ts + width / 2
-    if (extent && extent.end > extent.start) {
-      if (width >= extent.end - extent.start) return { start: extent.start, end: extent.end }
-      if (start < extent.start) {
-        start = extent.start
-        end = start + width
-      } else if (end > extent.end) {
-        end = extent.end
-        start = end - width
-      }
-    }
-    return { start, end }
+    return clampToExtent(ts - width / 2, ts + width / 2, extent)
   }
 
   export interface BeatSeriesData {
@@ -224,6 +231,7 @@
   import { FLAG_KIND_COLOR_VAR, FLAG_KIND_LABEL, FLAG_KIND_SOFT_VAR, FLAG_KIND_TITLE, formatFlagTime, formatPrediction } from '../../lib/flags'
   import { shouldIgnoreShortcut } from '../../lib/shortcuts'
   import Icon from '../shared/Icon.svelte'
+  import MenuButton, { type MenuItem } from '../shared/MenuButton.svelte'
   import type { BadDataMark, FlagKind, ReportBeat, ReportFilter, ReportLabel } from '../../lib/api/types'
   import {
     REPORT_AGREEMENT_TEXT,
@@ -1463,6 +1471,32 @@
     return visibleWidth * MIN_ZOOM_RATIO_BEFORE_REFETCH < loadedRange.requestedWidth
   }
 
+  // The one way the visible x (time) range is ever changed: the requested
+  // [min, max] is first kept inside the recording (`clampToExtent`), so no
+  // pan, zoom, jump or reset can show time before the data starts or after it
+  // ends. Returns the range actually applied, which is what the caller must
+  // fetch for. Before the first load there is no extent and nothing changes.
+  function setXView(u: uPlot, min: number, max: number): { min: number; max: number } {
+    const { start, end } = clampToExtent(min, max, fullExtent)
+    u.setScale('x', { min: start, max: end })
+    return { min: start, max: end }
+  }
+
+  // `fullExtent` comes from the mount load, which is min/max downsampled
+  // across the whole recording: its first and last points are each the
+  // extreme of a bin, so they can sit up to one bin (a second or more on a
+  // long recording) inside the real ends. A later, finer fetch that reaches
+  // past an end (a view near one is always padded past it) shows where the
+  // data really starts or ends, so the clamp never hides those beats.
+  function widenExtent(x: number[]) {
+    if (!fullExtent || x.length === 0) return
+    const first = x[0]
+    const last = x[x.length - 1]
+    if (first < fullExtent.start || last > fullExtent.end) {
+      fullExtent = { start: Math.min(fullExtent.start, first), end: Math.max(fullExtent.end, last) }
+    }
+  }
+
   // `pad: false` (used only by Reset View) fetches exactly [min, max] with
   // no buffer — Reset already targets the maximal legitimate range, so
   // padding it further would just over-request with no benefit. Every
@@ -1472,8 +1506,12 @@
     max: number,
     options: { pad?: boolean; reRange?: boolean } = {},
   ) {
+    // Whoever asks, the view fetched (and re-pinned once the data lands) is
+    // the one `setXView` would show. Only the padded buffer around it may
+    // reach past the recording's ends.
+    const view = clampToExtent(min, max, fullExtent)
     try {
-      await refetchWindow(min, max, options)
+      await refetchWindow(view.start, view.end, options)
     } finally {
       // Whatever the outcome (committed, superseded, failed): a beats refresh
       // that stood aside for this refetch is replayed, and the report is
@@ -1528,6 +1566,7 @@
       lastChannelWindow = channelData
       lastBeats = beats
       lastBeatsRange = { start: fetchStart, end: fetchEnd }
+      widenExtent(channelData.x)
       // uPlot derives the y range from the data it holds AT THE MOMENT the
       // x scale changes. Every jump/zoom sets x first and only then fetches
       // that window's data, so y ends up ranged against the PREVIOUS
@@ -1546,7 +1585,7 @@
       const reRange = (options.reRange ?? true) && !yManuallyZoomed
       chart.setData(toChartData(merged), reRange)
       if (reRange) {
-        chart.setScale('x', { min, max })
+        setXView(chart, min, max)
       }
       loadedRange = { start: fetchStart, end: fetchEnd, requestedWidth, pixelWidth: fetchWidth }
       applyFilters() // setData resets series visibility; re-apply the active category/review filters
@@ -2204,10 +2243,9 @@
       if (maxMovementPx < CLICK_DRAG_THRESHOLD_PX) return
       expirePendingReportSelect()
       const dx = unitsPerPx * (moveEvent.clientX - startX)
-      const newMin = scaleMin0 - dx
-      const newMax = scaleMax0 - dx
-      u.setScale('x', { min: newMin, max: newMax })
-      maybeBufferAhead(newMin, newMax)
+      // Panning stops at either end of the recording (see `setXView`).
+      const view = setXView(u, scaleMin0 - dx, scaleMax0 - dx)
+      maybeBufferAhead(view.min, view.max)
     }
 
     function detach() {
@@ -2282,8 +2320,8 @@
     // imperceptible for a single zoom gesture.
     viewChanged = true
     expirePendingReportSelect()
-    u.setScale('x', { min: newMin, max: newMax })
-    scheduleRefetch(newMin, newMax)
+    const view = setXView(u, newMin, newMax)
+    scheduleRefetch(view.min, view.max)
   }
 
   // Zoom in/out buttons: same `ZOOM_FACTOR` step as the wheel handler
@@ -2303,8 +2341,8 @@
 
     viewChanged = true
     expirePendingReportSelect()
-    chart.setScale('x', { min: newMin, max: newMax })
-    scheduleRefetch(newMin, newMax)
+    const view = setXView(chart, newMin, newMax)
+    scheduleRefetch(view.min, view.max)
   }
 
   // Y-axis equivalent of `zoomBy` — no fetch needed at all (see
@@ -2336,11 +2374,12 @@
     zoomYBy(1 / ZOOM_FACTOR)
   }
 
-  // Moves the visible x-range to exactly [start, end] and loads the data for
-  // it. Shared by every jump/page control below — unlike the pan/zoom paths
-  // these are discrete, deliberate moves, so they fetch immediately rather
-  // than through the 150ms debounce (which exists to coalesce continuous
-  // gestures; there is nothing to coalesce here).
+  // Moves the visible x-range to [start, end] (kept inside the recording, see
+  // `setXView`) and loads the data for it. Shared by every jump/page control
+  // below — unlike the pan/zoom paths these are discrete, deliberate moves,
+  // so they fetch immediately rather than through the 150ms debounce (which
+  // exists to coalesce continuous gestures; there is nothing to coalesce
+  // here).
   function setVisibleRange(start: number, end: number): Promise<void> {
     if (!chart) return Promise.resolve()
     if (debounceTimer !== undefined) {
@@ -2348,8 +2387,8 @@
       debounceTimer = undefined
     }
     viewChanged = true
-    chart.setScale('x', { min: start, max: end })
-    return refetch(start, end)
+    const view = setXView(chart, start, end)
+    return refetch(view.min, view.max)
   }
 
   // Bottom X-range slider: same live-feedback-then-settle shape as
@@ -2363,12 +2402,10 @@
   function handleXSliderInput(e: Event) {
     if (!chart) return
     const center = Number((e.currentTarget as HTMLInputElement).value)
-    const newMin = center - sliderHalfWidth
-    const newMax = center + sliderHalfWidth
     viewChanged = true
     expirePendingReportSelect()
-    chart.setScale('x', { min: newMin, max: newMax })
-    maybeBufferAhead(newMin, newMax)
+    const view = setXView(chart, center - sliderHalfWidth, center + sliderHalfWidth)
+    maybeBufferAhead(view.min, view.max)
   }
 
   function handleXSliderChange() {
@@ -2870,7 +2907,7 @@
     }
     const { min, max } = chart.scales.x
     chart.setData(chart.data, true)
-    if (min != null && max != null) chart.setScale('x', { min, max })
+    if (min != null && max != null) setXView(chart, min, max)
     applyFilters()
   }
 
@@ -2911,12 +2948,58 @@
     pageBy(1)
   }
 
-  function toggleFiltered() {
-    showFiltered = !showFiltered
-  }
+  // The Trace menu. Choosing an item sets `showFiltered`; the effect that
+  // watches it refetches the visible range (and does nothing when the choice
+  // did not change).
+  const TRACE_DISPLAY_NOTE = 'This only changes the display, not the detected beats.'
+  let traceDescription: string = $derived(showFiltered ? 'High-pass, as used by beat detection' : 'As recorded')
+  let traceMenuLabel: string = $derived(
+    `Trace: ${showFiltered ? 'Filtered' : 'Raw'}, ${traceDescription.toLowerCase()}. Choose which waveform is drawn. ${TRACE_DISPLAY_NOTE}`,
+  )
+  let traceItems: MenuItem[] = $derived([
+    {
+      id: 'raw',
+      label: 'Raw: as recorded',
+      hint: `The recorded signal, exactly as recorded. ${TRACE_DISPLAY_NOTE}`,
+      checked: !showFiltered,
+      testid: 'trace-option-raw',
+      onSelect: () => (showFiltered = false),
+    },
+    {
+      id: 'filtered',
+      label: 'Filtered: high-pass, as used by beat detection',
+      hint: `The high-pass version of the signal that beat detection actually analyses (order and cutoff set in Settings). ${TRACE_DISPLAY_NOTE}`,
+      checked: showFiltered,
+      testid: 'trace-option-filtered',
+      onSelect: () => (showFiltered = true),
+    },
+  ])
 
   function toggleHideRejected() {
     hideRejected = !hideRejected
+  }
+
+  const REVIEW_GROUPS = ['reviewed', 'unreviewed'] as const
+
+  // The legend's Reviewed / Unreviewed chips drive the same `reviewFilter` as
+  // the "Show markers" buttons. Clicking a group that is shown hides it (only
+  // the other group stays); clicking a hidden one shows it again. The last
+  // group still shown cannot be hidden: that would hide every marker.
+  function toggleReviewGroup(group: 'reviewed' | 'unreviewed'): void {
+    if (reviewFilter === group) return
+    setReviewFilter(reviewFilter === 'all' ? (group === 'reviewed' ? 'unreviewed' : 'reviewed') : 'all')
+  }
+
+  function reviewGroupTitle(group: 'reviewed' | 'unreviewed'): string {
+    const name = group === 'reviewed' ? 'Reviewed' : 'Unreviewed'
+    const other = group === 'reviewed' ? 'Unreviewed' : 'Reviewed'
+    const what =
+      group === 'reviewed' ? 'filled: beats you have looked at or decided' : 'hollow: beats not looked at yet'
+    if (reviewFilter === group) {
+      return `${name} markers (${what}) are the only ones shown. One of Reviewed and Unreviewed must stay shown: show ${other} first to hide these.`
+    }
+    if (reviewFilter === 'all') return `Hide ${name.toLowerCase()} markers (${what})`
+    return `Show ${name.toLowerCase()} markers again (${what})`
   }
 
   function panZoomPlugin(): uPlot.Plugin {
@@ -3589,14 +3672,13 @@
     }
     viewChanged = false
     expirePendingReportSelect()
-    const end = defaultViewEnd(fullExtent)
-    chart.setScale('x', { min: fullExtent.start, max: end })
+    const view = setXView(chart, fullExtent.start, defaultViewEnd(fullExtent))
     // Reset View also hands Y back to auto-ranging, undoing any manual
     // Y-zoom — see `refetch`'s own comment on how.
     yManuallyZoomed = false
     // The whole file has nothing beyond it to buffer; a window into it is
     // fetched with the usual margin either side, as when the file opened.
-    void refetch(fullExtent.start, end, end >= fullExtent.end ? { pad: false } : {})
+    void refetch(view.min, view.max, view.max >= fullExtent.end ? { pad: false } : {})
   }
 
   // Positions a bad-data mark within the marks bar as a percentage of the
@@ -3910,7 +3992,7 @@
         <span
           class="legend-filter-label"
           data-testid="marker-filter-label"
-          title="Hide or show beat markers by category, review status or rejected. This never changes the signal or the saved beats."
+          title="Hide or show beat markers by category, by review status, or the beats marked Not arrhythmia. This never changes the signal or the saved beats."
         >
           Show markers
         </span>
@@ -3943,15 +4025,17 @@
         </button>
         <button
           type="button"
-          class="btn btn-sm"
+          class="btn btn-sm hide-not-arrhythmia-toggle"
           class:btn-active={hideRejected}
           data-testid="hide-rejected-toggle"
           aria-pressed={hideRejected}
-          title="Hide beats you have rejected, without deleting them"
+          title={hideRejected
+            ? 'Beats marked Not arrhythmia are hidden. Click to show them again.'
+            : 'Hide beats marked Not arrhythmia, without deleting them'}
           onclick={toggleHideRejected}
         >
           <Icon name="eye-off" size={14} />
-          {hideRejected ? 'Rejected hidden' : 'Hide rejected'}
+          <span class="btn-label-ellipsis">{hideRejected ? 'Not arrhythmia hidden' : 'Hide not arrhythmia'}</span>
         </button>
       </div>
     </div>
@@ -3960,21 +4044,23 @@
   <div class="ecg-graph-toolbar">
     <div class="trace-group" role="group" aria-label="Trace display">
       <span class="trace-group-label">Trace</span>
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-active={showFiltered}
-        data-testid="toggle-filtered-signal-button"
-        aria-pressed={showFiltered}
-        title="Choose which waveform is drawn. Raw: the recorded signal. Filtered: the high-pass version that beat detection actually analyses (order and cutoff set in Settings). This only changes the display, not the detected beats."
-        onclick={toggleFiltered}
+      <MenuButton
+        items={traceItems}
+        label={traceMenuLabel}
+        testid="toggle-filtered-signal-button"
+        triggerClass="btn btn-sm trace-menu-trigger"
       >
-        <Icon name="filter" size={14} />
-        {showFiltered ? 'Filtered' : 'Raw'}
-      </button>
-      <span class="trace-group-hint" data-testid="trace-filter-hint">
-        {showFiltered ? 'High-pass, as used by beat detection' : 'As recorded'}
-      </span>
+        {#snippet trigger()}
+          <Icon name="filter" size={14} />
+          <span class="trace-trigger-text">
+            <span class="trace-trigger-choice">{showFiltered ? 'Filtered' : 'Raw'}</span>
+            <span class="trace-trigger-desc" data-testid="trace-filter-hint" title={traceDescription}>
+              {traceDescription}
+            </span>
+          </span>
+          <Icon name="chevron-down" size={12} />
+        {/snippet}
+      </MenuButton>
     </div>
     <div class="zoom-group">
       <span class="zoom-group-label">X</span>
@@ -4317,32 +4403,65 @@
         {beatsOfInterest.length}
         {beatsOfInterest.length === 1 ? 'beat' : 'beats'} of interest
       </span>
-      <span
+      <!-- The review key doubles as a filter too, on the same state as the
+           "Show markers" buttons above the graph (`reviewFilter`,
+           `hideRejected`), so the two always agree. -->
+      <div
         class="legend-review-key"
         data-testid="legend-review-key"
-        title="Every marker below follows this: filled once you've judged it, hollow while unreviewed. A rejected beat also gets a strike through it, since it keeps its normal color and shape underneath."
+        role="group"
+        aria-label="Markers by review status"
+        title="Every marker follows this: filled once you've looked at or decided the beat, hollow while unreviewed. A beat marked Not arrhythmia also gets a strike through it, since it keeps its normal color and shape underneath. Click an entry to hide or show those markers."
       >
-        <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
-          <circle cx="0" cy="0" r="6" fill="currentColor" />
-        </svg>
-        Reviewed
-        <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
-          <circle cx="0" cy="0" r="5" fill="none" stroke="currentColor" stroke-width="1.5" />
-        </svg>
-        Unreviewed
-        <!-- A rejected beat draws as normal (see
+        {#each REVIEW_GROUPS as group (group)}
+          {@const active = reviewFilter !== (group === 'reviewed' ? 'unreviewed' : 'reviewed')}
+          {@const locked = reviewFilter === group}
+          <button
+            type="button"
+            class="legend-chip"
+            class:legend-chip--inactive={!active}
+            class:legend-chip--locked={locked}
+            data-testid={`legend-toggle-${group}`}
+            aria-pressed={active}
+            aria-disabled={locked}
+            title={reviewGroupTitle(group)}
+            onclick={() => toggleReviewGroup(group)}
+          >
+            <svg class="legend-swatch" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+              {#if group === 'reviewed'}
+                <circle cx="0" cy="0" r="6" fill="currentColor" />
+              {:else}
+                <circle cx="0" cy="0" r="5" fill="none" stroke="currentColor" stroke-width="1.5" />
+              {/if}
+            </svg>
+            <span class="legend-chip-label">{group === 'reviewed' ? 'Reviewed' : 'Unreviewed'}</span>
+          </button>
+        {/each}
+        <!-- A beat marked Not arrhythmia draws as normal (see
              rejectedOverlaySeries' own comment), so on its own it would
              render identically to a never-flagged "Normal" beat — this
              strike is the only thing on the chart that still marks it as
-             rejected rather than merely normal, so it needs its own key
-             entry here rather than being folded into the category legend
-             below. -->
-        <svg class="legend-swatch" data-testid="legend-rejected-marker" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
-          <circle cx="0" cy="0" r="6" fill="var(--color-success)" />
-          <line x1="-4.5" y1="-4.5" x2="4.5" y2="4.5" stroke="var(--color-danger)" stroke-width="2" stroke-linecap="round" />
-        </svg>
-        Rejected
-      </span>
+             not an arrhythmia rather than merely normal, so it needs its own
+             key entry here rather than being folded into the category
+             legend beside it. -->
+        <button
+          type="button"
+          class="legend-chip"
+          class:legend-chip--inactive={hideRejected}
+          data-testid="legend-toggle-not-arrhythmia"
+          aria-pressed={!hideRejected}
+          title={hideRejected
+            ? 'Not arrhythmia: beats marked Not arrhythmia are hidden. Click to show them again.'
+            : 'Not arrhythmia: hide beats marked Not arrhythmia (a normal marker with a strike through it), without deleting them'}
+          onclick={toggleHideRejected}
+        >
+          <svg class="legend-swatch" data-testid="legend-rejected-marker" width="12" height="12" viewBox="-8 -8 16 16" aria-hidden="true">
+            <circle cx="0" cy="0" r="6" fill="var(--color-success)" />
+            <line x1="-4.5" y1="-4.5" x2="4.5" y2="4.5" stroke="var(--color-danger)" stroke-width="2" stroke-linecap="round" />
+          </svg>
+          <span class="legend-chip-label">Not arrhythmia</span>
+        </button>
+      </div>
       {#each DISPLAY_CATEGORIES as cat (cat)}
         {@const active = !hiddenCategories.has(cat)}
         <button
@@ -4746,6 +4865,8 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
+    min-width: 0;
+    max-width: 100%;
   }
 
   .trace-group-label,
@@ -4755,9 +4876,52 @@
     color: var(--color-text, #1f2933);
   }
 
-  .trace-group-hint {
-    font-size: 0.75rem;
+  /* The Trace menu's button (rendered by MenuButton, hence :global): the
+     choice on top, its description underneath. Kept about as tall as the
+     other toolbar buttons, and free to shrink, the description giving way
+     with an ellipsis (its full text is in its title). */
+  .trace-group :global(.trace-menu-trigger) {
+    min-width: 0;
+    max-width: 100%;
+    gap: var(--space-1);
+    padding-top: 1px;
+    padding-bottom: 1px;
+    text-align: left;
+  }
+
+  .trace-group :global(.trace-menu-trigger svg) {
+    flex-shrink: 0;
+  }
+
+  .trace-trigger-text {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    line-height: 1.15;
+  }
+
+  .trace-trigger-desc {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.68rem;
+    font-weight: 400;
     color: var(--color-text-muted, #5b6b7c);
+  }
+
+  /* A button whose label may be cut short (full text in its title). */
+  .hide-not-arrhythmia-toggle {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .btn-label-ellipsis {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .beat-nav-counter {
@@ -5098,11 +5262,34 @@
 
   .legend-review-key {
     display: inline-flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
-    padding: 2px var(--space-2);
-    font-size: 0.7rem;
-    color: var(--color-text-muted);
+    gap: 2px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* The review chips may shrink, their label giving way with an ellipsis
+     (the full name is in each chip's title). */
+  .legend-review-key .legend-chip {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .legend-chip-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The only review group still shown: it cannot be hidden (see its title). */
+  .legend-chip--locked {
+    cursor: default;
+  }
+
+  .legend-chip--locked:hover {
+    background: none;
   }
 
   /* Matches the 55% opacity `displayCategoryColor` renders "Not yet
@@ -5116,6 +5303,8 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-1);
+    min-width: 0;
+    max-width: 100%;
     margin-left: auto;
   }
 </style>

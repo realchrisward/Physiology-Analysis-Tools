@@ -11,6 +11,7 @@
     persistBeats,
     putChannel,
     restoreReviewBackup,
+    updateBeatCategory,
   } from '../../lib/api/persistence'
   import EcgGraph from '../graph/EcgGraph.svelte'
   import ArrhythmiaControls from './ArrhythmiaControls.svelte'
@@ -996,11 +997,72 @@
   }
 
   function handleBeatSelect(beat: WindowBeat) {
+    // Choosing another beat ends "keep this one unreviewed" (see below).
+    if (beat.ts !== keepUnreviewedTs) keepUnreviewedTs = null
     selectedBeat = beat
     reportFocusTs = null
-    if (lastPersistedChannel !== activeChannel) {
-      void ensureChannelPersisted(activeChannel)
+    selectionPersisted = lastPersistedChannel !== activeChannel ? ensureChannelPersisted(activeChannel) : Promise.resolve()
+  }
+
+  // ---- Marking beats reviewed ---------------------------------------------
+  // A beat counts as reviewed (looked at, no decision yet) once it has been
+  // looked at: selected for SEEN_AFTER_MS without moving on, or acted on (a
+  // flag removed, Unsure ticked; a decision marks it anyway). Clicking quickly
+  // through beats leaves them unreviewed.
+  const SEEN_AFTER_MS = 3000
+
+  // Settles once the selected beat's channel is saved: the review actions
+  // need the beats in the database.
+  let selectionPersisted: Promise<unknown> = Promise.resolve()
+
+  // The beat the technician has just marked unreviewed: looking at it longer
+  // must not undo that. Cleared when another beat is selected.
+  let keepUnreviewedTs: number | null = $state(null)
+
+  function isUnreviewed(beat: WindowBeat | null): boolean {
+    return !!beat && (!beat.review_state || beat.review_state === 'unreviewed')
+  }
+
+  // The selected beat's ts while it is waiting to count as looked at. A
+  // number, so the timer below restarts only when the beat itself changes
+  // (not when the same beat's details are refreshed or it is clicked again).
+  let seenCandidate: number | null = $derived.by(() => {
+    const beat: WindowBeat | null = selectedBeat
+    return beat && isUnreviewed(beat) && beat.ts !== keepUnreviewedTs ? beat.ts : null
+  })
+
+  $effect(() => {
+    const ts = seenCandidate
+    if (ts === null) return
+    const channel = untrack(() => activeChannel)
+    const timer = setTimeout(() => void markSeenWhenSaved(ts, channel), SEEN_AFTER_MS)
+    return () => clearTimeout(timer)
+  })
+
+  function markSeenWhenSaved(ts: number, channel: string): Promise<void> {
+    return selectionPersisted.then(() => markSeen(ts, channel))
+  }
+
+  // An action on the selected beat that leaves it unreviewed (removing a
+  // flag, ticking Unsure before deciding) still means it was looked at.
+  function handleBeatTouched() {
+    if (selectedBeat && isUnreviewed(selectedBeat)) void markSeenWhenSaved(selectedBeat.ts, activeChannel)
+  }
+
+  // Marks the beat reviewed, if it is still the selected one and still
+  // unreviewed. A decision made meanwhile wins: the answer only lands while
+  // that is still so.
+  async function markSeen(ts: number, channel: string) {
+    if (destroyed || channel !== activeChannel || lastPersistedChannel !== channel) return
+    if (selectedBeat?.ts !== ts || (selectedBeat.review_state && selectedBeat.review_state !== 'unreviewed')) return
+    const result = await updateBeatCategory(path, ts, 'seen')
+    if (destroyed || result.status !== 'ok' || result.error) return
+    if (selectedBeat?.ts === ts && (!selectedBeat.review_state || selectedBeat.review_state === 'unreviewed')) {
+      selectedBeat = { ...selectedBeat, review_state: result.review_state ?? 'reviewed' }
     }
+    // Only the marker fills in: the comparison with a loaded report is about
+    // decisions, which did not change.
+    if (channel === activeChannel) refreshGraphBeats(false)
   }
 
   // A deleted beat is gone from beat_cache and SQLite alike, so the
@@ -1035,6 +1097,16 @@
     // makes it *safe* to call again, not *useful* to call again on this
     // path.
     if (result.status === 'ok' && !result.error) {
+      if (selectedBeat && result.ts === selectedBeat.ts) {
+        const wasUnreviewed = isUnreviewed(selectedBeat)
+        if (result.review_state === 'unreviewed') {
+          // Unreviewed before and after: an action that doesn't decide (a
+          // flag removed) — the beat was looked at. Reviewed before: the
+          // technician marked it unreviewed, and it stays so while selected.
+          if (wasUnreviewed) void markSeenWhenSaved(result.ts, activeChannel)
+          else keepUnreviewedTs = result.ts
+        }
+      }
       // The beat panel is mounted afresh when it moves between the side panel
       // and the focus overlay, and starts from the beat it is handed — which is
       // the one fetched when it was selected. Keep that current with what was
@@ -1048,9 +1120,9 @@
         }
       }
       refreshGraphBeats()
-      // Rejecting a beat clears its flags, so it drops out of the
-      // beat-of-interest navigation; confirming or reassigning can change
-      // the set too. Re-read rather than trying to patch the list locally.
+      // A rejected beat drops out of the beat-of-interest navigation, and
+      // confirming, reassigning or taking a decision off can change the set
+      // too. Re-read rather than trying to patch the list locally.
       void refreshBeatsOfInterest()
     }
   }
@@ -1192,6 +1264,114 @@
       }
     }
   }
+
+  // ---- Folding toolbar ----------------------------------------------------
+  // The top bar (channel, beat detection, arrhythmia, report) can fold into
+  // one line of its current values, leaving the room to the graph and its
+  // legend. Folded, it opens over the graph while the pointer rests on it, or
+  // while the keyboard is in it, and folds back after. Remembered.
+  const TOOLBAR_FOLDED_KEY = 'pat.review.toolbarFolded'
+
+  function loadToolbarFolded(): boolean {
+    try {
+      return localStorage.getItem(TOOLBAR_FOLDED_KEY) !== 'false'
+    } catch {
+      return true
+    }
+  }
+
+  let toolbarFolded: boolean = $state(loadToolbarFolded())
+  let toolbarHover: boolean = $state(false)
+  let toolbarKeyboard: boolean = $state(false)
+  let toolbarWrapEl: HTMLDivElement | undefined = $state()
+  let toolbarHoverTimer: ReturnType<typeof setTimeout> | null = null
+  // Renaming a channel opens a dialog from inside the bar: it stays open for it.
+  let toolbarOpen = $derived(toolbarFolded && (toolbarHover || toolbarKeyboard || renamingChannel !== null))
+
+  function setToolbarFolded(folded: boolean) {
+    toolbarFolded = folded
+    toolbarHover = false
+    try {
+      localStorage.setItem(TOOLBAR_FOLDED_KEY, String(folded))
+    } catch {
+      // Not remembered; nothing else depends on it.
+    }
+  }
+
+  // A short pause before opening and before folding, so a pointer passing
+  // over the bar on its way to the graph doesn't flash it open.
+  function setToolbarHover(value: boolean, delayMs: number) {
+    if (toolbarHoverTimer !== null) clearTimeout(toolbarHoverTimer)
+    toolbarHoverTimer = setTimeout(() => {
+      toolbarHoverTimer = null
+      toolbarHover = value
+    }, delayMs)
+  }
+
+  // Keyboard focus (and an open list: a channel <select>) keeps it open; a
+  // button clicked with the mouse doesn't, so the bar folds once the pointer
+  // leaves it.
+  function onToolbarFocusIn(event: FocusEvent) {
+    const target = event.target as HTMLElement | null
+    if (!target) return
+    let keyboard = ['SELECT', 'INPUT', 'TEXTAREA'].includes(target.tagName)
+    try {
+      keyboard ||= target.matches(':focus-visible')
+    } catch {
+      // A browser without :focus-visible: treat focus as the keyboard's.
+      keyboard = true
+    }
+    toolbarKeyboard = keyboard
+  }
+
+  function onToolbarFocusOut(event: FocusEvent) {
+    const next = event.relatedTarget as Node | null
+    if (next && toolbarWrapEl?.contains(next)) return
+    toolbarKeyboard = false
+  }
+
+  onMount(() => () => {
+    if (toolbarHoverTimer !== null) clearTimeout(toolbarHoverTimer)
+  })
+
+  let beatsSummary = $derived(
+    detection.status === 'pending'
+      ? fileRow?.status === 'queued'
+        ? 'queued…'
+        : 'detecting…'
+      : detection.status === 'ok'
+        ? `${(detection.count ?? 0).toLocaleString()} beats${detection.meanHr !== null ? ` · ${formatHeartRate(detection.meanHr)} bpm` : ''}`
+        : detection.status === 'error'
+          ? 'detection failed'
+          : '—',
+  )
+
+  const METHOD_NAMES: Record<string, string> = { heuristic: 'Heuristic', unsupervised: 'Unsupervised' }
+
+  let arrhythmiaSummary = $derived.by(() => {
+    if (autoArrhythmiaRunning) return 'finding beats of interest…'
+    const flagged = beatsOfInterest.length === 0 ? 'none flagged' : `${beatsOfInterest.length.toLocaleString()} flagged`
+    if (arrhythmiaDone.length === 0) return flagged
+    return `${arrhythmiaDone.map((method) => METHOD_NAMES[method] ?? method).join(' + ')} · ${flagged}`
+  })
+
+  let reportSummary = $derived.by(() => {
+    const name = reportSession.reportPath ? fileNameOf(reportSession.reportPath) : ''
+    switch (reportSession.status) {
+      case 'loading':
+        return 'reading…'
+      case 'choosing':
+        return `${name}: choose how to use it`
+      case 'ready':
+        return `comparing ${name}`
+      case 'error':
+        return 'could not be loaded'
+      case 'missing':
+        return `${name} not found`
+      default:
+        return 'none'
+    }
+  })
 </script>
 
 <!-- Dropping a report file anywhere on the workspace loads it as report labels.
@@ -1210,8 +1390,65 @@
        and report labels as four labeled groups (divided by a thin rule) in a
        single row. The wrapper is a size container: as the bar narrows it
        compacts in steps (see the @container rules) instead of wrapping. -->
-  <div class="review-toolbar-wrap">
-  <div class="review-toolbar">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="review-toolbar-wrap"
+    class:toolbar-folded={toolbarFolded}
+    class:toolbar-open={toolbarOpen}
+    data-testid="review-toolbar-wrap"
+    bind:this={toolbarWrapEl}
+    onmouseenter={() => setToolbarHover(true, 120)}
+    onmouseleave={() => setToolbarHover(false, 300)}
+    onfocusin={onToolbarFocusIn}
+    onfocusout={onToolbarFocusOut}
+  >
+  {#if toolbarFolded}
+    <!-- Folded: the current values on one line. Pointing at it opens the
+         controls over the graph. -->
+    <div class="toolbar-summary" data-testid="toolbar-summary">
+      <span class="summary-item" title={renamed ? `${selectedLabel} (${selectedChannel})` : selectedLabel}>
+        <span class="summary-label">Channel</span>
+        <span class="summary-value" data-testid="toolbar-summary-channel"
+          >{selectedLabel}{#if renamed}<span class="text-muted"> ({selectedChannel})</span>{/if}</span
+        >
+      </span>
+      <span class="summary-item" title={beatsSummary}>
+        <span class="summary-label">Beats</span>
+        <span class="summary-value" data-testid="toolbar-summary-beats">{beatsSummary}</span>
+      </span>
+      <span class="summary-item" title={arrhythmiaSummary}>
+        <span class="summary-label">Arrhythmia</span>
+        <span class="summary-value" data-testid="toolbar-summary-arrhythmia">{arrhythmiaSummary}</span>
+      </span>
+      <span class="summary-item" title={reportSummary}>
+        <span class="summary-label">Report</span>
+        <span class="summary-value" data-testid="toolbar-summary-report">{reportSummary}</span>
+      </span>
+      <button
+        type="button"
+        class="icon-btn toolbar-fold-btn"
+        data-testid="toolbar-unfold-button"
+        title="Keep the controls open"
+        aria-label="Keep the controls open"
+        onclick={() => setToolbarFolded(false)}
+      >
+        <Icon name="chevron-down" size={16} />
+      </button>
+    </div>
+  {/if}
+  <div class="review-toolbar" data-testid="review-toolbar">
+    <button
+      type="button"
+      class="icon-btn toolbar-fold-btn toolbar-fold-btn--corner"
+      data-testid="toolbar-fold-button"
+      title={toolbarFolded
+        ? 'Keep the controls open'
+        : 'Fold the controls into one line (they open again when you point at them)'}
+      aria-label={toolbarFolded ? 'Keep the controls open' : 'Fold the controls into one line'}
+      onclick={() => setToolbarFolded(!toolbarFolded)}
+    >
+      <Icon name={toolbarFolded ? 'chevron-down' : 'chevron-up'} size={14} />
+    </button>
     <div class="toolbar-group">
       <span class="toolbar-group-label">Channel</span>
       <!-- The select and its rename button are one joined control. A native
@@ -1594,6 +1831,7 @@
             {path}
             beat={selectedBeat}
             onUpdated={handleCategoryUpdated}
+            onTouched={handleBeatTouched}
             onDeleted={handleBeatDeleted}
           />
         {/key}
@@ -1663,6 +1901,7 @@
               {path}
               beat={selectedBeat}
               onUpdated={handleCategoryUpdated}
+              onTouched={handleBeatTouched}
               onDeleted={handleBeatDeleted}
             />
           {/key}
@@ -1837,9 +2076,94 @@
      the sidebar and the beat panel taking space. */
   .review-toolbar-wrap {
     container: review-toolbar / inline-size;
+    position: relative;
+  }
+
+  /* Folded: the bar's controls open over the graph (the summary line keeps
+     its place), so the graph never jumps as they come and go. */
+  .toolbar-folded .review-toolbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    box-shadow: var(--shadow-md);
+  }
+
+  .toolbar-folded:not(.toolbar-open) .review-toolbar {
+    display: none;
+  }
+
+  .toolbar-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-5);
+    min-height: 34px;
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    overflow: hidden;
+    cursor: default;
+  }
+
+  .summary-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .summary-label {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+  }
+
+  .summary-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .toolbar-fold-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    width: 26px;
+    height: 26px;
+  }
+
+  /* Room for the fold button at every width (beats the narrow layouts' padding). */
+  .review-toolbar.review-toolbar {
+    padding-right: 36px;
+  }
+
+  /* In the full bar: tucked into its top-right corner, out of the groups' way. */
+  .toolbar-fold-btn--corner {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    margin: 0;
+    width: 22px;
+    height: 22px;
+  }
+
+  @container review-toolbar (max-width: 640px) {
+    .toolbar-summary {
+      gap: var(--space-3);
+    }
+
+    .summary-item:nth-of-type(n + 3) {
+      display: none;
+    }
   }
 
   .review-toolbar {
+    position: relative;
     display: flex;
     /* Top-aligned so every group's heading sits on one line. */
     align-items: flex-start;

@@ -269,9 +269,9 @@ class FileSummary(BaseModel):
     mean_hr: float | None = None
     # Flagged and not rejected, or confirmed.
     arrhythmia_beats: int = 0
-    # Flagged, neither confirmed nor rejected yet.
+    # Flagged and not looked at yet (review_state unreviewed).
     to_review: int = 0
-    # Confirmed or rejected.
+    # Flagged and looked at, or with a decision.
     reviewed: int = 0
     uncertain: int = 0
     bad_data_marks: int = 0
@@ -419,7 +419,8 @@ class DatabaseInfoResult(BaseModel):
 class CategoryUpdateRequest(BaseModel):
     path: str
     ts: float
-    # confirm | reject | reassign | remove_flag | set_uncertain
+    # confirm | reject | reassign | remove_flag | set_uncertain | seen
+    # (unreviewed -> reviewed) | clear_decision (back to reviewed) | unreview
     action: str
     category: str | None = None
     # The "not sure" mark. With confirm/reject/reassign it is saved together
